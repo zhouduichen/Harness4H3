@@ -4,7 +4,8 @@ from harness4h3.archive.store import CandidateStore
 from harness4h3.config import EvolutionConfig
 from harness4h3.harness.state import Task
 from harness4h3.memory.trajectory import Trajectory
-from harness4h3.self_improve.evolve import EvolutionController, diagnose
+from harness4h3.archive.store import Candidate, default_policy
+from harness4h3.self_improve.evolve import Diagnosis, EvolutionController, diagnose, propose_mutation
 
 
 def trajectory(task_id, score, failure=None, critical=False, version="H0", split="dev"):
@@ -47,3 +48,12 @@ def test_evolution_drops_critical_regression(tmp_path):
     assert outcome.status == "dropped"
     assert store.active_id == "H0"
 
+
+def test_low_score_mutations_advance_without_repeating_same_patch():
+    diagnosis = Diagnosis("low_score", ["a", "b"], "repeated low score")
+    h0 = Candidate("H0", None, 0, "baseline", {}, "", default_policy())
+    h1 = propose_mutation(h0, diagnosis, "H1")
+    assert h1 is not None
+    h2 = propose_mutation(h1, diagnosis, "H2")
+    assert h2 is not None
+    assert h2.patch != h1.patch

@@ -79,9 +79,30 @@ def propose_mutation(parent: Candidate, diagnosis: Diagnosis, candidate_id: str)
     if failure == "low_luma":
         mutation_type = "prompt"
         patch = _append_suffix(policy, "Use balanced exposure with clearly visible subjects and avoid dark or underexposed frames.")
-    elif failure in {"temporal_instability", "low_score"}:
+    elif failure == "temporal_instability":
         mutation_type = "prompt"
         patch = _append_suffix(policy, "Keep subject identity, geometry, background, and motion temporally consistent across all frames.")
+    elif failure == "low_score":
+        prompt_options = (
+            "Keep subject identity, geometry, background, and motion temporally consistent across all frames.",
+            "Stage the requested actions in a clear chronological sequence with smooth transitions and stable composition.",
+            "Use balanced exposure, readable silhouettes, and natural motion without frozen or flickering frames.",
+        )
+        patch = None
+        mutation_type = "prompt"
+        for sentence in prompt_options:
+            patch = _append_suffix(policy, sentence)
+            if patch is not None:
+                break
+        if patch is None:
+            workflow = policy.setdefault("workflow", {})
+            current_steps = int(workflow.get("steps", 4))
+            if current_steps < 8:
+                workflow["steps"] = current_steps + 1
+                mutation_type = "workflow"
+                patch = {"op": "replace", "path": "workflow.steps", "value": current_steps + 1}
+            else:
+                return None
     elif failure == "backend_timeout":
         workflow = policy.setdefault("workflow", {})
         current = int(workflow.get("steps", 8))

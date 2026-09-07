@@ -1,0 +1,29 @@
+backend:
+  base_url: http://127.0.0.1:8188
+  request_timeout_s: 30
+  poll_interval_s: 2
+  task_timeout_s: 1800
+
+workflow:
+  template: ../examples/workflow_api.json
+  prompt_target: {node_id: "131", input: prompt}
+  seed_target: {node_id: "129", input: noise_seed}
+  mutable:
+    steps: {node_id: "124", input: steps}
+    cfg: {node_id: "126", input: cfg}
+
+runtime:
+  output_dir: ../var/power-study/outputs
+  trajectory_path: ../var/power-study/trajectories.jsonl
+  archive_dir: ../var/power-study/archive
+  tasks_path: ../examples/tasks.yaml
+
+evaluator:
+  command: []
+  timeout_s: 120
+
+evolution:
+  min_delta: 0.01
+  recurrence_threshold: 2
+  max_regressions: 0
+  low_score_threshold: 0.95
