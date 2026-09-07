@@ -1,4 +1,5 @@
-from experiments.power_study import bootstrap_ci, build_tasks
+from experiments.power_study import bootstrap_ci, build_tasks, is_retryable_interruption
+from harness4h3.memory.trajectory import Trajectory
 
 
 def test_power_study_has_requested_prompt_and_seed_counts():
@@ -15,3 +16,19 @@ def test_bootstrap_ci_is_deterministic_and_positive():
     assert first == second
     assert first[0] > 0
 
+
+def test_resource_guard_interruption_is_retryable():
+    item = Trajectory(
+        task_id="dev-001-s42",
+        split="dev",
+        harness_version="H0",
+        inputs={},
+        steps=[{"action": "failure", "message": "execution_interrupted"}],
+        final_result=None,
+        evaluation={},
+        score=0.0,
+        failure_type="backend_execution",
+        critical_regression=True,
+        cost={},
+    )
+    assert is_retryable_interruption(item)

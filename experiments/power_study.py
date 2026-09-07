@@ -161,6 +161,12 @@ def latest_by_task(history: Iterable[Trajectory], version: str, split: str) -> D
     return result
 
 
+def is_retryable_interruption(item: Trajectory) -> bool:
+    if item.failure_type != "backend_execution":
+        return False
+    return "execution_interrupted" in json.dumps(item.steps, ensure_ascii=False)
+
+
 def run_missing(
     runner: HarnessRunner,
     store: TrajectoryStore,
@@ -171,7 +177,7 @@ def run_missing(
     existing = latest_by_task(store.read(), candidate.id, tasks[0].split) if tasks else {}
     total = len(tasks)
     for index, task in enumerate(tasks, 1):
-        if task.id in existing:
+        if task.id in existing and not is_retryable_interruption(existing[task.id]):
             continue
         guard = ResourceGuard(base_url)
         guard.start()
