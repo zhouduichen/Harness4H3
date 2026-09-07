@@ -1,0 +1,2 @@
+"""Minimal tool registry."""
+

@@ -1,0 +1,2 @@
+"""Immutable candidate archive."""
+
