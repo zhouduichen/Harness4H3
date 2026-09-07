@@ -44,6 +44,8 @@ COMFYUI_BASE_URL=http://your-comfyui-host:8188 \
 
 配置中的 workflow mutation allowlist 只有 `steps`、`cfg` 和显式声明的 `stability` target。模型名、LoRA、VAE、输出路径和任意节点不能被 candidate 自行修改。
 
+示例 MiniMax-H3 Turbo workflow 默认启用 `low_vram`，以便在 16 GB 级显卡上保留安全余量。只有完成独立显存验证后才应关闭它。
+
 ## 使用流程
 
 建立 H0 并运行 dev 任务：
@@ -118,4 +120,3 @@ Candidate 文件创建后不覆盖。被 drop 的 candidate 仍保留 outcome �
 ## V1 非目标
 
 本版本不训练 MiniMax-H3，不修改模型或 ComfyUI 源码，不做多 Agent、任意源码自修改、复杂 planner、workflow DSL、数据库、向量检索、effect model、SFT 或 RL。语义美学评分需要通过外部 evaluator 接入，不由 Harness 或 MiniMax-H3 自报。
-
