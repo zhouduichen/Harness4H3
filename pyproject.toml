@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harness4h3"
+version = "0.1.0"
+description = "A lightweight self-improving harness for a frozen MiniMax-H3 ComfyUI backend"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "PyYAML>=6.0,<7",
+  "opencv-python-headless>=4.8,<5",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
+[project.scripts]
+harness4h3 = "harness4h3.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["harness4h3*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

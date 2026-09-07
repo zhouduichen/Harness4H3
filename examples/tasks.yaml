@@ -1,0 +1,55 @@
+tasks:
+  - id: sanity-visible-subject
+    split: sanity
+    seed: 42
+    prompt: >-
+      A small yellow dragon stands in a bright room, waves once, then smiles at the camera.
+      Motion is smooth and the subject remains clearly visible.
+    constraints:
+      duration: short
+      camera: stable slow push-in
+    expected:
+      width: 352
+      height: 640
+      frames: 22
+
+  - id: dev-character-consistency
+    split: dev
+    seed: 3407
+    prompt: >-
+      A fixed cute yellow dragon with a round body turns toward a window and back.
+      Its face, horns, tail, proportions, colors, and the room remain consistent.
+    constraints:
+      avoid: deformation and flicker
+      lighting: warm and bright
+    expected:
+      width: 352
+      height: 640
+      frames: 22
+
+  - id: dev-motion-stability
+    split: dev
+    seed: 8888
+    prompt: >-
+      A yellow dragon walks two steps, stops, blinks, and gently swings its tail in a stable room.
+    constraints:
+      motion: smooth natural motion
+      camera: locked composition
+    expected:
+      width: 352
+      height: 640
+      frames: 22
+
+  - id: heldout-object-interaction
+    split: heldout
+    seed: 1701
+    prompt: >-
+      A yellow dragon carefully picks up a red ball, holds it, and places it on a small table.
+    constraints:
+      interaction: hands and ball remain coherent
+      lighting: subject fully visible
+    expected:
+      width: 352
+      height: 640
+      frames: 22
+
