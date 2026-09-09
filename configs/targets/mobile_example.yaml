@@ -1,0 +1,25 @@
+id: mobile_h3_v1
+
+hardware:
+  type: mobile
+  name: target_device
+  backend: fake
+
+constraints:
+  max_model_size_gb: 4
+  max_peak_memory_gb: 6
+  max_latency_s: 30
+
+quality:
+  max_quality_drop: 0.05
+
+video:
+  resolution: 480p
+  duration_s: 5
+  fps: 16
+
+priority:
+  - feasibility
+  - quality
+  - latency
+  - memory

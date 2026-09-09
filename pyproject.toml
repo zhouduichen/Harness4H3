@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harness4h3"
-version = "0.1.0"
-description = "A lightweight self-improving harness for a frozen MiniMax-H3 ComfyUI backend"
+version = "0.2.0"
+description = "EvoGen-RSI Phase-I model optimization harness for MiniMax H3"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [

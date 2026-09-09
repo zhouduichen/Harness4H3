@@ -1,122 +1,103 @@
 # Harness4H3
 
-Harness4H3 是面向冻结 MiniMax-H3 ComfyUI 视频生成后端的轻量级 self-improving harness。它确定性地执行任务、保存完整 trajectory、通过独立 evaluator 评分，并只在 sanity、replay、dev benchmark 全部通过后提升新的 prompt、context 或 workflow candidate。
+EvoGen-RSI 是长期研究框架；Harness4H3 是其 Phase I reference implementation。
 
-## 当前能力
+```text
+Fixed Strong LLM Controller
+        +
+H3-specific Model Optimization Harness
+        +
+MiniMax H3 / H3-derived Student
+        +
+Real Quality + Hardware Evaluation
+        ↓
+Autonomous Model Optimization
+```
 
-- MiniMax-H3 ComfyUI adapter：`/prompt` 提交、`/history/<id>` 轮询、`/view` 下载。
-- 受限 context/workflow 渲染：candidate 只能修改配置 allowlist 中的字段。
-- Append-only JSONL trajectory：记录 context digest、动作、结果、失败类型、评分与耗时，并脱敏常见凭据字段。
-- 独立 evaluator 子进程：验证生成成功、artifact、视频解码、分辨率、帧数、亮度、黑帧和基础帧间稳定性。
-- RSI loop：聚合重复失败，每个 candidate 只应用一个 mutation，完成 sanity/replay/dev 后 keep 或 drop。
-- 不可变 candidate archive、原子 active 指针及 H0 → H1 → H2 lineage。
+Phase I 的 Controller LLM 权重固定，Harness 只允许它产生结构化 `ExperimentPlan` 并选择已注册的模型级 Operator。模型修改必须产生不可变的 `M0000`、`M0001`… candidate，经独立质量/硬件 evaluator 验证后进入 Pareto archive。Phase I 不训练 Controller LLM、不演化 Harness、不做 kernel/compiler search，也不允许 Controller 执行 shell 或修改源码、evaluator、benchmark 与目标约束。
 
-## 安装
+当前正式交付为 M0 + M1：完全离线 Fake H3 closed loop。真实 LLM、真实 H3 Inspector、真实 Quantize/Benchmark 尚未冒充实现。
 
-需要 Python 3.9 或更高版本。建议使用独立环境：
+## 离线闭环
+
+安装 Python 3.9+ 环境：
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install .
-```
-
-开发和测试：
-
-```bash
 .venv/bin/python -m pip install '.[test]'
-.venv/bin/python -m pytest -q
 ```
 
-## 配置
-
-默认配置在 `configs/default.yaml`，示例任务和 API-format workflow 在 `examples/`。先根据实际 ComfyUI workflow 调整 node id、input 名和模型文件名，再执行离线校验：
+验证固定 TargetProfile：
 
 ```bash
-.venv/bin/python -m harness4h3 --config configs/default.yaml validate-config --json
+.venv/bin/python -m harness4h3 validate \
+  --target configs/targets/mobile_example.yaml --json
 ```
 
-默认 endpoint 是 `http://127.0.0.1:8188`。可在不修改配置文件的情况下覆盖：
+执行 Fake H3 优化：
 
 ```bash
-COMFYUI_BASE_URL=http://your-comfyui-host:8188 \
-  .venv/bin/python -m harness4h3 --config configs/default.yaml run --split sanity --json
+.venv/bin/python -m harness4h3 optimize \
+  --target configs/targets/mobile_example.yaml \
+  --session-dir var/evogen \
+  --session-id mobile_h3_fake_001 \
+  --json
 ```
 
-配置中的 workflow mutation allowlist 只有 `steps`、`cfg` 和显式声明的 `stability` target。模型名、LoRA、VAE、输出路径和任意节点不能被 candidate 自行修改。
-
-示例 MiniMax-H3 Turbo workflow 默认启用 `low_vram`，以便在 16 GB 级显卡上保留安全余量。只有完成独立显存验证后才应关闭它。
-
-## 使用流程
-
-建立 H0 并运行 dev 任务：
-
-```bash
-.venv/bin/python -m harness4h3 --config configs/default.yaml run --split dev
-```
-
-从 H0 的重复失败生成独立 candidate，并执行门禁：
-
-```bash
-.venv/bin/python -m harness4h3 --config configs/default.yaml evolve --json
-```
-
-查看 lineage：
-
-```bash
-.venv/bin/python -m harness4h3 --config configs/default.yaml lineage
-```
-
-对既有 artifact 重新评价，结果写入单独 JSONL，不改写原 trajectory：
-
-```bash
-.venv/bin/python -m harness4h3 --config configs/default.yaml evaluate \
-  --trajectory var/trajectories.jsonl --output var/reevaluated.jsonl
-```
-
-held-out 任务只用于版本差异报告，不参与诊断或 promotion：
-
-```bash
-.venv/bin/python -m harness4h3 --config configs/default.yaml run --split heldout
-```
-
-## Evaluator 信任边界
-
-Harness 通过 JSON stdin/stdout 调用 evaluator。若 `evaluator.command` 为空，使用内置独立 worker；也可以配置外部 VLM evaluator。外部程序必须返回：
-
-```json
-{
-  "score": 0.82,
-  "metrics": {"semantic_quality": 0.86, "temporal_consistency": 0.78},
-  "critical_regression": false,
-  "failure_type": null
-}
-```
-
-非法 JSON、超时、非零退出码、缺少 score/metrics 或越界分数都采用 fail-closed 行为。Candidate policy 无法修改 evaluator 命令、基准任务或 promotion 阈值。
-
-## 数据目录
-
-默认运行数据位于 `var/`，不提交 Git：
+确定性结果为：
 
 ```text
-var/
-├── outputs/Hx/<task-id>/
-├── trajectories.jsonl
-└── archive/
-    ├── active.json
-    ├── candidates/Hx.json
-    └── outcomes/Hx.json
+M0000 (quality=.90, latency=60s, memory=12GB)
+  → quantize
+M0001 (quality=.891, latency=48s, memory=7.8GB)
+  → step_distill
+M0002 (quality=.85536, latency=26.4s, memory=5.46GB)
+  → target_satisfied
 ```
 
-Candidate 文件创建后不覆盖。被 drop 的 candidate 仍保留 outcome 与 parent 关系；promotion 只原子更新 `active.json`。
+Fake StepDistill 除规格给出的 latency `×0.55`、quality `×0.96` 外，还把工作内存设为 `×0.70`；这是为了解决规格示例中 `12 × 0.65 > 6` 与要求两步达到 6GB 目标之间的数值矛盾。该效果仅属于 fake simulator，不代表真实算法 claim。
 
-## 故障恢复
+查看模型分支、Pareto front 与 append-only experiment records：
 
-- 提交前的配置、task 或 workflow 错误不会访问 ComfyUI。
-- POST `/prompt` 不自动重试，避免不确定状态下重复生成；GET history 可有限重试。
-- 远端执行、下载或 evaluator 失败仍会写 trajectory，并保留稳定的 failure type。
-- 中断不会覆盖 parent candidate；重新运行前先检查 ComfyUI queue 和已生成 artifact。
+```bash
+.venv/bin/python -m harness4h3 lineage --session-dir var/evogen --json
+.venv/bin/python -m harness4h3 pareto --session-dir var/evogen --json
+.venv/bin/python -m harness4h3 replay --session-dir var/evogen --json
+```
 
-## V1 非目标
+每个 session 只在初始化时读取一次 TargetProfile。`session.json` 原子保存 current model、预算和失败计数；相同 session 可在中断后恢复。每个实验目录保存 controller request/response、plan、validated plan、operator result 与 evaluation。
 
-本版本不训练 MiniMax-H3，不修改模型或 ComfyUI 源码，不做多 Agent、任意源码自修改、复杂 planner、workflow DSL、数据库、向量检索、effect model、SFT 或 RL。语义美学评分需要通过外部 evaluator 接入，不由 Harness 或 MiniMax-H3 自报。
+## Phase I 安全边界
+
+验证顺序固定为：
+
+```text
+SchemaValidator
+→ PolicyValidator
+→ BudgetValidator
+→ OperatorValidator
+→ Executor
+```
+
+当前 fake registry 只开放 `inspect`、`quantize`、`step_distill`、`rollback`。`CreateStudent`、`Distill`、`Prune`、真实 `Benchmark`、任意 shell、CUDA/Triton 和源码修改均不可执行。
+
+Evaluator 是独立权威。Pareto 先比较 hard-constraint feasibility，再比较 quality、latency、memory、model size 与 energy；不把单一 scalar reward 当作核心排序。
+
+## 测试
+
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/python -m compileall -q harness4h3 tests
+```
+
+默认测试不访问网络，不需要 GPU、ComfyUI 或 H3 checkpoint。闭环测试覆盖成功、非法 operator、非法 LLM plan、operator failure、training OOM、critical quality regression、Pareto branching、budget stop、重复失败、crash recovery 和 target reached。
+
+## 旧版兼容
+
+旧的冻结 ComfyUI workflow/prompt evolution 已移到 `harness4h3/legacy/workflow_evolution.py`；旧导入路径仍可用，但 EvoGen Phase I 主循环不依赖它。ComfyUI HTTP adapter 位于 `harness4h3/backends/comfyui.py`，只负责 artifact generation，不再代表 H3 model state。
+
+旧的 `run`、`evaluate`、`evolve`、`validate-config` 与 `legacy-lineage` 命令暂时保留用于历史实验重放。新研究主线使用 `validate`、`inspect`、`optimize`、`lineage`、`pareto` 与 `replay`。
+
+## 下一里程碑
+
+第二交付将依次加入 structured LLM provider、真实 H3 checkpoint inspector、受限 external-script executor，以及第一个真实 Quantize + quality/hardware benchmark。只有得到真实 H3-derived child 的可测量效率改善且质量回归在阈值内，才算进入科研成功，而不只是工程闭环成功。

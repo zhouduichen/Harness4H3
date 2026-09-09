@@ -9,13 +9,27 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from . import Harness4H3Error
 from .archive.store import CandidateStore
+from .archive.model_candidate import ModelCandidate
+from .archive.model_store import ModelStore
+from .archive.pareto import ParetoArchive
 from .config import AppConfig, ConfigError, load_config
+from .controller.loop import OptimizationLoop
+from .controller.provider import RuleBasedMockController
+from .controller.schemas import BudgetState
+from .evaluator.composite import CompositeEvaluator
+from .evaluator.constraints import ConstraintEvaluator
 from .evaluator.evaluator import SubprocessEvaluator, make_request
+from .evaluator.hardware import FakeHardwareEvaluator
+from .evaluator.quality import FakeQualityEvaluator
 from .harness.loop import HarnessRunner, load_workflow
 from .harness.state import Task, load_tasks
+from .h3.fake import FakeH3Model
+from .memory.experiment_store import ExperimentStore
 from .memory.trajectory import TrajectoryStore
 from .model.minimax_h3 import MiniMaxH3Adapter
+from .operators.fake import FakeOperatorBackend, build_fake_registry
 from .self_improve.evolve import EvolutionController
+from .target.profile import load_target_profile
 
 
 def _emit(value: Any, json_mode: bool) -> None:
@@ -141,7 +155,7 @@ def cmd_evolve(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_lineage(args: argparse.Namespace) -> int:
+def cmd_legacy_lineage(args: argparse.Namespace) -> int:
     config = _config(args)
     archive = CandidateStore(config.runtime.archive_dir)
     if not archive.active_path.exists():
@@ -166,12 +180,110 @@ def cmd_lineage(args: argparse.Namespace) -> int:
     return 0
 
 
+def _session_root(args: argparse.Namespace) -> Path:
+    return Path(args.session_dir).resolve()
+
+
+def _fake_optimization_loop(root: Path) -> OptimizationLoop:
+    return OptimizationLoop(
+        controller=RuleBasedMockController(),
+        operators=build_fake_registry(FakeOperatorBackend()),
+        evaluator=CompositeEvaluator(FakeQualityEvaluator(), FakeHardwareEvaluator(), ConstraintEvaluator()),
+        models=ModelStore(root / "models"),
+        pareto=ParetoArchive(root / "pareto"),
+        experiments=ExperimentStore(root / "experiments.jsonl"),
+        run_root=root / "runs",
+        checkpoint_path=root / "session.json",
+    )
+
+
+def cmd_validate_target(args: argparse.Namespace) -> int:
+    target = load_target_profile(Path(args.target).resolve())
+    _emit({"valid": True, "target": target.to_dict()}, args.json)
+    return 0
+
+
+def cmd_inspect_model(args: argparse.Namespace) -> int:
+    state = FakeH3Model.baseline().state
+    _emit({"backend": "fake", "model_state": state.to_dict()}, args.json)
+    return 0
+
+
+def cmd_optimize(args: argparse.Namespace) -> int:
+    target = load_target_profile(Path(args.target).resolve())
+    root = _session_root(args)
+    loop = _fake_optimization_loop(root)
+    initial = FakeH3Model.baseline().candidate()
+    budget = BudgetState(
+        max_iterations=args.max_iterations,
+        max_failed_experiments=args.max_failed_experiments,
+        max_wall_time_s=args.max_wall_time_s,
+        max_gpu_hours=args.max_gpu_hours,
+        max_controller_calls=args.max_controller_calls,
+    )
+    result = loop.run(args.session_id, target, budget, initial)
+    payload = {
+        "session_id": args.session_id,
+        "status": result.status,
+        "current_model_id": result.current_model_id,
+        "budget": result.budget.to_dict(),
+        "search_metrics": {
+            "experiments_to_target": result.budget.used_iterations if result.status == "target_satisfied" else None,
+            "gpu_hours_to_target": result.budget.used_gpu_hours if result.status == "target_satisfied" else None,
+            "wall_time_to_target_s": result.budget.used_wall_time_s if result.status == "target_satisfied" else None,
+            "failed_experiments": result.budget.used_failures,
+            "human_intervention_count": 0,
+        },
+        "lineage": [candidate.to_dict() for candidate in loop.models.lineage()],
+        "pareto_front": [entry.to_dict() for entry in loop.pareto.front()],
+    }
+    _emit(payload, args.json)
+    return 0 if result.status == "target_satisfied" else 1
+
+
+def cmd_model_lineage(args: argparse.Namespace) -> int:
+    store = ModelStore(_session_root(args) / "models")
+    items = store.lineage()
+    active = store.active_id if items else None
+    _emit(
+        {
+            "active": active,
+            "lineage": [
+                {
+                    "id": item.id,
+                    "parent_id": item.parent_id,
+                    "generation": item.generation,
+                    "operator": item.metadata.get("operator"),
+                    "active": item.id == active,
+                }
+                for item in items
+            ],
+        },
+        args.json,
+    )
+    return 0
+
+
+def cmd_pareto(args: argparse.Namespace) -> int:
+    entries = ParetoArchive(_session_root(args) / "pareto").front()
+    _emit({"pareto_front": [entry.to_dict() for entry in entries]}, args.json)
+    return 0
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    records = list(ExperimentStore(_session_root(args) / "experiments.jsonl").read())
+    if args.experiment_id:
+        records = [item for item in records if item.experiment_id == args.experiment_id]
+    _emit({"experiments": [item.to_dict() for item in records]}, args.json)
+    return 0
+
+
 def _json_flag(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="emit one machine-readable JSON object")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Lightweight self-improving harness for MiniMax-H3 video generation")
+    parser = argparse.ArgumentParser(description="EvoGen-RSI Phase-I model optimization harness for MiniMax H3")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--json", action="store_true", help="emit one machine-readable JSON object")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -200,9 +312,46 @@ def build_parser() -> argparse.ArgumentParser:
     _json_flag(evolve)
     evolve.set_defaults(handler=cmd_evolve)
 
-    lineage = subparsers.add_parser("lineage", help="show candidate parent-child history")
+    validate_target = subparsers.add_parser("validate", help="validate an EvoGen TargetProfile")
+    validate_target.add_argument("--target", default="configs/targets/mobile_example.yaml")
+    _json_flag(validate_target)
+    validate_target.set_defaults(handler=cmd_validate_target)
+
+    inspect = subparsers.add_parser("inspect", help="inspect the deterministic Fake H3 baseline")
+    _json_flag(inspect)
+    inspect.set_defaults(handler=cmd_inspect_model)
+
+    optimize = subparsers.add_parser("optimize", help="run the fully offline Fake H3 optimization loop")
+    optimize.add_argument("--target", default="configs/targets/mobile_example.yaml")
+    optimize.add_argument("--session-dir", default="var/evogen")
+    optimize.add_argument("--session-id", default="mobile_h3_fake_001")
+    optimize.add_argument("--max-iterations", type=int, default=5)
+    optimize.add_argument("--max-failed-experiments", type=int, default=4)
+    optimize.add_argument("--max-wall-time-s", type=float)
+    optimize.add_argument("--max-gpu-hours", type=float, default=1.0)
+    optimize.add_argument("--max-controller-calls", type=int, default=5)
+    _json_flag(optimize)
+    optimize.set_defaults(handler=cmd_optimize)
+
+    lineage = subparsers.add_parser("lineage", help="show immutable model-candidate lineage")
+    lineage.add_argument("--session-dir", default="var/evogen")
     _json_flag(lineage)
-    lineage.set_defaults(handler=cmd_lineage)
+    lineage.set_defaults(handler=cmd_model_lineage)
+
+    pareto = subparsers.add_parser("pareto", help="show the model Pareto front")
+    pareto.add_argument("--session-dir", default="var/evogen")
+    _json_flag(pareto)
+    pareto.set_defaults(handler=cmd_pareto)
+
+    replay = subparsers.add_parser("replay", help="read append-only model optimization experiments")
+    replay.add_argument("--session-dir", default="var/evogen")
+    replay.add_argument("--experiment-id")
+    _json_flag(replay)
+    replay.set_defaults(handler=cmd_replay)
+
+    legacy_lineage = subparsers.add_parser("legacy-lineage", help="show frozen workflow-candidate history")
+    _json_flag(legacy_lineage)
+    legacy_lineage.set_defaults(handler=cmd_legacy_lineage)
     return parser
 
 

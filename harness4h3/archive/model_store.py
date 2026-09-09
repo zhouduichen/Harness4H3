@@ -43,6 +43,8 @@ class ModelStore:
         if candidate.parent_id is None:
             if candidate.generation != 0:
                 raise ModelStoreError("root generation must be zero")
+            if self.lineage():
+                raise ModelStoreError("model store already has a root candidate")
         else:
             parent = self.get(candidate.parent_id)
             if candidate.generation != parent.generation + 1:

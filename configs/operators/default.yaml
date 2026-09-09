@@ -1,0 +1,11 @@
+enabled:
+  - inspect
+  - quantize
+  - step_distill
+  - rollback
+
+forbidden:
+  - arbitrary_shell
+  - source_modification
+  - evaluator_modification
+  - kernel_generation

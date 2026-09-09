@@ -1,0 +1,3 @@
+provider: rule_based_mock
+model: rule-based-mock
+network_access: false

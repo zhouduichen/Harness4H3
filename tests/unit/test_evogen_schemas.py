@@ -7,6 +7,7 @@ import pytest
 from harness4h3.archive.model_candidate import ModelCandidate
 from harness4h3.controller.schemas import BudgetState, CostEstimate, ExperimentPlan
 from harness4h3.h3.state import ModelState
+from harness4h3.memory.experiment_store import ExperimentRecord, ExperimentStore
 from harness4h3.target.profile import TargetProfile
 
 
@@ -60,6 +61,27 @@ def test_experiment_plan_requires_structured_fields_and_never_a_shell_command():
     assert "command" not in plan.to_dict()
 
 
+def test_experiment_plan_rejects_unstructured_risks():
+    with pytest.raises(ValueError, match="risks must be a list"):
+        ExperimentPlan.from_dict(
+            {
+                "experiment_id": "exp_0001",
+                "parent_model_id": "M0000",
+                "diagnosis": "memory",
+                "objective": "reduce memory",
+                "hypothesis": "quantization helps",
+                "operator": "quantize",
+                "operator_args": {},
+                "expected_effects": {"memory": "down"},
+                "risks": "quality",
+                "required_budget": {},
+                "acceptance": {"max_quality_drop": 0.05},
+                "stop_conditions": {},
+                "rationale": "bounded",
+            }
+        )
+
+
 def test_model_candidate_uses_model_namespace_and_embeds_model_state():
     state = ModelState.fake_baseline()
     candidate = ModelCandidate(
@@ -74,3 +96,31 @@ def test_model_candidate_uses_model_namespace_and_embeds_model_state():
     assert candidate.state.model_id == "M0000"
     with pytest.raises(ValueError, match="model candidate id"):
         ModelCandidate("H0000", None, 0, state.checkpoint_path, state, None, "baseline")
+
+
+def test_experiment_records_are_append_only_and_redact_secrets(tmp_path):
+    store = ExperimentStore(tmp_path / "experiments.jsonl")
+    record = ExperimentRecord(
+        "exp_0001",
+        "session",
+        "target",
+        {"provider": "fake", "api_token": "secret"},
+        "M0000",
+        None,
+        "digest",
+        {},
+        {},
+        {"status": "failed"},
+        [],
+        {},
+        None,
+        "failed",
+        {"keep": False},
+        {},
+        "now",
+    )
+    store.append(record)
+    store.append(record)
+    records = list(store.read())
+    assert len(records) == 2
+    assert records[0].controller["api_token"] == "[REDACTED]"

@@ -35,6 +35,8 @@ class SchemaValidator:
 class PolicyValidator:
     FORBIDDEN_ARGUMENT_KEYS = {
         "argv",
+        "api_key",
+        "authorization",
         "benchmark",
         "code",
         "command",
@@ -43,10 +45,13 @@ class PolicyValidator:
         "environment",
         "evaluator",
         "hard_threshold",
+        "password",
         "script",
         "shell",
         "source",
+        "secret",
         "target_profile",
+        "token",
     }
 
     def validate(self, plan: ExperimentPlan, parent: ModelState) -> None:

@@ -116,10 +116,17 @@ class ExperimentPlan:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "ExperimentPlan":
+        if not isinstance(raw, Mapping):
+            raise ValueError("experiment plan must be a mapping")
         required = tuple(cls.__dataclass_fields__)
         missing = [name for name in required if name not in raw]
         if missing:
             raise ValueError("experiment plan missing fields: %s" % ", ".join(missing))
+        mapping_fields = ("operator_args", "expected_effects", "required_budget", "acceptance", "stop_conditions")
+        if any(not isinstance(raw[name], Mapping) for name in mapping_fields):
+            raise ValueError("experiment plan structured fields must be mappings")
+        if not isinstance(raw["risks"], (list, tuple)):
+            raise ValueError("experiment plan risks must be a list")
         return cls(
             experiment_id=str(raw["experiment_id"]),
             parent_model_id=str(raw["parent_model_id"]),

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..controller.schemas import EvaluationResult
+from .model_candidate import MODEL_ID_PATTERN
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,8 @@ class ParetoArchive:
         return sorted(result, key=lambda item: item.candidate_id)
 
     def update(self, candidate_id: str, evaluation: EvaluationResult) -> List[ParetoEntry]:
+        if not MODEL_ID_PATTERN.fullmatch(candidate_id):
+            raise ValueError("invalid model candidate id %r" % candidate_id)
         self.entries_dir.mkdir(parents=True, exist_ok=True)
         entry = ParetoEntry(candidate_id, evaluation)
         path = self.entries_dir / (candidate_id + ".json")

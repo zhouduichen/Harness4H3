@@ -54,3 +54,8 @@ def test_feasible_candidate_dominates_infeasible_candidate_before_soft_metrics()
     feasible = evaluation(0.84, 29, 5.9, feasible=True)
     infeasible = evaluation(0.90, 60, 12, feasible=False)
     assert dominates(feasible, infeasible)
+
+
+def test_pareto_candidate_id_cannot_escape_archive(tmp_path):
+    with pytest.raises(ValueError, match="invalid model candidate id"):
+        ParetoArchive(tmp_path).update("../../outside", evaluation(0.9, 20, 4, True))

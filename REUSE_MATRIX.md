@@ -1,14 +1,15 @@
 # Reuse Matrix
 
-| Source | Reuse | Adaptation in Harness4H3 | Not reused |
+| Source | Reused in EvoGen Phase I | Adaptation | Deferred / not reused |
 |---|---|---|---|
-| Existing MinMax-H3 ComfyUI client | `/prompt`, `/history/<id>`, `/view`, API-format workflow validation, prompt ID retention, history polling | Small standard-library adapter with bounded timeouts and isolated output directories | Deployment scripts, credentials, machine paths |
-| Existing MiniMax-H3 benchmark runners | Workflow node/input targeting and deterministic seed injection | Targets are configuration, not hard-coded model-specific constants | Windows SSH telemetry, fixed model names, benchmark prompt set, manual score columns |
-| DGM | Parent-child candidates, generations, lineage | Immutable JSON candidate archive and atomic active pointer | SWE-bench flow and unrestricted repository self-modification |
-| AlphaEvolve | External comparable evaluation and promotion gate | JSON subprocess evaluator plus score/min-delta/regression rules | LLM ensemble and program database |
-| OpenRSI and Frontis-MA1 | Experience-driven diagnosis and small mutations | Repeated failure aggregation and finite mutation catalog | SFT, RL, learned operators, model training |
-| Phi Bench | Runner/evaluator separation and reproducible fixtures | Fake ComfyUI integration tests and held-out split | Its benchmark tasks |
-| CAKE | Failure-to-infrastructure feedback as a future direction | Documentation only in V1 | Compiler, IR, kernel and runtime co-evolution |
+| Harness4H3 v0 | Append-only/redacted JSONL, evaluator isolation, candidate lineage, atomic active pointer, ToolRegistry design, offline fake testing | Video-task trajectory becomes model-optimization `ExperimentRecord`; `H*` workflow candidates are separated from `M0000+` model candidates | Prompt/workflow mutation is frozen under `legacy/` and is not in the Phase I loop |
+| Existing MiniMax-H3 ComfyUI client | `/prompt`, `/history/<id>`, `/view`, bounded polling and isolated artifacts | Moved to `backends/comfyui.py`; it is an artifact/quality adapter rather than ModelState | Deployment credentials, Windows paths and manual benchmark columns |
+| REEF | Harness/skill evolution concepts | Documentation and Phase II extension boundary only | Phase I runtime dependency |
+| AlphaEvolve | Candidate/evaluator/archive/search separation | Immutable `ModelStore` plus external Pareto decision data | Program mutation and LLM ensemble |
+| Frontis / OpenMLE | Execution-grounded AI4AI trajectories and experience | Append-only experiment records with plan, result, evaluation, failure and cost | Learned search policy before real data exists |
+| HAQ | Hardware-in-the-loop, target-specific optimization | `TargetProfile`, hard constraints and normalized hardware metrics | Hardware surrogate in the first delivery |
+| MobileVD / MobileWan | Domain recipe/operator inspiration | Future CreateStudent, Distill, Prune and runtime operators | Vendored training framework |
+| DMD / DMD2 / Progressive Distillation | Step-distillation operator family | Deterministic fake StepDistill protocol in M1 | Real training implementation until teacher/student pipeline exists |
+| CAKE / Phi-Bench | Future kernel/infra evaluation and reproducible runner/evaluator boundaries | Offline integration-test philosophy | Kernel/compiler search in Phase I |
 
-V1 writes all new MiniMax-H3-specific behavior locally. No external project is vendored or used as the system foundation.
-
+No external implementation is vendored. The first delivery reuses infrastructure boundaries while replacing the old prompt/workflow-evolution research target.
