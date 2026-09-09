@@ -115,7 +115,7 @@ def build_fake_registry(backend: Optional[FakeOperatorBackend] = None) -> Operat
     backend = backend or FakeOperatorBackend()
     registry = OperatorRegistry()
     registry.register(FakeOperator("inspect", "Inspect normalized model state", backend, {}))
-    registry.register(FakeOperator("quantize", "Apply deterministic fake weight quantization", backend, {"bits": (int,)}))
-    registry.register(FakeOperator("step_distill", "Apply deterministic fake sampling-step distillation", backend, {"target_steps": (int,)}))
+    registry.register(FakeOperator("quantize", "Fake int4: quality x0.99, latency x0.80, memory x0.65, model size x0.55", backend, {"bits": (int,)}))
+    registry.register(FakeOperator("step_distill", "Fake step distill: quality x0.96, latency x0.55, memory x0.70", backend, {"target_steps": (int,)}))
     registry.register(FakeOperator("rollback", "Clone a prior immutable candidate as a new child", backend, {"target_model_id": (str,)}))
     return registry

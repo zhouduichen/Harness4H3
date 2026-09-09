@@ -1,3 +1,15 @@
-provider: rule_based_mock
-model: rule-based-mock
-network_access: false
+default_provider: rule_based_mock
+
+providers:
+  rule_based_mock:
+    model: rule-based-mock
+    network_access: false
+  ollama:
+    model: qwen3.5:4b
+    base_url: http://127.0.0.1:11434
+    network_access: local_only
+  openai:
+    model: fixed-model
+    endpoint: https://api.openai.com/v1/responses
+    api_key_env: OPENAI_API_KEY
+    store: false

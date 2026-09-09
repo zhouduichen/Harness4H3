@@ -14,7 +14,7 @@ from .archive.model_store import ModelStore
 from .archive.pareto import ParetoArchive
 from .config import AppConfig, ConfigError, load_config
 from .controller.loop import OptimizationLoop
-from .controller.provider import RuleBasedMockController
+from .controller.provider import OllamaStructuredController, OpenAIResponsesController, RuleBasedMockController
 from .controller.schemas import BudgetState
 from .evaluator.composite import CompositeEvaluator
 from .evaluator.constraints import ConstraintEvaluator
@@ -184,9 +184,9 @@ def _session_root(args: argparse.Namespace) -> Path:
     return Path(args.session_dir).resolve()
 
 
-def _fake_optimization_loop(root: Path) -> OptimizationLoop:
+def _fake_optimization_loop(root: Path, controller=None) -> OptimizationLoop:
     return OptimizationLoop(
-        controller=RuleBasedMockController(),
+        controller=controller or RuleBasedMockController(),
         operators=build_fake_registry(FakeOperatorBackend()),
         evaluator=CompositeEvaluator(FakeQualityEvaluator(), FakeHardwareEvaluator(), ConstraintEvaluator()),
         models=ModelStore(root / "models"),
@@ -212,7 +212,18 @@ def cmd_inspect_model(args: argparse.Namespace) -> int:
 def cmd_optimize(args: argparse.Namespace) -> int:
     target = load_target_profile(Path(args.target).resolve())
     root = _session_root(args)
-    loop = _fake_optimization_loop(root)
+    if args.controller == "ollama":
+        controller = OllamaStructuredController(args.controller_model, args.controller_url, args.controller_timeout_s)
+    elif args.controller == "openai":
+        controller = OpenAIResponsesController(
+            args.controller_model,
+            args.controller_url,
+            args.controller_api_key_env,
+            args.controller_timeout_s,
+        )
+    else:
+        controller = RuleBasedMockController()
+    loop = _fake_optimization_loop(root, controller)
     initial = FakeH3Model.baseline().candidate()
     budget = BudgetState(
         max_iterations=args.max_iterations,
@@ -325,6 +336,11 @@ def build_parser() -> argparse.ArgumentParser:
     optimize.add_argument("--target", default="configs/targets/mobile_example.yaml")
     optimize.add_argument("--session-dir", default="var/evogen")
     optimize.add_argument("--session-id", default="mobile_h3_fake_001")
+    optimize.add_argument("--controller", choices=("mock", "ollama", "openai"), default="mock")
+    optimize.add_argument("--controller-model", default="qwen3.5:4b")
+    optimize.add_argument("--controller-url", default="http://127.0.0.1:11434")
+    optimize.add_argument("--controller-api-key-env", default="OPENAI_API_KEY")
+    optimize.add_argument("--controller-timeout-s", type=float, default=180.0)
     optimize.add_argument("--max-iterations", type=int, default=5)
     optimize.add_argument("--max-failed-experiments", type=int, default=4)
     optimize.add_argument("--max-wall-time-s", type=float)

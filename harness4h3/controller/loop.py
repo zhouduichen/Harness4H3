@@ -19,7 +19,7 @@ from ..operators.base import ExecutionContext, OperatorRegistry
 from ..target.profile import TargetProfile
 from .context import ControllerContext
 from .policy import PlanValidationError, ValidationPipeline
-from .provider import ControllerProvider
+from .provider import ControllerProvider, ControllerProviderError
 from .schemas import BudgetState, CostEstimate, EvaluationResult, ExperimentPlan, OperatorResult
 
 
@@ -124,7 +124,19 @@ class OptimizationLoop:
             state = self._transition(state, LoopState.BUILD_CONTEXT)
             context = self._context(target, current, state)
             state = self._transition(state, LoopState.DIAGNOSE_AND_PLAN)
-            raw_plan = self.controller.plan(context)
+            try:
+                raw_plan = self.controller.plan(context)
+            except ControllerProviderError as exc:
+                state = self._transition(state, LoopState.VALIDATE)
+                error = PlanValidationError("controller_failure", str(exc))
+                state = self._record_validation_failure(state, target, current, {}, error)
+                self._checkpoint(state)
+                if checkpoint_hook:
+                    checkpoint_hook(state)
+                if state.failure_counts.get("controller_failure", 0) >= self.max_repeated_failures:
+                    return self._finish(state, "no_valid_plan")
+                state = self._transition(state, LoopState.REPLAN)
+                continue
             state = self._transition(state, LoopState.VALIDATE)
             try:
                 validated = self.validation.validate(raw_plan, current.state, target, state.budget, self.operators)
@@ -143,7 +155,18 @@ class OptimizationLoop:
             plan = validated.plan
             state = self._transition(state, LoopState.ESTIMATE_COST)
             experiment_dir = self.run_root / plan.experiment_id
-            experiment_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                experiment_dir.mkdir(parents=True, exist_ok=False)
+            except FileExistsError:
+                error = PlanValidationError("experiment_exists", "experiment directory already exists and will not be overwritten")
+                state = self._record_validation_failure(state, target, current, plan, error)
+                self._checkpoint(state)
+                if checkpoint_hook:
+                    checkpoint_hook(state)
+                if state.failure_counts.get("experiment_exists", 0) >= self.max_repeated_failures:
+                    return self._finish(state, "no_valid_plan")
+                state = self._transition(state, LoopState.REPLAN)
+                continue
             self._write_json(experiment_dir / "controller_request.json", context.to_dict())
             self._write_json(experiment_dir / "controller_response.json", plan.to_dict())
             self._write_json(experiment_dir / "plan.json", plan.to_dict())
@@ -197,6 +220,9 @@ class OptimizationLoop:
 
             state = self._transition(state, LoopState.SUMMARIZE_EXPERIMENT)
             failed = not keep
+            decision_failure = None
+            if not keep and evaluation is not None:
+                decision_failure = "quality_critical_regression" if evaluation.critical_regression else "acceptance_rejected"
             new_budget = state.budget.consume(operator_result.cost, failed=failed, controller_calls=1)
             next_model_id = child.id if child is not None and keep else current.id
             decision = {"keep": keep, "continue_from": next_model_id}
@@ -208,11 +234,14 @@ class OptimizationLoop:
                 operator_result,
                 child.id if child else None,
                 evaluation,
-                None if keep else "quality_critical_regression",
+                decision_failure,
                 decision,
                 front_ids,
             )
             self.experiments.append(record)
+            failure_counts = dict(state.failure_counts)
+            if decision_failure:
+                failure_counts[decision_failure] = failure_counts.get(decision_failure, 0) + 1
             state = SessionState(
                 state.session_id,
                 state.target_profile_id,
@@ -220,7 +249,7 @@ class OptimizationLoop:
                 state.baseline_quality,
                 new_budget,
                 transitions=state.transitions,
-                failure_counts=state.failure_counts,
+                failure_counts=failure_counts,
             )
             state = self._transition(state, LoopState.CHECK_STOP)
             self._checkpoint(state)
@@ -230,6 +259,8 @@ class OptimizationLoop:
                 return self._finish(state, "target_satisfied")
             if evaluation is not None and evaluation.critical_regression and plan.stop_conditions.get("critical_regression", False):
                 return self._finish(state, "critical_failure")
+            if decision_failure and state.failure_counts.get(decision_failure, 0) >= self.max_repeated_failures:
+                return self._finish(state, "no_valid_plan")
 
         return self._finish(state, state.status)
 
@@ -398,6 +429,7 @@ class OptimizationLoop:
         return {
             "provider": getattr(self.controller, "provider_name", "unknown"),
             "model": getattr(self.controller, "model_name", "unknown"),
+            "request_id": getattr(self.controller, "last_request_id", None),
         }
 
     @staticmethod

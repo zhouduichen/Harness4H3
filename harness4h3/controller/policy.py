@@ -54,9 +54,12 @@ class PolicyValidator:
         "token",
     }
 
-    def validate(self, plan: ExperimentPlan, parent: ModelState) -> None:
+    def validate(self, plan: ExperimentPlan, parent: ModelState, budget: BudgetState) -> None:
         if plan.parent_model_id != parent.model_id:
             raise PlanValidationError("policy_invalid", "plan parent does not match current model")
+        expected_id = "exp_%04d" % (budget.used_iterations + 1)
+        if plan.experiment_id != expected_id:
+            raise PlanValidationError("policy_invalid", "experiment_id must be %s" % expected_id)
 
         def inspect(value: Any) -> None:
             if isinstance(value, Mapping):
@@ -120,7 +123,7 @@ class ValidationPipeline:
         registry: OperatorRegistry,
     ) -> ValidatedPlan:
         plan = self.schema.validate(raw)
-        self.policy.validate(plan, parent)
+        self.policy.validate(plan, parent, budget)
         declared = self.budget.validate_declared(plan, budget)
         estimate = self.operator.validate(plan, parent, target, registry)
         self.budget.validate_estimate(declared, estimate, budget)
