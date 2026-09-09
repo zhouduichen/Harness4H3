@@ -1,0 +1,93 @@
+{
+  "gene_id": "H3-NVFP4-Quantization-001",
+  "status": "validated_m5_5",
+  "state": {
+    "parent_model_id": "M0000",
+    "child_model_id": "M0001",
+    "architecture": "MiniMax-H3",
+    "blocks": 50,
+    "sampling_steps": 20,
+    "hardware": "Windows RTX 5080"
+  },
+  "bottleneck": {
+    "model_size_gb": 20.970379616,
+    "latency_s": 205.33523804112338,
+    "diagnosis": "model size and generation latency"
+  },
+  "intervention": {
+    "primary_intervention": "quantization",
+    "operator": "PrebuiltQuantizeOperator",
+    "scheme": "nvfp4"
+  },
+  "controlled_conditions": {
+    "prompt": "sanity-visible-subject",
+    "seed": 42,
+    "sampling_steps": 20,
+    "resolution": "352x640",
+    "frames": 22,
+    "scheduler": "simple",
+    "cfg": 5.0,
+    "vae": "fixed",
+    "text_encoder": "qwen3vl-32B-MiniMax-H3-Q2_K.gguf",
+    "lora": "minimax_h3_turbo_v4_step600_ema.safetensors",
+    "cache_reset_before_each_run": true
+  },
+  "benefit": {
+    "model_size_reduction": 0.4025555555,
+    "latency_reduction": 0.5642318428,
+    "quality_parent": 0.983151,
+    "quality_child": 0.991137,
+    "quality_delta": 0.007986,
+    "black_frame_rate": 0.0,
+    "m5_5_validation": {
+      "sanity": {
+        "repetitions": 2,
+        "parent_quality_mean": 0.983151,
+        "child_quality_mean": 0.991137,
+        "parent_latency_mean_s": 204.94512314593885,
+        "child_latency_mean_s": 90.28058435407002,
+        "child_peak_memory_mean_gb": 16.29452817,
+        "child_black_frame_rate_mean": 0.0,
+        "validated": true
+      },
+      "dev": {
+        "parent_quality_mean": 0.9888425,
+        "child_quality_mean": 0.988818,
+        "latency_reduction": 0.5677213156,
+        "child_black_frame_rate_mean": 0.0,
+        "validated": true
+      },
+      "heldout": {
+        "parent_quality_mean": 0.981056,
+        "child_quality_mean": 0.961489,
+        "latency_reduction": 0.5772261252,
+        "child_black_frame_rate_mean": 0.0,
+        "validated": true
+      },
+      "multiseed": {
+        "seeds": [7, 123, 999],
+        "parent_quality_mean": 0.9897633333,
+        "child_quality_mean": 0.991958,
+        "latency_reduction": 0.6064495976,
+        "child_black_frame_rate_mean": 0.0,
+        "validated": true
+      }
+    }
+  },
+  "remaining_limitation": {
+    "peak_memory_gb": 16.358351784,
+    "target_peak_memory_gb": 16.0,
+    "target_profile_feasible": false
+  },
+  "risks_lessons": [
+    "Without cache reset, model switching can mimic a black-frame failure.",
+    "Step reduction must remain a separate intervention; reset NVFP4 8-step was semantically valid but scored 0.834020.",
+    "Do not infer held-out generalization from one sanity task."
+  ],
+  "evidence": {
+    "record": "docs/real-experiments/2026-09-09-windows-rtx5080.md",
+    "result": "var/m5-controlled/m5-final-controlled-20steps.json",
+    "m5_5_validation": "var/m5-controlled/m5.5-validation.json"
+  },
+  "confidence": "validated_on_sanity_dev_heldout_and_multiseed"
+}

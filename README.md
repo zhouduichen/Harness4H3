@@ -16,7 +16,7 @@ Autonomous Model Optimization
 
 Phase I 的 Controller LLM 权重固定，Harness 只允许它产生结构化 `ExperimentPlan` 并选择已注册的模型级 Operator。模型修改必须产生不可变的 `M0000`、`M0001`… candidate，经独立质量/硬件 evaluator 验证后进入 Pareto archive。Phase I 不训练 Controller LLM、不演化 Harness、不做 kernel/compiler search，也不允许 Controller 执行 shell 或修改源码、evaluator、benchmark 与目标约束。
 
-当前正式交付覆盖 M0–M5：完全离线 Fake H3 closed loop、结构化 Ollama/OpenAI Responses 控制器、safetensors/GGUF H3 Inspector、受限本地进程执行器、固定部署变体的真实 H3 quantize operator，以及带黑帧诊断/Operator Attribution 的受控真实 benchmark。M5 结论仍只针对记录中的固定 RTX 5080 sanity 实验，不外推为 held-out 全面结论。
+当前正式交付覆盖 M0–M5.5：完全离线 Fake H3 closed loop、结构化 Ollama/OpenAI Responses 控制器、safetensors/GGUF H3 Inspector、受限本地进程执行器、固定部署变体的真实 H3 quantize operator，以及带黑帧诊断/Operator Attribution 的受控真实 benchmark。M5 的原始 acceptance 仍限定在固定 RTX 5080 sanity 对照；M5.5 已按独立 dev、held-out 和 multi-seed 分组完成候选复核，但不把 TargetProfile 峰值显存约束改写为已满足。
 
 ## 离线闭环
 
@@ -125,3 +125,13 @@ Evaluator 是独立权威。Pareto 先比较 hard-constraint feasibility，再�
 ## M5 受控验收
 
 远端 RTX 5080 的真实运行记录见 `docs/real-experiments/2026-09-09-windows-rtx5080.md`。在相同提示、种子、分辨率、scheduler、CFG、VAE、文本编码器和 LoRA、且每次切换前清理 ComfyUI 模型缓存的 20-step 对照中，NVFP4 child 相对 INT8 parent 达到 model size `-40.26%`、latency `-56.42%`，质量分数从 `0.983151` 到 `0.991137`（无回归），视频可解码且黑帧率为 `0`，因此通过 M5 acceptance gate。该记录同时保留目标 profile 的峰值显存约束结果；后续仍需在 dev/held-out 任务上复核。
+
+## M5.5 Accepted Candidate Validation
+
+`experiments/m5_validation.py` 提供固定 parent/child 的可复现实验入口：sanity 默认重复两次并交替 parent/child 顺序，每次切换前调用 ComfyUI `/free`；随后运行 dev、held-out 和多 seed 复核，并将均值、中位数、最小/最大值、标准差和 95% CI 写入 `var/m5-controlled/m5.5-validation.json`。本轮四个分组全部通过：sanity child 质量均值 `0.991137`、延迟均值 `90.281s`，dev/held-out/multi-seed 质量分别为 `0.988818`、`0.961489`、`0.991958`，黑帧率均为 `0`。该阶段只验证量化候选的可复现性与泛化，不把 `TargetProfile` 的峰值显存约束改写成已满足，也不提前实现 M6 runtime-memory operator。
+
+```bash
+PYTHONPATH=. .venv/bin/python experiments/m5_validation.py --sanity-repetitions 2
+```
+
+首条结构化 Design Gene 记录在 `docs/experience/design-gene-h3-nvfp4.json`，用于后续经验检索；它明确记录了缓存污染导致的黑帧诊断和 16GB 峰值显存剩余限制。
