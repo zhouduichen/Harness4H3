@@ -1,0 +1,25 @@
+id: rtx5080_h3_v1
+
+hardware:
+  type: gpu
+  name: rtx5080
+  backend: comfyui
+
+constraints:
+  max_model_size_gb: 16
+  max_peak_memory_gb: 16
+  max_latency_s: 300
+
+quality:
+  max_quality_drop: 0.05
+
+video:
+  resolution: 480p
+  duration_s: 5
+  fps: 16
+
+priority:
+  - feasibility
+  - quality
+  - latency
+  - memory

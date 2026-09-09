@@ -74,6 +74,15 @@ Inspect a local H3 checkpoint without loading its weights:
 
 The Ollama controller uses `/api/chat` with `stream=false`, `think=false`, temperature 0, and a strict ExperimentPlan schema. The OpenAI Responses controller uses `/v1/responses`, strict `text.format` JSON Schema, and `store=false`; API keys are read only from the configured environment variable.
 
+Run the independent real H3 benchmark on a host that can access ComfyUI and the checkpoint:
+
+```bash
+.venv/bin/python -m harness4h3 benchmark \
+  --checkpoint 'D:\ComfyUI\models\diffusion_models\minimax_h3_fl2va_pruned_nvfp4.safetensors' \
+  --sampling-steps 4 --target configs/targets/rtx5080_example.yaml \
+  --base-url http://100.88.143.10:8188 --result var/benchmark/nvfp4.json --json
+```
+
 每个 session 只在初始化时读取一次 TargetProfile。`session.json` 原子保存 current model、预算和失败计数；相同 session 可在中断后恢复。每个实验目录保存 controller request/response、plan、validated plan、operator result 与 evaluation。
 
 ## Phase I 安全边界
