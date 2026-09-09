@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import struct
 
 from harness4h3.archive.model_candidate import ModelCandidate
@@ -47,7 +48,14 @@ def test_prebuilt_quantize_produces_real_h3_child_without_overwriting_parent(tmp
     baseline = ModelState.from_dict({**baseline.to_dict(), "checkpoint_path": str(parent_path)})
     parent = ModelCandidate("M0000", None, 0, str(parent_path), baseline, None, "baseline")
     target = TargetProfile("target", "gpu", "local")
-    operator = PrebuiltQuantizeOperator({4: variant_path}, H3Inspector(), CostEstimate(wall_time_s=0.2))
+    operator = PrebuiltQuantizeOperator(
+        {4: variant_path},
+        H3Inspector(),
+        CostEstimate(wall_time_s=0.2),
+        expected_sizes={4: variant_path.stat().st_size},
+        expected_sha256={4: hashlib.sha256(variant_path.read_bytes()).hexdigest()},
+        verify_sha256=True,
+    )
 
     result = operator.execute(parent, {"bits": 4}, ExecutionContext(tmp_path / "exp", "M0001"))
 
@@ -67,6 +75,17 @@ def test_prebuilt_quantize_rejects_missing_variant(tmp_path):
     state = ModelState.fake_baseline()
     parent = ModelCandidate("M0000", None, 0, state.checkpoint_path, state, None, "baseline")
     operator = PrebuiltQuantizeOperator({4: tmp_path / "missing.safetensors"}, H3Inspector())
+    result = operator.execute(parent, {"bits": 4}, ExecutionContext(tmp_path / "exp", "M0001"))
+    assert not result.ok
+    assert result.failure_type == "quantize_invalid"
+
+
+def test_prebuilt_quantize_rejects_manifest_size_mismatch(tmp_path):
+    variant = tmp_path / "minimax_h3_nvfp4.safetensors"
+    write_safetensors(variant, H3_TENSORS)
+    state = ModelState.fake_baseline()
+    parent = ModelCandidate("M0000", None, 0, state.checkpoint_path, state, None, "baseline")
+    operator = PrebuiltQuantizeOperator({4: variant}, H3Inspector(), expected_sizes={4: variant.stat().st_size + 1})
     result = operator.execute(parent, {"bits": 4}, ExecutionContext(tmp_path / "exp", "M0001"))
     assert not result.ok
     assert result.failure_type == "quantize_invalid"
