@@ -87,7 +87,8 @@ class FakeOperator:
         if unknown:
             raise OperatorValidationError("unsupported argument(s) for %s: %s" % (self.name, ", ".join(unknown)))
         for name, value in args.items():
-            if not isinstance(value, self.allowed_args[name]) or isinstance(value, bool):
+            allowed = self.allowed_args[name]
+            if not isinstance(value, allowed) or (isinstance(value, bool) and bool not in allowed):
                 raise OperatorValidationError("%s.%s has invalid type" % (self.name, name))
         if self.name == "quantize":
             bits = int(args.get("bits", 4))
