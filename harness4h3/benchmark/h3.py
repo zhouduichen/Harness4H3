@@ -31,6 +31,10 @@ class BenchmarkTaskResult:
     quality_metrics: Mapping[str, Any] = field(default_factory=dict)
     failure_type: Optional[str] = None
     message: str = ""
+    operator_execution_success: bool = False
+    artifact_generation_success: bool = False
+    semantic_generation_valid: bool = False
+    critical_regression: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -47,6 +51,10 @@ class BenchmarkSummary:
     violations: Tuple[str, ...]
     runs: Tuple[BenchmarkTaskResult, ...]
     hardware_samples: Tuple[Mapping[str, Any], ...] = ()
+    operator_attribution: Mapping[str, Any] = field(default_factory=dict)
+    efficiency_improvements: Mapping[str, Any] = field(default_factory=dict)
+    hard_gates: Mapping[str, Any] = field(default_factory=dict)
+    accepted: Optional[bool] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -149,8 +157,8 @@ class H3BenchmarkRunner:
             _set_target(workflow, target.node_id, target.input_name, state.sampling_steps)
         checkpoint_name = _checkpoint_name(state.checkpoint_path)
         model_node = workflow.get("127")
-        if isinstance(model_node, Mapping) and checkpoint_name.lower().endswith(".gguf"):
-            model_node["class_type"] = "UnetLoaderGGUF"
+        if isinstance(model_node, Mapping) and checkpoint_name.lower().endswith((".gguf", ".safetensors", ".ckpt", ".pt")):
+            model_node["class_type"] = "UnetLoaderGGUF" if checkpoint_name.lower().endswith(".gguf") else "UNETLoader"
             inputs = model_node.setdefault("inputs", {})
             inputs["unet_name"] = checkpoint_name
             workflow["127"] = model_node
@@ -162,8 +170,20 @@ class H3BenchmarkRunner:
         tasks: Sequence[Task],
         baseline_quality: Optional[float] = None,
         target: Any = None,
+        operator_attribution: Optional[Mapping[str, Any]] = None,
+        baseline_hardware: Optional[HardwareMetrics] = None,
+        efficiency_thresholds: Optional[Mapping[str, float]] = None,
+        black_frame_rate_threshold: float = 0.0,
+        reset_backend_before_run: bool = False,
     ) -> BenchmarkSummary:
+        if not 0.0 <= float(black_frame_rate_threshold) <= 1.0:
+            raise ValueError("black_frame_rate_threshold must be between 0 and 1")
         runs: List[BenchmarkTaskResult] = []
+        if reset_backend_before_run:
+            reset = getattr(self.backend, "free", None)
+            if not callable(reset):
+                raise ValueError("reset_backend_before_run requires a backend.free() method")
+            reset()
         with _SystemSampler(self.backend.base_url, self.system_sample_interval_s) as sampler:
             for task in tasks:
                 started = time.monotonic()
@@ -173,21 +193,56 @@ class H3BenchmarkRunner:
                     evaluation: EvaluationResult = self.evaluator.evaluate(
                         make_request(task.id, task.expected, artifacts, result.wall_time_s, backend_success=True)
                     )
+                    metrics = dict(evaluation.metrics)
+                    failure_type = evaluation.failure_type
+                    if failure_type == "low_luma" and metrics.get("all_black") in (1, 1.0, True):
+                        failure_type = "degenerate_output_black_frame"
+                    operator_success = bool(metrics.get("operator_execution_success", True))
+                    artifact_success = bool(metrics.get("artifact_generation_success", bool(artifacts)))
+                    semantic_valid = bool(
+                        metrics.get(
+                            "semantic_generation_valid",
+                            failure_type not in {"decode_failed", "degenerate_output_black_frame", "low_luma", "output_mismatch"},
+                        )
+                    )
+                    metrics.setdefault("operator_execution_success", 1.0 if operator_success else 0.0)
+                    metrics.setdefault("artifact_generation_success", 1.0 if artifact_success else 0.0)
+                    metrics.setdefault("semantic_generation_valid", 1.0 if semantic_valid else 0.0)
                     runs.append(
                         BenchmarkTaskResult(
-                            task.id,
-                            "success",
-                            result.prompt_id,
-                            artifacts,
-                            result.wall_time_s,
-                            evaluation.score,
-                            dict(evaluation.metrics),
-                            evaluation.failure_type,
+                            task_id=task.id,
+                            status="success",
+                            prompt_id=result.prompt_id,
+                            artifacts=artifacts,
+                            wall_time_s=result.wall_time_s,
+                            quality_score=evaluation.score,
+                            quality_metrics=metrics,
+                            failure_type=failure_type,
+                            operator_execution_success=operator_success,
+                            artifact_generation_success=artifact_success,
+                            semantic_generation_valid=semantic_valid,
+                            critical_regression=evaluation.critical_regression,
                         )
                     )
                 except (BackendError, EvaluatorError, OSError, ValueError) as exc:
                     failure_type = getattr(exc, "failure_type", "benchmark_failure")
-                    runs.append(BenchmarkTaskResult(task.id, "failed", None, (), time.monotonic() - started, None, {}, failure_type, str(exc)))
+                    runs.append(
+                        BenchmarkTaskResult(
+                            task_id=task.id,
+                            status="failed",
+                            prompt_id=None,
+                            artifacts=(),
+                            wall_time_s=time.monotonic() - started,
+                            quality_score=None,
+                            quality_metrics={
+                                "operator_execution_success": 0.0,
+                                "artifact_generation_success": 0.0,
+                                "semantic_generation_valid": 0.0,
+                            },
+                            failure_type=failure_type,
+                            message=str(exc),
+                        )
+                    )
         successful = [run for run in runs if run.quality_score is not None]
         quality_score = mean([float(run.quality_score) for run in successful]) if successful else None
         quality_metrics = {
@@ -195,6 +250,10 @@ class H3BenchmarkRunner:
             "successful_tasks": len(successful),
             "failed_tasks": len(runs) - len(successful),
             "task_scores": {run.task_id: run.quality_score for run in runs},
+            "operator_execution_success_tasks": sum(1 for run in runs if run.operator_execution_success),
+            "artifact_generation_success_tasks": sum(1 for run in runs if run.artifact_generation_success),
+            "semantic_generation_valid_tasks": sum(1 for run in runs if run.semantic_generation_valid),
+            "failure_types": {run.task_id: run.failure_type for run in runs if run.failure_type},
         }
         latencies = [run.wall_time_s for run in successful]
         measured = state.measured_metrics
@@ -219,4 +278,85 @@ class H3BenchmarkRunner:
                 quality_score, hardware, target, float(baseline_quality)
             )
             feasible, violations = feasible_value, tuple(violation_list)
-        return BenchmarkSummary(state.model_id, len(runs), quality_score, quality_metrics, hardware, feasible, violations, tuple(runs), tuple(sampler.samples))
+
+        attribution = dict(operator_attribution or {})
+        attribution.setdefault("primary_intervention", "unspecified")
+        attribution.setdefault("secondary_changes", [])
+        attribution.setdefault("controlled_variables", [])
+
+        thresholds = {
+            "model_size_gb": 0.20,
+            "latency_s": 0.15,
+            "peak_memory_gb": 0.15,
+        }
+        if efficiency_thresholds:
+            thresholds.update({str(key): float(value) for key, value in efficiency_thresholds.items()})
+        if any(value < 0.0 or value > 1.0 for value in thresholds.values()):
+            raise ValueError("efficiency thresholds must be between 0 and 1")
+        efficiency_improvements: Dict[str, Any] = {}
+        for name, threshold in thresholds.items():
+            before = getattr(baseline_hardware, name, None) if baseline_hardware is not None else None
+            after = getattr(hardware, name, None)
+            reduction = None
+            if isinstance(before, (int, float)) and isinstance(after, (int, float)) and float(before) > 0:
+                reduction = (float(before) - float(after)) / float(before)
+            efficiency_improvements[name] = {
+                "baseline": before,
+                "candidate": after,
+                "reduction": reduction,
+                "threshold": threshold,
+                "passed": bool(reduction is not None and reduction >= threshold),
+            }
+        efficiency_gate = None if baseline_hardware is None else any(item["passed"] for item in efficiency_improvements.values())
+        black_rates = []
+        for run in runs:
+            if run.quality_score is None:
+                continue
+            value = run.quality_metrics.get("black_frame_ratio", 0.0)
+            if isinstance(value, (int, float)):
+                black_rates.append(float(value))
+        max_black_rate = max(black_rates) if black_rates else None
+        generation_valid = bool(runs) and all(run.semantic_generation_valid for run in runs)
+        decode_success = bool(successful) and all(float(run.quality_metrics.get("decodable", 0.0)) == 1.0 for run in successful)
+        quality_drop = None if baseline_quality is None or quality_score is None else float(baseline_quality) - float(quality_score)
+        quality_limit = getattr(target, "max_quality_drop", None) if target is not None else None
+        quality_gate = None if quality_drop is None or quality_limit is None else quality_drop <= float(quality_limit)
+        temporal_ok = bool(successful) and all(
+            run.failure_type != "temporal_instability" and not run.critical_regression for run in successful
+        )
+        hard_gates = {
+            "generation_valid": generation_valid,
+            "black_frame_rate": max_black_rate,
+            "black_frame_rate_threshold": float(black_frame_rate_threshold),
+            "black_frame_gate": None if max_black_rate is None else max_black_rate <= float(black_frame_rate_threshold),
+            "decode_success": decode_success,
+            "no_critical_temporal_collapse": temporal_ok,
+            "quality_drop": quality_drop,
+            "quality_drop_limit": quality_limit,
+            "quality_gate": quality_gate,
+            "efficiency_gate": efficiency_gate,
+            "target_feasible": feasible,
+        }
+        gate_values = [generation_valid, decode_success, temporal_ok]
+        if hard_gates["black_frame_gate"] is not None:
+            gate_values.append(bool(hard_gates["black_frame_gate"]))
+        if quality_gate is not None:
+            gate_values.append(bool(quality_gate))
+        if efficiency_gate is not None:
+            gate_values.append(bool(efficiency_gate))
+        accepted = bool(all(gate_values)) if baseline_hardware is not None and baseline_quality is not None else None
+        return BenchmarkSummary(
+            state.model_id,
+            len(runs),
+            quality_score,
+            quality_metrics,
+            hardware,
+            feasible,
+            violations,
+            tuple(runs),
+            tuple(sampler.samples),
+            attribution,
+            efficiency_improvements,
+            hard_gates,
+            accepted,
+        )

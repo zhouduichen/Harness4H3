@@ -75,6 +75,14 @@ class MiniMaxH3Adapter:
             raise BackendError("ComfyUI returned no prompt_id: %r" % result, "backend_submission")
         return str(prompt_id)
 
+    def free(self, unload_models: bool = True, free_memory: bool = True) -> Mapping[str, Any]:
+        """Release ComfyUI model/cache state before a controlled model switch."""
+        result = self._json(
+            "/free",
+            {"unload_models": bool(unload_models), "free_memory": bool(free_memory)},
+        )
+        return result if isinstance(result, Mapping) else {}
+
     def wait(self, prompt_id: str) -> Mapping[str, Any]:
         deadline = time.monotonic() + self.task_timeout_s
         last = None
@@ -149,4 +157,3 @@ class MiniMaxH3Adapter:
             history=history,
             wall_time_s=time.monotonic() - started,
         )
-

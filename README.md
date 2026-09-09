@@ -16,7 +16,7 @@ Autonomous Model Optimization
 
 Phase I 的 Controller LLM 权重固定，Harness 只允许它产生结构化 `ExperimentPlan` 并选择已注册的模型级 Operator。模型修改必须产生不可变的 `M0000`、`M0001`… candidate，经独立质量/硬件 evaluator 验证后进入 Pareto archive。Phase I 不训练 Controller LLM、不演化 Harness、不做 kernel/compiler search，也不允许 Controller 执行 shell 或修改源码、evaluator、benchmark 与目标约束。
 
-当前正式交付覆盖 M0–M4：完全离线 Fake H3 closed loop、结构化 Ollama/OpenAI Responses 控制器、safetensors/GGUF H3 Inspector、受限本地进程执行器，以及固定部署变体的真实 H3 quantize operator。M5 的真实质量/硬件改善仍以远端实测门禁为准，不把失败结果包装成成功。
+当前正式交付覆盖 M0–M5：完全离线 Fake H3 closed loop、结构化 Ollama/OpenAI Responses 控制器、safetensors/GGUF H3 Inspector、受限本地进程执行器、固定部署变体的真实 H3 quantize operator，以及带黑帧诊断/Operator Attribution 的受控真实 benchmark。M5 结论仍只针对记录中的固定 RTX 5080 sanity 实验，不外推为 held-out 全面结论。
 
 ## 离线闭环
 
@@ -81,8 +81,13 @@ Run the independent real H3 benchmark on a host that can access ComfyUI and the 
   --checkpoint 'D:\ComfyUI\models\diffusion_models\minimax_h3_fl2va_pruned_nvfp4.safetensors' \
   --sampling-steps 4 --target configs/targets/rtx5080_example.yaml \
   --baseline-quality 0.991137 \
-  --base-url http://100.88.143.10:8188 --result var/benchmark/nvfp4.json --json
+  --base-url http://100.88.143.10:8188 --reset-backend-before-run \
+  --primary-intervention quantization \
+  --controlled-variable sampling_steps --controlled-variable seed \
+  --result var/benchmark/nvfp4.json --json
 ```
+
+对于 Windows 远端路径，benchmark runner 只把路径的文件名写入 API workflow；文件实际由远端 ComfyUI 加载。`--reset-backend-before-run` 调用 ComfyUI `/free`，用于隔离模型切换时的缓存状态。
 
 每个 session 只在初始化时读取一次 TargetProfile。`session.json` 原子保存 current model、预算和失败计数；相同 session 可在中断后恢复。每个实验目录保存 controller request/response、plan、validated plan、operator result 与 evaluation。
 
@@ -117,6 +122,6 @@ Evaluator 是独立权威。Pareto 先比较 hard-constraint feasibility，再�
 
 旧的 `run`、`evaluate`、`evolve`、`validate-config` 与 `legacy-lineage` 命令暂时保留用于历史实验重放。新研究主线使用 `validate`、`inspect`、`optimize`、`lineage`、`pareto` 与 `replay`。
 
-## 下一里程碑
+## M5 受控验收
 
-远端 RTX 5080 的真实运行记录见 `docs/real-experiments/2026-09-09-windows-rtx5080.md`。只有得到真实 H3-derived child 的可测量效率改善且质量回归在阈值内，才算进入科研成功，而不只是工程闭环成功。
+远端 RTX 5080 的真实运行记录见 `docs/real-experiments/2026-09-09-windows-rtx5080.md`。在相同提示、种子、分辨率、scheduler、CFG、VAE、文本编码器和 LoRA、且每次切换前清理 ComfyUI 模型缓存的 20-step 对照中，NVFP4 child 相对 INT8 parent 达到 model size `-40.26%`、latency `-56.42%`，质量分数从 `0.983151` 到 `0.991137`（无回归），视频可解码且黑帧率为 `0`，因此通过 M5 acceptance gate。该记录同时保留目标 profile 的峰值显存约束结果；后续仍需在 dev/held-out 任务上复核。

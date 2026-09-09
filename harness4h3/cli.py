@@ -16,7 +16,7 @@ from .benchmark.h3 import H3BenchmarkRunner
 from .config import AppConfig, ConfigError, load_config
 from .controller.loop import OptimizationLoop
 from .controller.provider import OllamaStructuredController, OpenAIResponsesController, RuleBasedMockController
-from .controller.schemas import BudgetState
+from .controller.schemas import BudgetState, HardwareMetrics
 from .evaluator.composite import CompositeEvaluator
 from .evaluator.constraints import ConstraintEvaluator
 from .evaluator.evaluator import SubprocessEvaluator, make_request
@@ -294,7 +294,29 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         Path(args.output_root),
         system_sample_interval_s=args.sample_interval_s,
     )
-    summary = runner.run(state, tasks, baseline_quality=args.baseline_quality, target=target)
+    attribution = {
+        "primary_intervention": args.primary_intervention,
+        "secondary_changes": list(args.secondary_change or []),
+        "controlled_variables": list(args.controlled_variable or []),
+        "rationale": args.rationale,
+    }
+    baseline_hardware = None
+    if any(value is not None for value in (args.baseline_model_size_gb, args.baseline_latency_s, args.baseline_peak_memory_gb)):
+        baseline_hardware = HardwareMetrics(
+            model_size_gb=args.baseline_model_size_gb,
+            latency_s=args.baseline_latency_s,
+            peak_memory_gb=args.baseline_peak_memory_gb,
+        )
+    summary = runner.run(
+        state,
+        tasks,
+        baseline_quality=args.baseline_quality,
+        target=target,
+        operator_attribution=attribution,
+        baseline_hardware=baseline_hardware,
+        black_frame_rate_threshold=args.black_frame_rate_threshold,
+        reset_backend_before_run=args.reset_backend_before_run,
+    )
     payload = {"target_profile_id": target.id if target else None, **summary.to_dict()}
     if args.result:
         result_path = Path(args.result).resolve()
@@ -421,6 +443,15 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--output-root", default="var/benchmark")
     benchmark.add_argument("--result")
     benchmark.add_argument("--baseline-quality", type=float)
+    benchmark.add_argument("--baseline-model-size-gb", type=float)
+    benchmark.add_argument("--baseline-latency-s", type=float)
+    benchmark.add_argument("--baseline-peak-memory-gb", type=float)
+    benchmark.add_argument("--black-frame-rate-threshold", type=float, default=0.0)
+    benchmark.add_argument("--primary-intervention", default="quantization")
+    benchmark.add_argument("--secondary-change", action="append", default=[])
+    benchmark.add_argument("--controlled-variable", action="append", default=[])
+    benchmark.add_argument("--rationale", default="")
+    benchmark.add_argument("--reset-backend-before-run", action="store_true", help="POST /free before running to isolate model/cache state")
     benchmark.add_argument("--sample-interval-s", type=float, default=1.0)
     benchmark.add_argument("--task-timeout-s", type=float, default=3600.0)
     _json_flag(benchmark)
