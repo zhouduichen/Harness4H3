@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from .checkpoint import CheckpointInspectionError, CheckpointMetadata, inspect_safetensors
+from .gguf import inspect_gguf
 from .state import ModelState
 
 
@@ -36,6 +37,8 @@ DTYPE_NAMES = {
 
 def _primary_dtype(metadata: CheckpointMetadata) -> str:
     counts = metadata.dtype_parameter_counts
+    if len(counts) > 1:
+        return "mixed"
     code = max(counts, key=counts.get)
     return DTYPE_NAMES.get(code, code.lower())
 
@@ -85,9 +88,12 @@ class H3Inspector:
         include_file_sha256: bool = False,
     ) -> ModelState:
         path = Path(checkpoint_path).resolve()
-        if path.suffix.lower() != ".safetensors":
-            raise CheckpointInspectionError("unsupported checkpoint format %s; expected .safetensors" % path.suffix)
-        checkpoint = inspect_safetensors(path, include_file_sha256)
+        if path.suffix.lower() == ".safetensors":
+            checkpoint = inspect_safetensors(path, include_file_sha256)
+        elif path.suffix.lower() == ".gguf":
+            checkpoint = inspect_gguf(path, include_file_sha256)
+        else:
+            raise CheckpointInspectionError("unsupported checkpoint format %s; expected .safetensors or .gguf" % path.suffix)
         names = [item.name for item in checkpoint.tensors]
         name_set = set(names)
         warnings = []
@@ -104,11 +110,17 @@ class H3Inspector:
             warnings.append("checkpoint does not contain the complete MiniMax-H3 tensor signature")
 
         dtype = _primary_dtype(checkpoint)
-        hidden_size = _matrix_dimension(checkpoint, ["blocks.0.attn.qkv_proj.weight"], 1)
+        qkv = next((item for item in checkpoint.tensors if item.name == "blocks.0.attn.qkv_proj.weight"), None)
+        if qkv is None:
+            hidden_size = None
+        elif checkpoint.format == "gguf" and len(qkv.shape) >= 2:
+            hidden_size = qkv.shape[0] // 2
+        else:
+            hidden_size = _matrix_dimension(checkpoint, ["blocks.0.attn.qkv_proj.weight"], 1)
         ffn_width = _matrix_dimension(
             checkpoint,
-            ["blocks.0.ffn.up_proj.weight", "blocks.0.mlp.up_proj.weight", "blocks.0.ffn.fc1.weight"],
-            0,
+            ["blocks.0.ffn.up_proj.weight", "blocks.0.mlp.up_proj.weight", "blocks.0.ffn.fc1.weight", "blocks.0.mlp.fc1.weight"],
+            1 if checkpoint.format == "gguf" else 0,
         )
         provenance: Dict[str, Any] = {
             "kind": "checkpoint_inspection",
@@ -137,7 +149,7 @@ class H3Inspector:
             sampling_steps=sampling_steps,
             components=dict(components or {"diffusion_model": str(path)}),
             algorithm_state={},
-            runtime_state={"inspector": "safetensors_header", "weights_loaded": False},
+            runtime_state={"inspector": checkpoint.format + "_header", "weights_loaded": False},
             measured_metrics={"model_size_gb": checkpoint.size_bytes / 1_000_000_000},
             provenance=provenance,
             warnings=warnings,

@@ -1,0 +1,43 @@
+id: minimax_h3_rtx5080
+host: autoresearch-5080
+status: verified_manifest_offline_execution
+notes: >-
+  Paths and SHA256 values were verified on the Windows RTX 5080 host. The host
+  must be running the H3 ComfyUI service before benchmark or operator execution.
+assets:
+  - id: dit_nvfp4
+    role: diffusion_model
+    format: safetensors
+    path: 'D:\ComfyUI\models\diffusion_models\minimax_h3_fl2va_pruned_nvfp4.safetensors'
+    bytes: 12528636800
+    sha256: 72fa9269ce551fb63ff42a32d9b46d0c122e84b4b2c511e22fa698287b088f70
+  - id: dit_q4_k
+    role: diffusion_model
+    format: gguf
+    path: 'D:\ComfyUI\models\unet\minimax_h3_fl2va_pruned-Q4_K.gguf'
+    bytes: 11420663904
+    sha256: dd948e08ad0ba3c71bd42f368e283dd82e790f5122a63b276e22a3e0283d0c10
+  - id: text_encoder_q2_k
+    role: text_encoder
+    format: gguf
+    path: 'D:\ComfyUI\models\text_encoders\qwen3vl-32B-MiniMax-H3-Q2_K.gguf'
+    bytes: 8487968160
+    sha256: 5bbc11d0b3ef197c98df2ce8f05de8fbb8eb5917cd91c33d0b59f93759b34914
+  - id: video_vae_fp8mix
+    role: video_vae
+    format: safetensors
+    path: 'D:\ComfyUI\models\vae\minimax_h3_video_vae_fp8mix.safetensors'
+    bytes: 2791886888
+    sha256: b7a3e3354c813287f40c7b5dc5525fcb2ba6f456b6966d7de84288648b0f184f
+  - id: audio_vae_bf16
+    role: audio_vae
+    format: safetensors
+    path: 'D:\ComfyUI\models\vae\minimax_h3_audio_vae_bf16.safetensors'
+    bytes: 302678464
+    sha256: 718d0066254c7540183c7ebe1d7bdaa02bca50c59a233ae9a228d32e1afe8df0
+  - id: turbo_lora
+    role: lora
+    format: safetensors
+    path: 'D:\ComfyUI\models\loras\minimax_h3_turbo_v4_step600_ema.safetensors'
+    bytes: 779849816
+    sha256: 5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3
