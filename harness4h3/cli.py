@@ -12,6 +12,7 @@ from .archive.store import CandidateStore
 from .archive.model_candidate import ModelCandidate
 from .archive.model_store import ModelStore
 from .archive.pareto import ParetoArchive
+from .benchmark.h3 import H3BenchmarkRunner
 from .config import AppConfig, ConfigError, load_config
 from .controller.loop import OptimizationLoop
 from .controller.provider import OllamaStructuredController, OpenAIResponsesController, RuleBasedMockController
@@ -265,6 +266,45 @@ def cmd_optimize(args: argparse.Namespace) -> int:
     return 0 if result.status == "target_satisfied" else 1
 
 
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    config = _config(args)
+    target = load_target_profile(Path(args.target).resolve()) if args.target else None
+    state = H3Inspector().inspect(
+        Path(args.checkpoint),
+        model_id=args.model_id,
+        parent_model_id=args.parent_model_id,
+        sampling_steps=args.sampling_steps,
+        include_file_sha256=args.sha256,
+    )
+    tasks = [task for task in _tasks(config, args.tasks) if args.split == "all" or task.split == args.split]
+    if not tasks:
+        raise ConfigError("no tasks selected for split %s" % args.split)
+    base_url = (args.base_url or os.environ.get("COMFYUI_BASE_URL", config.backend.base_url)).strip().rstrip("/")
+    backend = MiniMaxH3Adapter(
+        base_url=base_url,
+        request_timeout_s=config.backend.request_timeout_s,
+        poll_interval_s=config.backend.poll_interval_s,
+        task_timeout_s=args.task_timeout_s,
+    )
+    runner = H3BenchmarkRunner(
+        backend,
+        SubprocessEvaluator(config.evaluator.command, config.evaluator.timeout_s),
+        load_workflow(config.workflow.template),
+        config.workflow,
+        Path(args.output_root),
+        system_sample_interval_s=args.sample_interval_s,
+    )
+    summary = runner.run(state, tasks, baseline_quality=args.baseline_quality, target=target)
+    payload = {"target_profile_id": target.id if target else None, **summary.to_dict()}
+    if args.result:
+        result_path = Path(args.result).resolve()
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        payload["result"] = str(result_path)
+    _emit(payload, args.json)
+    return 0 if summary.feasible is not False else 1
+
+
 def cmd_model_lineage(args: argparse.Namespace) -> int:
     store = ModelStore(_session_root(args) / "models")
     items = store.lineage()
@@ -367,6 +407,24 @@ def build_parser() -> argparse.ArgumentParser:
     optimize.add_argument("--max-controller-calls", type=int, default=5)
     _json_flag(optimize)
     optimize.set_defaults(handler=cmd_optimize)
+
+    benchmark = subparsers.add_parser("benchmark", help="run the independent real H3/ComfyUI benchmark")
+    benchmark.add_argument("--checkpoint", required=True, help="local H3 .safetensors or .gguf checkpoint")
+    benchmark.add_argument("--model-id", default="M0000")
+    benchmark.add_argument("--parent-model-id")
+    benchmark.add_argument("--sampling-steps", type=int)
+    benchmark.add_argument("--sha256", action="store_true")
+    benchmark.add_argument("--target", help="optional immutable TargetProfile for feasibility evaluation")
+    benchmark.add_argument("--tasks")
+    benchmark.add_argument("--split", choices=("sanity", "dev", "heldout", "all"), default="sanity")
+    benchmark.add_argument("--base-url")
+    benchmark.add_argument("--output-root", default="var/benchmark")
+    benchmark.add_argument("--result")
+    benchmark.add_argument("--baseline-quality", type=float)
+    benchmark.add_argument("--sample-interval-s", type=float, default=1.0)
+    benchmark.add_argument("--task-timeout-s", type=float, default=3600.0)
+    _json_flag(benchmark)
+    benchmark.set_defaults(handler=cmd_benchmark)
 
     lineage = subparsers.add_parser("lineage", help="show immutable model-candidate lineage")
     lineage.add_argument("--session-dir", default="var/evogen")
