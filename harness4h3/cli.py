@@ -24,6 +24,7 @@ from .evaluator.quality import FakeQualityEvaluator
 from .harness.loop import HarnessRunner, load_workflow
 from .harness.state import Task, load_tasks
 from .h3.fake import FakeH3Model
+from .h3.inspector import H3Inspector
 from .memory.experiment_store import ExperimentStore
 from .memory.trajectory import TrajectoryStore
 from .model.minimax_h3 import MiniMaxH3Adapter
@@ -204,8 +205,20 @@ def cmd_validate_target(args: argparse.Namespace) -> int:
 
 
 def cmd_inspect_model(args: argparse.Namespace) -> int:
-    state = FakeH3Model.baseline().state
-    _emit({"backend": "fake", "model_state": state.to_dict()}, args.json)
+    if args.checkpoint:
+        state = H3Inspector().inspect(
+            Path(args.checkpoint),
+            model_id=args.model_id,
+            parent_model_id=args.parent_model_id,
+            architecture_name=args.architecture,
+            sampling_steps=args.sampling_steps,
+            include_file_sha256=args.sha256,
+        )
+        backend = "checkpoint"
+    else:
+        state = FakeH3Model.baseline().state
+        backend = "fake"
+    _emit({"backend": backend, "model_state": state.to_dict()}, args.json)
     return 0
 
 
@@ -328,7 +341,13 @@ def build_parser() -> argparse.ArgumentParser:
     _json_flag(validate_target)
     validate_target.set_defaults(handler=cmd_validate_target)
 
-    inspect = subparsers.add_parser("inspect", help="inspect the deterministic Fake H3 baseline")
+    inspect = subparsers.add_parser("inspect", help="inspect a real H3 safetensors checkpoint or the Fake H3 baseline")
+    inspect.add_argument("--checkpoint", help="local .safetensors checkpoint; weights are never loaded")
+    inspect.add_argument("--model-id", default="M0000")
+    inspect.add_argument("--parent-model-id")
+    inspect.add_argument("--architecture", help="explicit architecture label when metadata is insufficient")
+    inspect.add_argument("--sampling-steps", type=int)
+    inspect.add_argument("--sha256", action="store_true", help="stream the complete file to calculate SHA256")
     _json_flag(inspect)
     inspect.set_defaults(handler=cmd_inspect_model)
 
