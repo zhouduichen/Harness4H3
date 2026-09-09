@@ -1,0 +1,455 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tempfile
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Mapping, Optional
+
+from ..archive.model_candidate import ModelCandidate
+from ..archive.model_store import ModelStore
+from ..archive.pareto import ParetoArchive
+from ..evaluator.composite import CompositeEvaluator
+from ..memory.experiment_store import ExperimentRecord, ExperimentStore
+from ..operators.base import ExecutionContext, OperatorRegistry
+from ..target.profile import TargetProfile
+from .context import ControllerContext
+from .policy import PlanValidationError, ValidationPipeline
+from .provider import ControllerProvider
+from .schemas import BudgetState, CostEstimate, EvaluationResult, ExperimentPlan, OperatorResult
+
+
+class LoopState(str, Enum):
+    INIT = "INIT"
+    LOAD_TARGET = "LOAD_TARGET"
+    LOAD_MODEL = "LOAD_MODEL"
+    INSPECT = "INSPECT"
+    BUILD_CONTEXT = "BUILD_CONTEXT"
+    DIAGNOSE_AND_PLAN = "DIAGNOSE_AND_PLAN"
+    VALIDATE = "VALIDATE"
+    REPLAN = "REPLAN"
+    ESTIMATE_COST = "ESTIMATE_COST"
+    EXECUTE = "EXECUTE"
+    RECORD_FAILURE = "RECORD_FAILURE"
+    REGISTER_CHILD = "REGISTER_CHILD"
+    EVALUATE = "EVALUATE"
+    UPDATE_PARETO = "UPDATE_PARETO"
+    SUMMARIZE_EXPERIMENT = "SUMMARIZE_EXPERIMENT"
+    CHECK_STOP = "CHECK_STOP"
+
+
+@dataclass(frozen=True)
+class SessionState:
+    session_id: str
+    target_profile_id: str
+    current_model_id: str
+    baseline_quality: float
+    budget: BudgetState
+    status: str = "running"
+    transitions: List[str] = field(default_factory=list)
+    failure_counts: Mapping[str, int] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "SessionState":
+        return cls(
+            session_id=str(raw["session_id"]),
+            target_profile_id=str(raw["target_profile_id"]),
+            current_model_id=str(raw["current_model_id"]),
+            baseline_quality=float(raw["baseline_quality"]),
+            budget=BudgetState.from_dict(raw["budget"]),
+            status=str(raw.get("status", "running")),
+            transitions=[str(item) for item in raw.get("transitions", [])],
+            failure_counts={str(key): int(value) for key, value in (raw.get("failure_counts") or {}).items()},
+        )
+
+
+@dataclass(frozen=True)
+class OptimizationResult:
+    status: str
+    current_model_id: str
+    budget: BudgetState
+    transitions: List[str]
+
+
+class OptimizationLoop:
+    def __init__(
+        self,
+        controller: ControllerProvider,
+        operators: OperatorRegistry,
+        evaluator: CompositeEvaluator,
+        models: ModelStore,
+        pareto: ParetoArchive,
+        experiments: ExperimentStore,
+        run_root: Path,
+        checkpoint_path: Path,
+        max_repeated_failures: int = 2,
+    ):
+        self.controller = controller
+        self.operators = operators
+        self.evaluator = evaluator
+        self.models = models
+        self.pareto = pareto
+        self.experiments = experiments
+        self.run_root = Path(run_root)
+        self.checkpoint_path = Path(checkpoint_path)
+        self.max_repeated_failures = max_repeated_failures
+        self.validation = ValidationPipeline()
+
+    def run(
+        self,
+        session_id: str,
+        target: TargetProfile,
+        budget: BudgetState,
+        initial_candidate: ModelCandidate,
+        checkpoint_hook: Optional[Callable[[SessionState], None]] = None,
+    ) -> OptimizationResult:
+        state = self._load_or_initialize(session_id, target, budget, initial_candidate)
+        current = self.models.get(state.current_model_id)
+        initial_evaluation = self.evaluator.evaluate(current.state, target, state.baseline_quality)
+        if initial_evaluation.feasible:
+            return self._finish(state, "target_satisfied")
+
+        while state.status == "running":
+            stop = state.budget.stop_reason()
+            if stop:
+                return self._finish(state, stop)
+            current = self.models.get(state.current_model_id)
+            state = self._transition(state, LoopState.BUILD_CONTEXT)
+            context = self._context(target, current, state)
+            state = self._transition(state, LoopState.DIAGNOSE_AND_PLAN)
+            raw_plan = self.controller.plan(context)
+            state = self._transition(state, LoopState.VALIDATE)
+            try:
+                validated = self.validation.validate(raw_plan, current.state, target, state.budget, self.operators)
+            except PlanValidationError as exc:
+                state = self._record_validation_failure(state, target, current, raw_plan, exc)
+                self._checkpoint(state)
+                if checkpoint_hook:
+                    checkpoint_hook(state)
+                if exc.code == "budget_exhausted":
+                    return self._finish(state, "budget_exhausted")
+                if state.failure_counts.get(exc.code, 0) >= self.max_repeated_failures:
+                    return self._finish(state, "no_valid_plan")
+                state = self._transition(state, LoopState.REPLAN)
+                continue
+
+            plan = validated.plan
+            state = self._transition(state, LoopState.ESTIMATE_COST)
+            experiment_dir = self.run_root / plan.experiment_id
+            experiment_dir.mkdir(parents=True, exist_ok=True)
+            self._write_json(experiment_dir / "controller_request.json", context.to_dict())
+            self._write_json(experiment_dir / "controller_response.json", plan.to_dict())
+            self._write_json(experiment_dir / "plan.json", plan.to_dict())
+            self._write_json(experiment_dir / "validated_plan.json", {**plan.to_dict(), "estimated_cost": asdict(validated.estimated_cost)})
+            state = self._transition(state, LoopState.EXECUTE)
+            child_id = self.models.next_id()
+            operator_result = self.operators.execute(
+                plan.operator,
+                current,
+                plan.operator_args,
+                target,
+                ExecutionContext(experiment_dir, child_id, self.models),
+            )
+            self._write_json(experiment_dir / "operator_result.json", operator_result.to_dict())
+            if not operator_result.ok:
+                state = self._record_operator_failure(state, target, current, plan, operator_result)
+                self._checkpoint(state)
+                if checkpoint_hook:
+                    checkpoint_hook(state)
+                key = operator_result.failure_type or "operator_failure"
+                if state.failure_counts.get(key, 0) >= self.max_repeated_failures:
+                    return self._finish(state, "no_valid_plan")
+                continue
+
+            evaluation: Optional[EvaluationResult] = None
+            child: Optional[ModelCandidate] = None
+            front_ids: List[str] = [entry.candidate_id for entry in self.pareto.front()]
+            keep = True
+            if operator_result.output_state is not None:
+                state = self._transition(state, LoopState.REGISTER_CHILD)
+                child_state = operator_result.output_state
+                child = ModelCandidate(
+                    id=child_id,
+                    parent_id=current.id,
+                    generation=current.generation + 1,
+                    checkpoint_path=child_state.checkpoint_path,
+                    state=child_state,
+                    created_by_experiment_id=plan.experiment_id,
+                    status="candidate",
+                    metadata={"operator": plan.operator},
+                )
+                self.models.create(child)
+                state = self._transition(state, LoopState.EVALUATE)
+                evaluation = self.evaluator.evaluate(child.state, target, state.baseline_quality)
+                self._write_json(experiment_dir / "evaluation.json", evaluation.to_dict())
+                state = self._transition(state, LoopState.UPDATE_PARETO)
+                front_ids = [entry.candidate_id for entry in self.pareto.update(child.id, evaluation)]
+                keep = self._accepted(plan, evaluation, state.baseline_quality)
+                if keep:
+                    self.models.set_active(child.id)
+
+            state = self._transition(state, LoopState.SUMMARIZE_EXPERIMENT)
+            failed = not keep
+            new_budget = state.budget.consume(operator_result.cost, failed=failed, controller_calls=1)
+            next_model_id = child.id if child is not None and keep else current.id
+            decision = {"keep": keep, "continue_from": next_model_id}
+            record = self._record(
+                state,
+                target,
+                current,
+                plan,
+                operator_result,
+                child.id if child else None,
+                evaluation,
+                None if keep else "quality_critical_regression",
+                decision,
+                front_ids,
+            )
+            self.experiments.append(record)
+            state = SessionState(
+                state.session_id,
+                state.target_profile_id,
+                next_model_id,
+                state.baseline_quality,
+                new_budget,
+                transitions=state.transitions,
+                failure_counts=state.failure_counts,
+            )
+            state = self._transition(state, LoopState.CHECK_STOP)
+            self._checkpoint(state)
+            if checkpoint_hook:
+                checkpoint_hook(state)
+            if evaluation is not None and evaluation.feasible and keep:
+                return self._finish(state, "target_satisfied")
+            if evaluation is not None and evaluation.critical_regression and plan.stop_conditions.get("critical_regression", False):
+                return self._finish(state, "critical_failure")
+
+        return self._finish(state, state.status)
+
+    def _load_or_initialize(
+        self,
+        session_id: str,
+        target: TargetProfile,
+        budget: BudgetState,
+        initial: ModelCandidate,
+    ) -> SessionState:
+        if self.checkpoint_path.exists():
+            state = SessionState.from_dict(json.loads(self.checkpoint_path.read_text(encoding="utf-8")))
+            if state.session_id != session_id or state.target_profile_id != target.id:
+                raise ValueError("checkpoint belongs to a different optimization session or target")
+            return SessionState(
+                state.session_id,
+                state.target_profile_id,
+                state.current_model_id,
+                state.baseline_quality,
+                state.budget,
+                status="running" if state.status == "running" else state.status,
+                transitions=state.transitions,
+                failure_counts=state.failure_counts,
+            )
+        self.models.initialize(initial)
+        baseline_quality = float(initial.state.measured_metrics["quality_score"])
+        initial_evaluation = self.evaluator.evaluate(initial.state, target, baseline_quality)
+        if not self.pareto.entries():
+            self.pareto.update(initial.id, initial_evaluation)
+        state = SessionState(session_id, target.id, self.models.active_id, baseline_quality, budget)
+        for transition in (LoopState.INIT, LoopState.LOAD_TARGET, LoopState.LOAD_MODEL, LoopState.INSPECT):
+            state = self._transition(state, transition)
+        self._checkpoint(state)
+        return state
+
+    def _context(self, target: TargetProfile, current: ModelCandidate, state: SessionState) -> ControllerContext:
+        recent = [item.to_dict() for item in list(self.experiments.read())[-8:]]
+        failures = [item for item in recent if item.get("failure_type")]
+        front = [entry.to_dict() for entry in self.pareto.front()]
+        return ControllerContext(target, current.state, state.budget, self.operators.visible(), recent, failures, front)
+
+    @staticmethod
+    def _accepted(plan: ExperimentPlan, evaluation: EvaluationResult, baseline_quality: float) -> bool:
+        if evaluation.critical_regression:
+            return False
+        minimum = plan.acceptance.get("min_quality_score")
+        if minimum is not None and evaluation.quality_score < float(minimum):
+            return False
+        max_drop = plan.acceptance.get("max_quality_drop")
+        if max_drop is not None and evaluation.quality_score < baseline_quality - float(max_drop):
+            return False
+        return True
+
+    def _record_validation_failure(
+        self,
+        state: SessionState,
+        target: TargetProfile,
+        current: ModelCandidate,
+        raw_plan: Any,
+        error: PlanValidationError,
+    ) -> SessionState:
+        state = self._transition(state, LoopState.RECORD_FAILURE)
+        number = state.budget.used_iterations + 1
+        plan_dict = raw_plan.to_dict() if isinstance(raw_plan, ExperimentPlan) else (dict(raw_plan) if isinstance(raw_plan, Mapping) else {"raw": repr(raw_plan)})
+        record = ExperimentRecord(
+            experiment_id=str(plan_dict.get("experiment_id") or "invalid_%04d" % number),
+            session_id=state.session_id,
+            target_profile_id=target.id,
+            controller=self._controller_metadata(),
+            parent_model_id=current.id,
+            child_model_id=None,
+            state_digest=self._state_digest(current),
+            diagnosis={"text": plan_dict.get("diagnosis", "")},
+            plan=plan_dict,
+            execution={"status": "rejected", "message": str(error)},
+            training_logs=[],
+            cost=asdict(CostEstimate()),
+            evaluation=None,
+            failure_type=error.code,
+            decision={"keep": False, "continue_from": current.id},
+            pareto_update={"front": [entry.candidate_id for entry in self.pareto.front()]},
+            created_at=self._now(),
+        )
+        self.experiments.append(record)
+        counts = dict(state.failure_counts)
+        counts[error.code] = counts.get(error.code, 0) + 1
+        return SessionState(
+            state.session_id,
+            state.target_profile_id,
+            current.id,
+            state.baseline_quality,
+            state.budget.consume(CostEstimate(), failed=True, controller_calls=1),
+            transitions=state.transitions,
+            failure_counts=counts,
+        )
+
+    def _record_operator_failure(
+        self,
+        state: SessionState,
+        target: TargetProfile,
+        current: ModelCandidate,
+        plan: ExperimentPlan,
+        result: OperatorResult,
+    ) -> SessionState:
+        state = self._transition(state, LoopState.RECORD_FAILURE)
+        key = result.failure_type or "operator_failure"
+        record = self._record(
+            state,
+            target,
+            current,
+            plan,
+            result,
+            None,
+            None,
+            key,
+            {"keep": False, "continue_from": current.id},
+            [entry.candidate_id for entry in self.pareto.front()],
+        )
+        self.experiments.append(record)
+        counts = dict(state.failure_counts)
+        counts[key] = counts.get(key, 0) + 1
+        return SessionState(
+            state.session_id,
+            state.target_profile_id,
+            current.id,
+            state.baseline_quality,
+            state.budget.consume(result.cost, failed=True, controller_calls=1),
+            transitions=state.transitions,
+            failure_counts=counts,
+        )
+
+    def _record(
+        self,
+        state: SessionState,
+        target: TargetProfile,
+        parent: ModelCandidate,
+        plan: ExperimentPlan,
+        operator_result: OperatorResult,
+        child_id: Optional[str],
+        evaluation: Optional[EvaluationResult],
+        failure_type: Optional[str],
+        decision: Mapping[str, Any],
+        front_ids: List[str],
+    ) -> ExperimentRecord:
+        return ExperimentRecord(
+            experiment_id=plan.experiment_id,
+            session_id=state.session_id,
+            target_profile_id=target.id,
+            controller=self._controller_metadata(),
+            parent_model_id=parent.id,
+            child_model_id=child_id,
+            state_digest=self._state_digest(parent),
+            diagnosis={"text": plan.diagnosis},
+            plan=plan.to_dict(),
+            execution=operator_result.to_dict(),
+            training_logs=list(operator_result.artifacts),
+            cost=asdict(operator_result.cost),
+            evaluation=evaluation.to_dict() if evaluation else None,
+            failure_type=failure_type,
+            decision=dict(decision),
+            pareto_update={"front": front_ids},
+            created_at=self._now(),
+        )
+
+    def _controller_metadata(self) -> Mapping[str, Any]:
+        return {
+            "provider": getattr(self.controller, "provider_name", "unknown"),
+            "model": getattr(self.controller, "model_name", "unknown"),
+        }
+
+    @staticmethod
+    def _state_digest(candidate: ModelCandidate) -> str:
+        payload = json.dumps(candidate.state.to_dict(), ensure_ascii=False, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
+    def _transition(state: SessionState, transition: LoopState) -> SessionState:
+        return SessionState(
+            state.session_id,
+            state.target_profile_id,
+            state.current_model_id,
+            state.baseline_quality,
+            state.budget,
+            status=state.status,
+            transitions=state.transitions + [transition.value],
+            failure_counts=state.failure_counts,
+        )
+
+    def _finish(self, state: SessionState, status: str) -> OptimizationResult:
+        finished = SessionState(
+            state.session_id,
+            state.target_profile_id,
+            state.current_model_id,
+            state.baseline_quality,
+            state.budget,
+            status=status,
+            transitions=state.transitions,
+            failure_counts=state.failure_counts,
+        )
+        self._checkpoint(finished)
+        return OptimizationResult(status, finished.current_model_id, finished.budget, finished.transitions)
+
+    def _checkpoint(self, state: SessionState) -> None:
+        self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix="session-", suffix=".json", dir=str(self.checkpoint_path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(state.to_dict(), handle, ensure_ascii=False, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.checkpoint_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    @staticmethod
+    def _write_json(path: Path, value: Any) -> None:
+        path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat()

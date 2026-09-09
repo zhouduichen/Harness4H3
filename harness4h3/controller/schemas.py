@@ -78,7 +78,7 @@ class BudgetState:
         )
 
     def stop_reason(self) -> Optional[str]:
-        if self.used_failures >= self.max_failed_experiments:
+        if self.used_failures > 0 and self.used_failures >= self.max_failed_experiments:
             return "max_failures"
         if self.used_iterations >= self.max_iterations:
             return "max_iterations"

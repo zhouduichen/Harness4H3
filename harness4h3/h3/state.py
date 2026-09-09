@@ -58,7 +58,7 @@ class ModelState:
                 "quality_score": 0.90,
                 "latency_s": 60.0,
                 "peak_memory_gb": 12.0,
-                "model_size_gb": 10.0,
+                "model_size_gb": 7.0,
                 "energy_j": 120.0,
                 "throughput": 1.0 / 60.0,
             },
