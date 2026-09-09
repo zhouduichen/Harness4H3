@@ -55,3 +55,16 @@ def test_h3_benchmark_uses_state_steps_and_reports_quality_latency(tmp_path):
     assert summary.quality_score == 0.95
     assert summary.hardware == HardwareMetrics(latency_s=2.0, peak_memory_gb=None, model_size_gb=11.4, energy_j=None, throughput=0.5, thermal=None)
     assert summary.runs[0].status == "success"
+
+
+def test_benchmark_does_not_claim_feasibility_without_baseline_quality(tmp_path):
+    workflow = {
+        "131": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"prompt": "old"}},
+    }
+    config = WorkflowConfig(tmp_path / "workflow.json", Target("131", "prompt"), None, {})
+    state = ModelState.from_dict({**ModelState.fake_baseline().to_dict(), "measured_metrics": {"model_size_gb": 1.0}})
+    task = Task("t1", "A visible dragon", "sanity")
+    summary = H3BenchmarkRunner(FakeBackend(), FakeEvaluator(), workflow, config, tmp_path / "outputs", 0.01).run(
+        state, [task], target=type("Target", (), {"max_model_size_gb": 10, "max_peak_memory_gb": 10, "max_latency_s": 10, "max_energy_j": None, "max_quality_drop": 0.05, "min_quality_score": None})()
+    )
+    assert summary.feasible is None

@@ -212,11 +212,11 @@ class H3BenchmarkRunner:
         )
         feasible: Optional[bool] = None
         violations: Tuple[str, ...] = ()
-        if target is not None and quality_score is not None:
+        if target is not None and quality_score is not None and baseline_quality is not None:
             from ..evaluator.constraints import ConstraintEvaluator
 
             feasible_value, violation_list, _ = ConstraintEvaluator().evaluate(
-                quality_score, hardware, target, float(baseline_quality if baseline_quality is not None else quality_score)
+                quality_score, hardware, target, float(baseline_quality)
             )
             feasible, violations = feasible_value, tuple(violation_list)
         return BenchmarkSummary(state.model_id, len(runs), quality_score, quality_metrics, hardware, feasible, violations, tuple(runs), tuple(sampler.samples))

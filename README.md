@@ -80,6 +80,7 @@ Run the independent real H3 benchmark on a host that can access ComfyUI and the 
 .venv/bin/python -m harness4h3 benchmark \
   --checkpoint 'D:\ComfyUI\models\diffusion_models\minimax_h3_fl2va_pruned_nvfp4.safetensors' \
   --sampling-steps 4 --target configs/targets/rtx5080_example.yaml \
+  --baseline-quality 0.991137 \
   --base-url http://100.88.143.10:8188 --result var/benchmark/nvfp4.json --json
 ```
 
