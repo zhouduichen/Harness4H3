@@ -16,7 +16,7 @@ Autonomous Model Optimization
 
 Phase I 的 Controller LLM 权重固定，Harness 只允许它产生结构化 `ExperimentPlan` 并选择已注册的模型级 Operator。模型修改必须产生不可变的 `M0000`、`M0001`… candidate，经独立质量/硬件 evaluator 验证后进入 Pareto archive。Phase I 不训练 Controller LLM、不演化 Harness、不做 kernel/compiler search，也不允许 Controller 执行 shell 或修改源码、evaluator、benchmark 与目标约束。
 
-当前正式交付为 M0 + M1：完全离线 Fake H3 closed loop。真实 LLM、真实 H3 Inspector、真实 Quantize/Benchmark 尚未冒充实现。
+当前正式交付覆盖 M0–M4：完全离线 Fake H3 closed loop、结构化 Ollama/OpenAI Responses 控制器、safetensors/GGUF H3 Inspector、受限本地进程执行器，以及固定部署变体的真实 H3 quantize operator。M5 的真实质量/硬件改善仍以远端实测门禁为准，不把失败结果包装成成功。
 
 ## 离线闭环
 
@@ -65,6 +65,15 @@ Fake StepDistill 除规格给出的 latency `×0.55`、quality `×0.96` 外，�
 .venv/bin/python -m harness4h3 replay --session-dir var/evogen --json
 ```
 
+Inspect a local H3 checkpoint without loading its weights:
+
+```bash
+.venv/bin/python -m harness4h3 inspect \
+  --checkpoint 'D:\ComfyUI\models\diffusion_models\minimax_h3_fl2va_pruned_nvfp4.safetensors' --json
+```
+
+The Ollama controller uses `/api/chat` with `stream=false`, `think=false`, temperature 0, and a strict ExperimentPlan schema. The OpenAI Responses controller uses `/v1/responses`, strict `text.format` JSON Schema, and `store=false`; API keys are read only from the configured environment variable.
+
 每个 session 只在初始化时读取一次 TargetProfile。`session.json` 原子保存 current model、预算和失败计数；相同 session 可在中断后恢复。每个实验目录保存 controller request/response、plan、validated plan、operator result 与 evaluation。
 
 ## Phase I 安全边界
@@ -79,7 +88,7 @@ SchemaValidator
 → Executor
 ```
 
-当前 fake registry 只开放 `inspect`、`quantize`、`step_distill`、`rollback`。`CreateStudent`、`Distill`、`Prune`、真实 `Benchmark`、任意 shell、CUDA/Triton 和源码修改均不可执行。
+默认 fake registry 只开放 `inspect`、`quantize`、`step_distill`、`rollback`。真实 `PrebuiltQuantizeOperator` 的候选路径来自固定部署配置，LLM 只能选择 bits；`CreateStudent`、`Distill`、`Prune`、任意 shell、CUDA/Triton 和源码修改均不可执行。真实候选在 held-out benchmark 前会标记 `metrics_stale`。
 
 Evaluator 是独立权威。Pareto 先比较 hard-constraint feasibility，再比较 quality、latency、memory、model size 与 energy；不把单一 scalar reward 当作核心排序。
 
@@ -100,4 +109,4 @@ Evaluator 是独立权威。Pareto 先比较 hard-constraint feasibility，再�
 
 ## 下一里程碑
 
-第二交付将依次加入 structured LLM provider、真实 H3 checkpoint inspector、受限 external-script executor，以及第一个真实 Quantize + quality/hardware benchmark。只有得到真实 H3-derived child 的可测量效率改善且质量回归在阈值内，才算进入科研成功，而不只是工程闭环成功。
+远端 RTX 5080 的真实运行记录见 `docs/real-experiments/2026-09-09-windows-rtx5080.md`。只有得到真实 H3-derived child 的可测量效率改善且质量回归在阈值内，才算进入科研成功，而不只是工程闭环成功。

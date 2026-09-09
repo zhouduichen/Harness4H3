@@ -22,4 +22,4 @@ TargetProfile + ModelState + Budget + Experience + Pareto
         ExperimentRecord + Pareto + next state
 ```
 
-The loop is bounded by iterations, failures, wall time, GPU hours and controller calls. An atomic session checkpoint is written after every experiment. The first delivery provides deterministic fake execution only; the same interfaces are the replacement points for a real provider, H3 inspector, process executor and real evaluators.
+The loop is bounded by iterations, failures, wall time, GPU hours and controller calls. An atomic session checkpoint is written after every experiment. Structured Ollama and OpenAI Responses providers are network opt-in; default tests remain offline. H3 Inspector reads only safetensors/GGUF headers, while LocalProcessExecutor runs fixed argv with `shell=False`, isolated cwd, allowlisted environment, captured logs and timeout termination. Real prebuilt quantized variants are marked with stale metrics until an external benchmark fills them.
