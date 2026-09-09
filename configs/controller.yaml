@@ -8,6 +8,11 @@ providers:
     model: qwen3.5:4b
     base_url: http://127.0.0.1:11434
     network_access: local_only
+  ollama_windows_qwen35:
+    model: qwen3.5:9b-q8_0
+    base_url: http://100.88.143.10:11434
+    host: autoresearch-5080
+    network_access: tailscale_only
   openai:
     model: fixed-model
     endpoint: https://api.openai.com/v1/responses
