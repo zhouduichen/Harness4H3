@@ -112,11 +112,38 @@ class FakeOperator:
         return self.backend.execute(self.name, parent, args, runtime)
 
 
-def build_fake_registry(backend: Optional[FakeOperatorBackend] = None) -> OperatorRegistry:
+def build_fake_registry(backend: Optional[FakeOperatorBackend] = None, include_runtime: bool = False) -> OperatorRegistry:
     backend = backend or FakeOperatorBackend()
     registry = OperatorRegistry()
     registry.register(FakeOperator("inspect", "Inspect normalized model state", backend, {}))
     registry.register(FakeOperator("quantize", "Fake int4: quality x0.99, latency x0.80, memory x0.65, model size x0.55", backend, {"bits": (int,)}))
     registry.register(FakeOperator("step_distill", "Fake step distill: quality x0.96, latency x0.55, memory x0.70", backend, {"target_steps": (int,)}))
     registry.register(FakeOperator("rollback", "Clone a prior immutable candidate as a new child", backend, {"target_model_id": (str,)}))
+    if include_runtime:
+        from .runtime_memory import RuntimeMemoryOperator
+
+        registry.register(
+            RuntimeMemoryOperator(
+                "runtime_offload",
+                "Runtime offload policy: reduce residency without changing model weights",
+                "runtime_offload",
+                {"mode": (str,)},
+            )
+        )
+        registry.register(
+            RuntimeMemoryOperator(
+                "vae_tiling",
+                "Decode VAE tiles to bound temporary activation memory",
+                "vae_tiling",
+                {"tile_size": (int,), "overlap": (int,)},
+            )
+        )
+        registry.register(
+            RuntimeMemoryOperator(
+                "inference_chunking",
+                "Chunk H3 inference when the workflow exposes a compatible input",
+                "inference_chunking",
+                {"chunk_size": (int,)},
+            )
+        )
     return registry
