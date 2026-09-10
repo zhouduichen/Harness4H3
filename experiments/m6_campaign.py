@@ -78,6 +78,8 @@ def build_research_report(
     accepted = [item for item in iterations if item.get("outcome") == "accepted_candidate"]
     rejected = [item for item in iterations if item.get("outcome") == "rejected_candidate"]
     failed = [item for item in iterations if item.get("outcome") == "failed_experiment"]
+    archive_candidates = list(payload.get("system_candidates") or [])
+    pareto_candidates = [item for item in archive_candidates if item.get("status") != "failed"]
     operators = [str(item.get("operator")) for item in iterations if item.get("operator")]
     return {
         "harness_version": payload["harness"]["version"],
@@ -88,7 +90,8 @@ def build_research_report(
         "accepted_experiments": accepted,
         "rejected_experiments": rejected,
         "failed_experiments": failed,
-        "final_pareto_candidates": list(payload.get("system_candidates") or []),
+        "final_pareto_candidates": pareto_candidates,
+        "final_archive_candidates": archive_candidates,
         "total_experiments": len(iterations),
         "failed_experiment_count": len(failed),
         "rejected_candidate_count": len(rejected),
