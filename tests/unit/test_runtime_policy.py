@@ -49,3 +49,25 @@ def test_unknown_policy_fails_explicitly():
     with pytest.raises(BackendError) as error:
         apply_runtime_policy(workflow(), {"kind": "unknown", "args": {}})
     assert error.value.failure_type == "runtime_policy_unsupported"
+
+
+def test_component_lifecycle_fails_when_workflow_has_no_stage_controls():
+    with pytest.raises(BackendError) as error:
+        apply_runtime_policy(
+            workflow(),
+            {
+                "kind": "component_lifecycle_optimize",
+                "args": {
+                    "unload_text_encoder_after_encode": True,
+                    "offload_vae_until_decode": True,
+                    "free_cache_before_decode": True,
+                },
+            },
+        )
+    assert error.value.failure_type == "runtime_policy_unsupported"
+
+
+def test_cache_release_is_a_guarded_backend_boundary_policy():
+    candidate = workflow()
+    result = apply_runtime_policy(candidate, {"kind": "cache_release", "args": {"stage": "before_decode"}})
+    assert result == candidate

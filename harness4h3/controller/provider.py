@@ -238,18 +238,54 @@ class RuleBasedMockController:
         target = context.target_profile
         metrics = state.measured_metrics
         quantized = int(state.quantization.get("bits", 16)) <= 4
-        runtime_names = {str(item["name"]) for item in context.available_operators}
+        runtime_names = {
+            str(item["name"])
+            for item in context.available_operators
+            if str(item.get("name", "")).startswith(("runtime_", "vae_", "inference_", "component_", "cache_"))
+        }
+        failed_runtime = {
+            str(item.get("operator"))
+            for item in context.relevant_failures
+            if isinstance(item, Mapping) and item.get("operator")
+        }
         memory_blocked = target.max_peak_memory_gb is not None and float(metrics["peak_memory_gb"]) > target.max_peak_memory_gb
         size_blocked = target.max_model_size_gb is not None and float(metrics["model_size_gb"]) > target.max_model_size_gb
         latency_blocked = target.max_latency_s is not None and float(metrics["latency_s"]) > target.max_latency_s
-        if quantized and memory_blocked and "runtime_offload" in runtime_names:
-            operator = "runtime_offload"
-            args = {"mode": "aggressive"}
-            diagnosis = "residual_runtime_peak_memory"
-            objective = "move the remaining memory bottleneck into the runtime layer"
-            hypothesis = "aggressive offload lowers peak VRAM without changing NVFP4 weights"
-            effects = {"peak_memory_gb": "decrease", "quality_score": "preserve", "model_size_gb": "unchanged"}
-            required = {"wall_time_s": 0.05, "gpu_hours": 0.0}
+        if quantized and memory_blocked and runtime_names:
+            runtime_priority = (
+                ("runtime_offload", {"mode": "aggressive"}),
+                (
+                    "component_lifecycle_optimize",
+                    {
+                        "unload_text_encoder_after_encode": True,
+                        "offload_vae_until_decode": True,
+                        "free_cache_before_decode": True,
+                    },
+                ),
+                ("vae_decode_offload", {"mode": "cpu"}),
+                ("cache_release", {"stage": "before_decode"}),
+                ("vae_tiling", {"tile_size": 256, "overlap": 32}),
+                ("inference_chunking", {"chunk_size": 4}),
+            )
+            selected = next(
+                ((name, candidate_args) for name, candidate_args in runtime_priority if name in runtime_names and name not in failed_runtime),
+                None,
+            )
+            if selected is not None:
+                operator, args = selected
+                diagnosis = "residual_runtime_peak_memory"
+                objective = "move the remaining memory bottleneck into the runtime layer"
+                hypothesis = "the next runtime policy lowers peak VRAM without changing NVFP4 weights"
+                effects = {"peak_memory_gb": "decrease", "quality_score": "preserve", "model_size_gb": "unchanged"}
+                required = {"wall_time_s": 0.05, "gpu_hours": 0.0}
+            else:
+                operator = "inspect"
+                args = {}
+                diagnosis = "runtime_operators_exhausted"
+                objective = "confirm that all registered runtime policies were tested"
+                hypothesis = "inspection records the exhausted runtime search without changing the model"
+                effects = {"model_state": "unchanged"}
+                required = {"wall_time_s": 0.02, "gpu_hours": 0.0}
         elif (memory_blocked or size_blocked) and not quantized:
             operator = "quantize"
             args: Mapping[str, Any] = {"bits": 4}

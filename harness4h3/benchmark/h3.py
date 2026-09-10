@@ -163,10 +163,33 @@ class H3BenchmarkRunner:
             inputs = model_node.setdefault("inputs", {})
             inputs["unet_name"] = checkpoint_name
             workflow["127"] = model_node
-        runtime_policy = state.runtime_state.get("runtime_policy") if isinstance(state.runtime_state, Mapping) else None
-        if runtime_policy is not None:
-            apply_runtime_policy(workflow, runtime_policy)
+        runtime_state = state.runtime_state if isinstance(state.runtime_state, Mapping) else {}
+        runtime_recipe = runtime_state.get("runtime_recipe")
+        if isinstance(runtime_recipe, (list, tuple)):
+            for runtime_policy in runtime_recipe:
+                apply_runtime_policy(workflow, runtime_policy)
+        else:
+            runtime_policy = runtime_state.get("runtime_policy")
+            if runtime_policy is not None:
+                apply_runtime_policy(workflow, runtime_policy)
         return workflow
+
+    @staticmethod
+    def _requires_task_cache_release(state: ModelState) -> bool:
+        runtime_state = state.runtime_state if isinstance(state.runtime_state, Mapping) else {}
+        policies = runtime_state.get("runtime_recipe")
+        if not isinstance(policies, (list, tuple)):
+            policies = [runtime_state.get("runtime_policy")]
+        for policy in policies:
+            if not isinstance(policy, Mapping):
+                continue
+            kind = str(policy.get("kind", ""))
+            args = policy.get("args") if isinstance(policy.get("args"), Mapping) else {}
+            if kind == "cache_release":
+                return True
+            if kind == "component_lifecycle_optimize" and args.get("free_cache_before_decode") is True:
+                return True
+        return False
 
     def run(
         self,
@@ -183,8 +206,11 @@ class H3BenchmarkRunner:
         if not 0.0 <= float(black_frame_rate_threshold) <= 1.0:
             raise ValueError("black_frame_rate_threshold must be between 0 and 1")
         runs: List[BenchmarkTaskResult] = []
+        release_each_task = self._requires_task_cache_release(state)
+        reset = getattr(self.backend, "free", None)
+        if release_each_task and not callable(reset):
+            raise ValueError("cache-release runtime policy requires a backend.free() method")
         if reset_backend_before_run:
-            reset = getattr(self.backend, "free", None)
             if not callable(reset):
                 raise ValueError("reset_backend_before_run requires a backend.free() method")
             reset()
@@ -192,6 +218,8 @@ class H3BenchmarkRunner:
             for task in tasks:
                 started = time.monotonic()
                 try:
+                    if release_each_task:
+                        reset()
                     result = self.backend.run(self._workflow(state, task), self.output_root / state.model_id / task.id)
                     artifacts = tuple(str(path.resolve()) for path in result.artifacts)
                     evaluation: EvaluationResult = self.evaluator.evaluate(

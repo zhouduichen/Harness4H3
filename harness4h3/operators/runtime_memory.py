@@ -40,12 +40,15 @@ class RuntimeMemoryOperator:
             raise OperatorValidationError("%s requires argument(s): %s" % (self.name, ", ".join(missing)))
         for key, value in args.items():
             allowed = self.allowed_args[key]
-            if isinstance(value, bool) or not isinstance(value, allowed):
+            if (isinstance(value, bool) and bool not in allowed) or not isinstance(value, allowed):
                 raise OperatorValidationError("%s.%s has invalid type" % (self.name, key))
         if parent.architecture_name.lower().find("h3") < 0:
             raise OperatorValidationError("%s requires an H3 model" % self.name)
         if self.policy_kind == "runtime_offload" and args["mode"] not in {"balanced", "aggressive"}:
             raise OperatorValidationError("runtime_offload.mode must be balanced or aggressive")
+        if self.policy_kind == "component_lifecycle_optimize":
+            if any(not isinstance(args[key], bool) for key in self.allowed_args):
+                raise OperatorValidationError("component_lifecycle_optimize controls must be boolean")
         if self.policy_kind == "vae_tiling":
             tile_size = int(args["tile_size"])
             overlap = int(args["overlap"])
@@ -57,6 +60,10 @@ class RuntimeMemoryOperator:
             chunk_size = int(args["chunk_size"])
             if chunk_size < 1 or chunk_size > 32:
                 raise OperatorValidationError("inference_chunking.chunk_size must be between 1 and 32")
+        if self.policy_kind == "vae_decode_offload" and args["mode"] not in {"balanced", "cpu"}:
+            raise OperatorValidationError("vae_decode_offload.mode must be balanced or cpu")
+        if self.policy_kind == "cache_release" and args["stage"] not in {"before_decode", "between_stages", "always"}:
+            raise OperatorValidationError("cache_release.stage is unsupported")
 
     def estimate_cost(self, parent: ModelState, args: Mapping[str, Any], target: TargetProfile) -> CostEstimate:
         self.validate(parent, args, target)
@@ -67,9 +74,35 @@ class RuntimeMemoryOperator:
             self.validate(parent.state, args, TargetProfile("runtime", "unknown", "unknown"))
             policy = {"kind": self.policy_kind, "args": copy.deepcopy(dict(args))}
             runtime_state = copy.deepcopy(dict(parent.state.runtime_state))
+            lifecycle = copy.deepcopy(dict(runtime_state.get("component_lifecycle") or {}))
+            lifecycle.setdefault("denoiser_loaded", True)
+            lifecycle.setdefault("text_encoder_loaded", True)
+            lifecycle.setdefault("vae_loaded", True)
+            lifecycle.setdefault("lora_loaded", True)
+            lifecycle.setdefault("cache_state", "resident")
+            lifecycle.setdefault("offload_policy", "none")
+            lifecycle.setdefault("unload_points", [])
+            if self.policy_kind == "component_lifecycle_optimize":
+                if args["unload_text_encoder_after_encode"]:
+                    lifecycle["text_encoder_loaded"] = False
+                    lifecycle["unload_points"] = list(lifecycle["unload_points"]) + ["after_encode"]
+                if args["offload_vae_until_decode"]:
+                    lifecycle["vae_loaded"] = False
+                    lifecycle["offload_policy"] = "vae_until_decode"
+                if args["free_cache_before_decode"]:
+                    lifecycle["cache_state"] = "release_before_decode"
+            elif self.policy_kind == "vae_decode_offload":
+                lifecycle["vae_loaded"] = False
+                lifecycle["offload_policy"] = "vae_decode_%s" % args["mode"]
+            elif self.policy_kind == "cache_release":
+                lifecycle["cache_state"] = "release_%s" % args["stage"]
+            runtime_state["component_lifecycle"] = lifecycle
+            recipe = list(runtime_state.get("runtime_recipe") or [])
+            recipe.append(copy.deepcopy(policy))
             runtime_state.update(
                 {
                     "runtime_policy": policy,
+                    "runtime_recipe": recipe,
                     "metrics_stale": True,
                     "runtime_parent_model_id": parent.id,
                 }
@@ -115,6 +148,34 @@ def build_runtime_registry(backend: Any = None) -> OperatorRegistry:
             "Chunk H3 inference when the workflow exposes a compatible input",
             "inference_chunking",
             {"chunk_size": (int,)},
+        )
+    )
+    registry.register(
+        RuntimeMemoryOperator(
+            "component_lifecycle_optimize",
+            "Coordinate text encoder, VAE, and cache residency across pipeline stages",
+            "component_lifecycle_optimize",
+            {
+                "unload_text_encoder_after_encode": (bool,),
+                "offload_vae_until_decode": (bool,),
+                "free_cache_before_decode": (bool,),
+            },
+        )
+    )
+    registry.register(
+        RuntimeMemoryOperator(
+            "vae_decode_offload",
+            "Request explicit CPU/offload placement for VAE decode",
+            "vae_decode_offload",
+            {"mode": (str,)},
+        )
+    )
+    registry.register(
+        RuntimeMemoryOperator(
+            "cache_release",
+            "Release backend cache at a declared pipeline boundary",
+            "cache_release",
+            {"stage": (str,)},
         )
     )
     return registry

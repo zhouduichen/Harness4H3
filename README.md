@@ -151,3 +151,17 @@ PYTHONPATH=. .venv/bin/python experiments/m6_runtime_memory.py \
 M6 只有在 dev 与 held-out 两组同时满足生成/解码有效、黑帧率为 `0`、质量下降不超过 `0.05`、保留 M5.5 的模型体积与延迟收益，且 `peak_vram_max_gb <= 16.0` 时才返回成功。缺失节点能力、远端不可达和任一峰值超限都会作为显式失败记录保留。
 
 2026-09-10 的真实重试由远端 `qwen3.5:9b-q8_0` Controller 自主选择 `vae_tiling`。完整证据见 `var/m6-runtime/m6-validation-retry2.json`：生成、解码、质量、黑帧、模型大小和延迟门槛均通过，但 dev/held-out 的 `peak_vram_max_gb` 分别为 `16.598359976` 和 `16.60216004`，所以整体返回非零并且没有创建 accepted M6 candidate。一次只重跑 held-out 的诊断结果单独保存在 `var/m6-runtime/m6-vae-heldout-retry2.json`，不与完整 acceptance 混合。后续入口还会过滤 Controller 误带的其他 operator 参数，并在 evidence 中保留被忽略字段。
+
+## M6 Runtime Recipe Continuation
+
+本轮 `vae_tiling` 的实测结果已固化为 rejected gene：`docs/experience/design-gene-m6-vae-tiling.json`。后续 recipe 入口 `experiments/m6_runtime_recipe.py` 在同一 TargetProfile 下把失败 gate、只读 Design Gene 和当前 runtime state 重新交给 Controller；它可以追加新的 lifecycle/offload/cache policy，直到 dev 与 held-out 同时通过或预算耗尽。runtime-only 分支以 `SystemCandidate(C…)` 保存，底层 checkpoint 仍引用 `ModelCandidate(M…)`，不会复制权重文件。
+
+```bash
+PYTHONPATH=. .venv/bin/python experiments/m6_runtime_recipe.py \
+  --controller ollama --max-iterations 4 --max-failed-experiments 4 \
+  --splits dev,heldout --request-timeout 120 \
+  --base-url http://100.88.143.10:8188 \
+  --controller-url http://100.88.143.10:11434
+```
+
+新增的 `component_lifecycle_optimize`、`vae_decode_offload`、`cache_release` 均为 capability-guarded operator；工作流没有对应控制时明确返回 `runtime_policy_unsupported`，不会伪造优化效果。

@@ -32,11 +32,23 @@ _RUNTIME_OPERATOR_DEFAULTS = {
     "runtime_offload": {"mode": "aggressive"},
     "vae_tiling": {"tile_size": 256, "overlap": 32},
     "inference_chunking": {"chunk_size": 4},
+    "component_lifecycle_optimize": {
+        "unload_text_encoder_after_encode": True,
+        "offload_vae_until_decode": True,
+        "free_cache_before_decode": True,
+    },
+    "vae_decode_offload": {"mode": "cpu"},
+    "cache_release": {"stage": "before_decode"},
 }
 _RUNTIME_OPERATOR_KEYS = {
     "runtime_offload": frozenset({"mode"}),
     "vae_tiling": frozenset({"tile_size", "overlap"}),
     "inference_chunking": frozenset({"chunk_size"}),
+    "component_lifecycle_optimize": frozenset(
+        {"unload_text_encoder_after_encode", "offload_vae_until_decode", "free_cache_before_decode"}
+    ),
+    "vae_decode_offload": frozenset({"mode"}),
+    "cache_release": frozenset({"stage"}),
 }
 
 

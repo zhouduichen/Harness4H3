@@ -83,6 +83,6 @@
 - Evidence records retain rejected branches and never claim TargetProfile feasibility from averages.
 
 - [x] Add the real runner, fixed branch definitions, atomic evidence, and append-only trajectory output.
-- [ ] Run unit tests and a remote RTX 5080 smoke/acceptance matrix (blocked: host offline on 2026-09-10).
+- [x] Run unit tests and a remote RTX 5080 smoke/acceptance matrix. The host came online; the real dev/held-out matrix completed, and the strict peak-VRAM gate correctly rejected the branch at 16.598GB/16.602GB.
 - [x] Update repository evidence to record implementation and the unresolved real gate; Design Gene is now `validated` from M5.5 evidence.
-- [ ] Commit `feat: execute M6 runtime memory validation` after real RTX 5080 evidence is available.
+- [x] Commit the real RTX 5080 evidence and retain the rejected branch; follow-up runtime-recipe continuation is specified separately in `docs/superpowers/specs/2026-09-10-m6-runtime-recipe-design.md`.

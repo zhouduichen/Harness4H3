@@ -141,3 +141,29 @@ def test_runtime_context_exposes_design_gene_and_rule_controller_switches_layer(
     plan = RuleBasedMockController().plan(context_value)
     assert plan.operator == "runtime_offload"
     assert plan.operator_args == {"mode": "aggressive"}
+
+
+def test_rule_controller_moves_to_next_runtime_operator_after_rejection():
+    current = ModelState.from_dict(
+        {
+            **ModelState.fake_baseline().to_dict(),
+            "model_id": "M0001",
+            "parent_model_id": "M0000",
+            "architecture_name": "MiniMax-H3",
+            "quantization": {"bits": 4, "scheme": "nvfp4"},
+            "measured_metrics": {"quality_score": 0.99, "latency_s": 90.0, "peak_memory_gb": 16.3, "model_size_gb": 12.5},
+        }
+    )
+    operators = tuple(
+        {"name": name, "description": "", "input_schema": {"mode": "str"}}
+        for name in ("runtime_offload", "vae_decode_offload")
+    )
+    value = ControllerContext(
+        TargetProfile("rtx", "gpu", "local", max_peak_memory_gb=16.0, max_quality_drop=0.05),
+        current,
+        BudgetState(4, 4),
+        operators,
+        relevant_failures=[{"operator": "runtime_offload", "failure_type": "acceptance_rejected"}],
+    )
+    plan = RuleBasedMockController().plan(value)
+    assert plan.operator == "vae_decode_offload"

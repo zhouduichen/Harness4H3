@@ -130,3 +130,19 @@ def test_benchmark_can_reset_backend_before_controlled_run(tmp_path):
         state, [task], reset_backend_before_run=True
     )
     assert backend.free_calls == 1
+
+
+def test_cache_release_policy_frees_backend_at_each_task_boundary(tmp_path):
+    config = WorkflowConfig(tmp_path / "workflow.json", Target("131", "prompt"), None, {})
+    backend = ResettableFakeBackend()
+    state = ModelState.from_dict(
+        {
+            **ModelState.fake_baseline().to_dict(),
+            "runtime_state": {"runtime_recipe": [{"kind": "cache_release", "args": {"stage": "always"}}]},
+        }
+    )
+    tasks = [Task("t1", "A visible dragon", "dev"), Task("t2", "A red ball", "dev")]
+    H3BenchmarkRunner(backend, FakeEvaluator(), {"131": {"class_type": "Prompt", "inputs": {"prompt": "old"}}}, config, tmp_path / "outputs", 0.01).run(
+        state, tasks
+    )
+    assert backend.free_calls == 2

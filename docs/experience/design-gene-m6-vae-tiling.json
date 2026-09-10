@@ -1,0 +1,83 @@
+{
+  "gene_id": "H3-M6-VAE-Tiling-001",
+  "status": "rejected",
+  "state": {
+    "parent_model_id": "M0001",
+    "model_id": "M0001",
+    "architecture": "MiniMax-H3",
+    "quantization": {
+      "bits": 4,
+      "scheme": "nvfp4"
+    },
+    "sampling_steps": 20,
+    "hardware": "Windows NVIDIA GeForce RTX 5080 Laptop GPU",
+    "target_profile_id": "rtx5080_h3_v1"
+  },
+  "bottleneck": {
+    "diagnosis": "residual runtime peak VRAM after validated M5.5 NVFP4",
+    "target_peak_memory_gb": 16.0,
+    "observed_parent_peak_memory_gb": {
+      "dev": 17.005262764,
+      "heldout": 16.602471336
+    }
+  },
+  "intervention": {
+    "primary_intervention": "runtime_memory",
+    "operator": "vae_tiling",
+    "args": {
+      "tile_size": 256,
+      "overlap": 32
+    },
+    "weight_mutation": false
+  },
+  "controlled_conditions": {
+    "splits": [
+      "dev",
+      "heldout"
+    ],
+    "sampling_steps": 20,
+    "cache_reset_before_each_run": true,
+    "text_encoder": "qwen3vl-32B-MiniMax-H3-Q2_K.gguf",
+    "lora": "minimax_h3_turbo_v4_step600_ema.safetensors"
+  },
+  "benefit": {
+    "dev": {
+      "quality_score": 0.988818,
+      "latency_s": 80.28784360399004,
+      "peak_vram_max_gb": 16.598359976,
+      "black_frame_rate": 0.0,
+      "semantic_generation_valid": true,
+      "validated_non_memory_gates": true
+    },
+    "heldout": {
+      "quality_score": 0.961489,
+      "latency_s": 87.42363387485966,
+      "peak_vram_max_gb": 16.60216004,
+      "black_frame_rate": 0.0,
+      "semantic_generation_valid": true,
+      "validated_non_memory_gates": true
+    }
+  },
+  "remaining_limitation": {
+    "peak_vram_excess_gb": {
+      "dev": 0.598359976,
+      "heldout": 0.60216004
+    },
+    "target_profile_feasible": false,
+    "conclusion": "VAE tiling preserved quality and efficiency but was insufficient to satisfy the 16GB hard constraint"
+  },
+  "risks_lessons": [
+    "Peak-memory maximum must be used for acceptance; the mean can hide an over-limit sample.",
+    "VAE tiling alone is not sufficient on this 16GB RTX 5080 Laptop profile.",
+    "Do not combine a split-only retry with the complete dev/held-out acceptance matrix."
+  ],
+  "evidence_experiment_ids": [
+    "exp_0001:vae_tiling"
+  ],
+  "evidence": {
+    "record": "docs/real-experiments/2026-09-09-windows-rtx5080.md",
+    "result": "var/m6-runtime/m6-validation-retry2.json",
+    "diagnostic_retry": "var/m6-runtime/m6-vae-heldout-retry2.json"
+  },
+  "confidence": "rejected_on_dev_and_heldout"
+}

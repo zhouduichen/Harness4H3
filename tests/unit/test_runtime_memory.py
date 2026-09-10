@@ -30,7 +30,7 @@ def _target() -> TargetProfile:
     return TargetProfile("rtx", "gpu", "local", max_peak_memory_gb=16.0, max_quality_drop=0.05)
 
 
-def test_runtime_registry_exposes_three_single_intervention_operators():
+def test_runtime_registry_exposes_single_intervention_operators():
     assert build_runtime_registry().names() == (
         "inspect",
         "quantize",
@@ -39,6 +39,9 @@ def test_runtime_registry_exposes_three_single_intervention_operators():
         "runtime_offload",
         "vae_tiling",
         "inference_chunking",
+        "component_lifecycle_optimize",
+        "vae_decode_offload",
+        "cache_release",
     )
 
 
@@ -48,6 +51,17 @@ def test_runtime_registry_exposes_three_single_intervention_operators():
         ("runtime_offload", {"mode": "aggressive"}, "runtime_offload"),
         ("vae_tiling", {"tile_size": 256, "overlap": 32}, "vae_tiling"),
         ("inference_chunking", {"chunk_size": 4}, "inference_chunking"),
+        (
+            "component_lifecycle_optimize",
+            {
+                "unload_text_encoder_after_encode": True,
+                "offload_vae_until_decode": True,
+                "free_cache_before_decode": True,
+            },
+            "component_lifecycle_optimize",
+        ),
+        ("vae_decode_offload", {"mode": "cpu"}, "vae_decode_offload"),
+        ("cache_release", {"stage": "before_decode"}, "cache_release"),
     ],
 )
 def test_runtime_operator_clones_parent_and_records_policy(tmp_path, name, args, kind):
@@ -60,7 +74,24 @@ def test_runtime_operator_clones_parent_and_records_policy(tmp_path, name, args,
     assert result.output_state.checkpoint_path == parent.checkpoint_path
     assert result.output_state.runtime_state["runtime_policy"]["kind"] == kind
     assert result.output_state.runtime_state["runtime_policy"]["args"] == args
+    assert result.output_state.runtime_state["runtime_recipe"][-1]["kind"] == kind
     assert parent.state.runtime_state == {"metrics_stale": False}
+
+
+def test_component_lifecycle_operator_materializes_explicit_runtime_state(tmp_path):
+    args = {
+        "unload_text_encoder_after_encode": True,
+        "offload_vae_until_decode": True,
+        "free_cache_before_decode": True,
+    }
+    result = build_runtime_registry().execute(
+        "component_lifecycle_optimize", _parent(), args, _target(), ExecutionContext(tmp_path, "M0002")
+    )
+    lifecycle = result.output_state.runtime_state["component_lifecycle"]
+    assert lifecycle["text_encoder_loaded"] is False
+    assert lifecycle["vae_loaded"] is False
+    assert lifecycle["cache_state"] == "release_before_decode"
+    assert lifecycle["unload_points"] == ["after_encode"]
 
 
 def test_runtime_operator_rejects_invalid_tiling_without_execution():
