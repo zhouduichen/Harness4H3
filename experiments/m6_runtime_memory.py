@@ -8,8 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
 from harness4h3.archive.model_candidate import ModelCandidate
-from harness4h3.backends.comfyui import BackendError
-from harness4h3.backends.comfyui import MiniMaxH3Adapter
+from harness4h3.backends.comfyui import BackendError, MiniMaxH3Adapter
 from harness4h3.benchmark.h3 import H3BenchmarkRunner
 from harness4h3.benchmark.m6 import M6ValidationRunner
 from harness4h3.config import load_config
