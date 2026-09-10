@@ -27,6 +27,8 @@ def test_vae_tiling_rewrites_decoder_without_mutating_source():
     assert result["122"]["class_type"] == "VAEDecodeTiled"
     assert result["122"]["inputs"]["tile_size"] == 256
     assert result["122"]["inputs"]["overlap"] == 32
+    assert result["122"]["inputs"]["temporal_size"] == 64
+    assert result["122"]["inputs"]["temporal_overlap"] == 8
     assert source["122"]["class_type"] == "VAEDecode"
 
 

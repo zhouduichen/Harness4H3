@@ -48,6 +48,11 @@ def apply_runtime_policy(workflow: Dict[str, Any], policy: Mapping[str, Any]) ->
         decoder["class_type"] = "VAEDecodeTiled"
         decoder["inputs"]["tile_size"] = int(args["tile_size"])
         decoder["inputs"]["overlap"] = int(args["overlap"])
+        # ComfyUI's tiled decoder exposes temporal controls as required
+        # inputs for video VAEs. Keep them deterministic while allowing the
+        # controller to choose the primary spatial intervention only.
+        decoder["inputs"].setdefault("temporal_size", 64)
+        decoder["inputs"].setdefault("temporal_overlap", 8)
         return workflow
     if kind == "inference_chunking":
         node = _node_by_class(workflow, "MiniMaxH3ImageToVideo")
