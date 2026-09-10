@@ -28,6 +28,38 @@ from harness4h3.target.profile import load_target_profile
 REFERENCE_METRICS = {"model_size_gb": 20.970379616, "latency_s": 205.33523804112338}
 
 
+_RUNTIME_OPERATOR_DEFAULTS = {
+    "runtime_offload": {"mode": "aggressive"},
+    "vae_tiling": {"tile_size": 256, "overlap": 32},
+    "inference_chunking": {"chunk_size": 4},
+}
+_RUNTIME_OPERATOR_KEYS = {
+    "runtime_offload": frozenset({"mode"}),
+    "vae_tiling": frozenset({"tile_size", "overlap"}),
+    "inference_chunking": frozenset({"chunk_size"}),
+}
+
+
+def _effective_operator_args(operator_name: str, plan_operator: str, plan_args: Mapping[str, Any]) -> Dict[str, Any]:
+    """Resolve only the selected operator's controls from an LLM plan.
+
+    Ollama's structured output schema is intentionally shared across the
+    registered operators, so a model can occasionally include a key that
+    belongs to a different operator.  Never pass such a key to execution.  If
+    the selected operator omits one of its required controls, use the same
+    conservative default used by explicit branch runs; the registry still
+    performs final type/range validation.
+    """
+    defaults = dict(_RUNTIME_OPERATOR_DEFAULTS[operator_name])
+    if operator_name != plan_operator:
+        return defaults
+    allowed = _RUNTIME_OPERATOR_KEYS[operator_name]
+    resolved = {key: value for key, value in plan_args.items() if key in allowed}
+    for key, value in defaults.items():
+        resolved.setdefault(key, value)
+    return resolved
+
+
 def _state(model_id: str) -> ModelState:
     return ModelState(
         model_id=model_id,
@@ -231,13 +263,7 @@ def main() -> int:
         "branches": {},
     }
     for number, operator_name in enumerate(requested, 2):
-        operator_args = dict(plan.operator_args) if operator_name == plan.operator else {
-            "mode": "aggressive" if operator_name == "runtime_offload" else 4
-        }
-        if operator_name == "vae_tiling":
-            operator_args = {"tile_size": 256, "overlap": 32}
-        if operator_name == "inference_chunking":
-            operator_args = {"chunk_size": 4}
+        operator_args = _effective_operator_args(operator_name, plan.operator, plan.operator_args)
         child_id = "M%04d" % number
         try:
             operator_result = registry.execute(
@@ -255,7 +281,16 @@ def main() -> int:
                 failure_type="runtime_policy_invalid",
                 message=str(exc),
             )
-        branch_payload: Dict[str, Any] = {"operator": operator_name, "operator_args": operator_args, "operator_result": operator_result.to_dict()}
+        branch_payload: Dict[str, Any] = {
+            "operator": operator_name,
+            "operator_args": operator_args,
+            "operator_result": operator_result.to_dict(),
+        }
+        if operator_name == plan.operator:
+            branch_payload["controller_operator_args"] = dict(plan.operator_args)
+            branch_payload["ignored_controller_args"] = sorted(
+                set(plan.operator_args) - _RUNTIME_OPERATOR_KEYS[operator_name]
+            )
         if operator_result.ok and operator_result.output_state is not None:
             branch_candidate = ModelCandidate(
                 child_id,

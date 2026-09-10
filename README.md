@@ -16,7 +16,7 @@ Autonomous Model Optimization
 
 Phase I 的 Controller LLM 权重固定，Harness 只允许它产生结构化 `ExperimentPlan` 并选择已注册的模型级 Operator。模型修改必须产生不可变的 `M0000`、`M0001`… candidate，经独立质量/硬件 evaluator 验证后进入 Pareto archive。Phase I 不训练 Controller LLM、不演化 Harness、不做 kernel/compiler search，也不允许 Controller 执行 shell 或修改源码、evaluator、benchmark 与目标约束。
 
-当前正式交付覆盖 M0–M5.5，并已实现 M6 runtime-memory validation：完全离线 Fake H3 closed loop、结构化 Ollama/OpenAI Responses 控制器、safetensors/GGUF H3 Inspector、受限本地进程执行器、固定部署变体的真实 H3 quantize operator，以及带黑帧诊断/Operator Attribution 的受控真实 benchmark。M5.5 已按独立 dev、held-out 和 multi-seed 分组完成候选复核；M6 从 M0001 NVFP4 派生 runtime branch，以峰值显存 max（而非均值）作为 16GB hard gate。真实 M6 acceptance 仍需在 RTX 5080 在线时执行，未把 TargetProfile 峰值显存约束预先改写为已满足。
+当前正式交付覆盖 M0–M5.5，并已实现 M6 runtime-memory validation：完全离线 Fake H3 closed loop、结构化 Ollama/OpenAI Responses 控制器、safetensors/GGUF H3 Inspector、受限本地进程执行器、固定部署变体的真实 H3 quantize operator，以及带黑帧诊断/Operator Attribution 的受控真实 benchmark。M5.5 已按独立 dev、held-out 和 multi-seed 分组完成候选复核；M6 从 M0001 NVFP4 派生 runtime branch，以峰值显存 max（而非均值）作为 16GB hard gate。远端 Windows RTX 5080 Laptop 已完成真实 dev/held-out 重试，但两个 split 的 VAE-tiling 分支峰值分别为 `16.598GB` 与 `16.602GB`，超过 `TargetProfile` 的 `16.0GB` 上限，因此 M6 尚未接受；该失败证据已保留，未修改目标约束。
 
 ## 离线闭环
 
@@ -143,8 +143,11 @@ PYTHONPATH=. .venv/bin/python experiments/m5_validation.py --sanity-repetitions 
 ```bash
 PYTHONPATH=. .venv/bin/python experiments/m6_runtime_memory.py \
   --controller ollama --branches controller \
+  --splits dev,heldout --request-timeout 120 \
   --base-url http://100.88.143.10:8188 \
   --controller-url http://100.88.143.10:11434
 ```
 
 M6 只有在 dev 与 held-out 两组同时满足生成/解码有效、黑帧率为 `0`、质量下降不超过 `0.05`、保留 M5.5 的模型体积与延迟收益，且 `peak_vram_max_gb <= 16.0` 时才返回成功。缺失节点能力、远端不可达和任一峰值超限都会作为显式失败记录保留。
+
+2026-09-10 的真实重试由远端 `qwen3.5:9b-q8_0` Controller 自主选择 `vae_tiling`。完整证据见 `var/m6-runtime/m6-validation-retry2.json`：生成、解码、质量、黑帧、模型大小和延迟门槛均通过，但 dev/held-out 的 `peak_vram_max_gb` 分别为 `16.598359976` 和 `16.60216004`，所以整体返回非零并且没有创建 accepted M6 candidate。一次只重跑 held-out 的诊断结果单独保存在 `var/m6-runtime/m6-vae-heldout-retry2.json`，不与完整 acceptance 混合。后续入口还会过滤 Controller 误带的其他 operator 参数，并在 evidence 中保留被忽略字段。
