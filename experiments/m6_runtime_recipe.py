@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
 
+from harness4h3 import HARNESS_CHANGE_POLICY, HARNESS_STATUS, HARNESS_VERSION
 from harness4h3.archive.model_candidate import ModelCandidate
 from harness4h3.archive.system_candidate import SystemCandidate
 from harness4h3.archive.system_store import SystemCandidateStore
@@ -181,6 +182,17 @@ def main() -> int:
     }
     output = root / args.output
     payload: Dict[str, Any] = {
+        "harness": {
+            "version": HARNESS_VERSION,
+            "status": HARNESS_STATUS,
+            "change_policy": HARNESS_CHANGE_POLICY,
+        },
+        "optimization_campaign": {
+            "name": "m6_runtime_memory",
+            "mode": "autonomous_inner_loop",
+            "controller_selects_operator": True,
+            "stop_conditions": ["target_profile_satisfied", "iteration_budget_exhausted", "failure_budget_exhausted"],
+        },
         "target_profile_id": target.id,
         "controller": {"provider": args.controller, "model": args.controller_model},
         "reference_metrics": REFERENCE_METRICS,
@@ -338,9 +350,14 @@ def main() -> int:
         trajectories.append(
             Trajectory(
                 task_id="m6:recipe:%d" % (iteration + 1),
-                harness_version=system_child.id if system_child is not None else "none",
+                harness_version=HARNESS_VERSION,
                 split="m6",
-                inputs={"system_parent_id": iteration_payload["system_parent_id"], "controller_plan": plan_dict},
+                inputs={
+                    "system_parent_id": iteration_payload["system_parent_id"],
+                    "system_child_id": system_child.id if system_child is not None else None,
+                    "controller_plan": plan_dict,
+                    "harness_version": HARNESS_VERSION,
+                },
                 steps=[
                     {"action": "controller_plan", "operator": requested_operator, "operator_args": operator_args},
                     {"action": "runtime_operator", "operator_result": operator_result.to_dict()},

@@ -7,6 +7,11 @@ one runtime intervention to a bounded, Controller-selected runtime recipe. It
 does not change model weights, TargetProfile thresholds, evaluator gates,
 Harness Evolution, or Controller training.
 
+The recipe is an experiment campaign executed under the frozen
+`Harness4H3-v1.0` environment. The campaign may select existing runtime tools
+and retain their evidence, but it does not make the Harness itself a research
+variable.
+
 ## Negative Design Gene
 
 The real RTX 5080 Laptop run is stored as a `DesignGene` with status

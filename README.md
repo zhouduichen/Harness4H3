@@ -2,6 +2,8 @@
 
 EvoGen-RSI 是长期研究框架；Harness4H3 是其 Phase I reference implementation。
 
+从 `Harness4H3-v1.0` 起，Harness 被视为冻结的优化环境：Controller protocol、State/ExperimentPlan schema、Evaluator、Archive、Trajectory、acceptance policy 和 TargetProfile semantics 均保持不变，后续仅接受 correctness/security bugfix。研究变量是 H3-derived model/runtime candidate；runtime operator 是实验工具，不是 Harness Evolution。
+
 ```text
 Fixed Strong LLM Controller
         +
@@ -16,7 +18,9 @@ Autonomous Model Optimization
 
 Phase I 的 Controller LLM 权重固定，Harness 只允许它产生结构化 `ExperimentPlan` 并选择已注册的模型级 Operator。模型修改必须产生不可变的 `M0000`、`M0001`… candidate，经独立质量/硬件 evaluator 验证后进入 Pareto archive。Phase I 不训练 Controller LLM、不演化 Harness、不做 kernel/compiler search，也不允许 Controller 执行 shell 或修改源码、evaluator、benchmark 与目标约束。
 
-当前正式交付覆盖 M0–M5.5，并已实现 M6 runtime-memory validation：完全离线 Fake H3 closed loop、结构化 Ollama/OpenAI Responses 控制器、safetensors/GGUF H3 Inspector、受限本地进程执行器、固定部署变体的真实 H3 quantize operator，以及带黑帧诊断/Operator Attribution 的受控真实 benchmark。M5.5 已按独立 dev、held-out 和 multi-seed 分组完成候选复核；M6 从 M0001 NVFP4 派生 runtime branch，以峰值显存 max（而非均值）作为 16GB hard gate。远端 Windows RTX 5080 Laptop 已完成真实 dev/held-out 重试，但两个 split 的 VAE-tiling 分支峰值分别为 `16.598GB` 与 `16.602GB`，超过 `TargetProfile` 的 `16.0GB` 上限，因此 M6 尚未接受；该失败证据已保留，未修改目标约束。
+当前正式交付覆盖 M0–M5.5，并已实现 M6 runtime-memory validation 与 autonomous recipe campaign：完全离线 Fake H3 closed loop、结构化 Ollama/OpenAI Responses 控制器、safetensors/GGUF H3 Inspector、受限本地进程执行器、固定部署变体的真实 H3 quantize operator，以及带黑帧诊断/Operator Attribution 的受控真实 benchmark。M5.5 已按独立 dev、held-out 和 multi-seed 分组完成候选复核；M6 从 M0001 NVFP4 派生 runtime branch，以峰值显存 max（而非均值）作为 16GB hard gate。远端 Windows RTX 5080 Laptop 已完成真实 dev/held-out 重试，但两个 split 的 VAE-tiling 分支峰值分别为 `16.598GB` 与 `16.602GB`，超过 `TargetProfile` 的 `16.0GB` 上限，因此 M6 尚未接受；该失败证据已保留，未修改目标约束。
+
+当前研究重点已经从 “build the harness” 切换为固定 Harness 下的 autonomous model/system optimization：`state → Controller → action → execute → verify → experience → next action`。Harness Evolution 和 Controller post-training 不属于本阶段。
 
 ## 离线闭环
 
@@ -154,7 +158,7 @@ M6 只有在 dev 与 held-out 两组同时满足生成/解码有效、黑帧率�
 
 ## M6 Runtime Recipe Continuation
 
-本轮 `vae_tiling` 的实测结果已固化为 rejected gene：`docs/experience/design-gene-m6-vae-tiling.json`。后续 recipe 入口 `experiments/m6_runtime_recipe.py` 在同一 TargetProfile 下把失败 gate、只读 Design Gene 和当前 runtime state 重新交给 Controller；它可以追加新的 lifecycle/offload/cache policy，直到 dev 与 held-out 同时通过或预算耗尽。runtime-only 分支以 `SystemCandidate(C…)` 保存，底层 checkpoint 仍引用 `ModelCandidate(M…)`，不会复制权重文件。
+本轮 `vae_tiling` 的实测结果已固化为 rejected gene：`docs/experience/design-gene-m6-vae-tiling.json`。`experiments/m6_runtime_recipe.py` 是固定 Harness v1.0 下的 autonomous optimization campaign：它把失败 gate、只读 Design Gene、当前 runtime state 和预算重新交给 Controller，由 Controller 自主选择下一条合法 runtime intervention，直到 dev 与 held-out 同时通过或预算耗尽。runtime-only 分支只记录实验 candidate/runtime state，底层 checkpoint 不复制；新增 operator 只是实验工具，不改变核心 Harness。
 
 ```bash
 PYTHONPATH=. .venv/bin/python experiments/m6_runtime_recipe.py \
@@ -165,3 +169,5 @@ PYTHONPATH=. .venv/bin/python experiments/m6_runtime_recipe.py \
 ```
 
 新增的 `component_lifecycle_optimize`、`vae_decode_offload`、`cache_release` 均为 capability-guarded operator；工作流没有对应控制时明确返回 `runtime_policy_unsupported`，不会伪造优化效果。
+
+每条新 campaign trajectory 都标记 `Harness4H3-v1.0`，并单独记录 system candidate、operator、真实 split 结果与 failure feedback。只有明确的 correctness/security bugfix 可以修改冻结 Harness；任何新实验都必须在固定版本下重新记录完整证据。

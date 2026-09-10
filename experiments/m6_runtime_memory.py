@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
+from harness4h3 import HARNESS_CHANGE_POLICY, HARNESS_STATUS, HARNESS_VERSION
 from harness4h3.archive.model_candidate import ModelCandidate
 from harness4h3.backends.comfyui import BackendError, MiniMaxH3Adapter
 from harness4h3.benchmark.h3 import H3BenchmarkRunner
@@ -226,6 +227,11 @@ def main() -> int:
         _persist(
             output,
             {
+                "harness": {
+                    "version": HARNESS_VERSION,
+                    "status": HARNESS_STATUS,
+                    "change_policy": HARNESS_CHANGE_POLICY,
+                },
                 "target_profile_id": target.id,
                 "controller": {"provider": args.controller, "model": args.controller_model, "error": str(exc)},
                 "reference_metrics": REFERENCE_METRICS,
@@ -267,6 +273,16 @@ def main() -> int:
     parent_candidate = ModelCandidate("M0001", "M0000", 1, parent.checkpoint_path, parent, "m5.5", "candidate")
     output = root / args.output
     payload: Dict[str, Any] = {
+        "harness": {
+            "version": HARNESS_VERSION,
+            "status": HARNESS_STATUS,
+            "change_policy": HARNESS_CHANGE_POLICY,
+        },
+        "optimization_campaign": {
+            "name": "m6_runtime_memory",
+            "mode": "autonomous_inner_loop_single_branch",
+            "controller_selects_operator": True,
+        },
         "target_profile_id": target.id,
         "controller": {"provider": args.controller, "model": args.controller_model, "context": context.to_dict(), "plan": plan.to_dict()},
         "reference_metrics": REFERENCE_METRICS,
@@ -366,9 +382,10 @@ def main() -> int:
         trajectory_store.append(
             Trajectory(
                 task_id="m6:%s" % operator_name,
-                harness_version=child_id,
+                harness_version=HARNESS_VERSION,
                 split="m6",
                 inputs={
+                    "harness_version": HARNESS_VERSION,
                     "parent_model_id": parent.model_id,
                     "operator": operator_name,
                     "operator_args": operator_args,
