@@ -226,13 +226,24 @@ def main() -> int:
         )
         branch_payload: Dict[str, Any] = {"operator": operator_name, "operator_args": operator_args, "operator_result": operator_result.to_dict()}
         if operator_result.ok and operator_result.output_state is not None:
+            branch_candidate = ModelCandidate(
+                child_id,
+                parent_candidate.id,
+                parent_candidate.generation + 1,
+                operator_result.output_state.checkpoint_path,
+                operator_result.output_state,
+                "%s:%s" % (plan.experiment_id, operator_name),
+                "candidate",
+                metadata={"operator": operator_name, "operator_args": operator_args, "parent_model_id": parent_candidate.id},
+            )
+            branch_payload["branch_candidate"] = branch_candidate.to_dict()
             split_results = {}
             split_errors: Dict[str, Any] = {}
             for split, selected in split_tasks.items():
                 try:
                     result = validator.run(
                         parent,
-                        operator_result.output_state,
+                        branch_candidate.state,
                         selected,
                         label=f"{operator_name}-{split}",
                         target=target,
