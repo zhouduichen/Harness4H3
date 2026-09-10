@@ -64,16 +64,44 @@ def _load_gene(root: Path) -> Mapping[str, Any]:
     return raw if isinstance(raw, Mapping) and raw.get("status") in {"validated", "validated_m5_5", "transferred"} else {}
 
 
-def _controller_plan(args: argparse.Namespace, target: Any, current: ModelState, operators: Sequence[Mapping[str, Any]], gene: Mapping[str, Any]):
+def _load_m55_evaluation(root: Path, gene: Mapping[str, Any]) -> Mapping[str, Any]:
+    path = root / "var/m5-controlled/m5.5-validation.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        raw = {}
+    if isinstance(raw, Mapping) and isinstance(raw.get("results"), Mapping):
+        return {"stage": "M5.5", "source": str(path), "results": raw["results"]}
+    return {
+        "stage": "M5.5",
+        "source": "validated_design_gene",
+        "validated": bool(gene),
+        "benefit": dict(gene.get("benefit") or {}) if isinstance(gene, Mapping) else {},
+        "remaining_limitation": dict(gene.get("remaining_limitation") or {}) if isinstance(gene, Mapping) else {},
+    }
+
+
+def _controller_plan(
+    args: argparse.Namespace,
+    target: Any,
+    current: ModelState,
+    operators: Sequence[Mapping[str, Any]],
+    gene: Mapping[str, Any],
+    validated_evaluation: Mapping[str, Any],
+):
+    recent = [{"stage": "M5.5", "evaluation": dict(validated_evaluation)}]
+    lessons = list(gene.get("risks_lessons") or []) if isinstance(gene, Mapping) else []
+    failures = [{"source": "validated_design_gene", "lessons": lessons, "remaining_limitation": gene.get("remaining_limitation", {})}] if lessons else []
     context = ControllerContext(
         target,
         current,
         BudgetState(max_iterations=4, max_failed_experiments=4, max_controller_calls=4),
         tuple(operators),
-        recent_experiments=[],
-        relevant_failures=[],
+        recent_experiments=recent,
+        relevant_failures=failures,
         pareto_front=[],
         validated_design_genes=[gene] if gene else [],
+        validated_evaluation=validated_evaluation,
     )
     if args.controller == "mock":
         plan = RuleBasedMockController().plan(context)
@@ -116,7 +144,8 @@ def main() -> int:
     registry = build_runtime_registry()
     runtime_operators = [item for item in registry.visible() if str(item["name"]).startswith(("runtime_", "vae_", "inference_"))]
     gene = _load_gene(root)
-    plan, context = _controller_plan(args, target, parent, runtime_operators, gene)
+    m55_evaluation = _load_m55_evaluation(root, gene)
+    plan, context = _controller_plan(args, target, parent, runtime_operators, gene, m55_evaluation)
     requested = [item.strip() for item in args.branches.split(",") if item.strip()]
     if requested == ["controller"]:
         requested = [plan.operator]
@@ -150,6 +179,7 @@ def main() -> int:
         "target_profile_id": target.id,
         "controller": {"provider": args.controller, "model": args.controller_model, "context": context.to_dict(), "plan": plan.to_dict()},
         "reference_metrics": REFERENCE_METRICS,
+        "m5_5_evaluation": m55_evaluation,
         "branches": {},
     }
     for number, operator_name in enumerate(requested, 2):

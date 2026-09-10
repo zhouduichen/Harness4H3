@@ -126,7 +126,7 @@ def _controller_prompt(context: ControllerContext, schema: Mapping[str, Any]) ->
         "evaluator changes, benchmark changes, or target changes. Address the first blocking hard constraint, make one "
         "primary model modification, preserve quality, and declare at least the registered operator cost. If model size "
         "or memory is blocked and the model is not yet 4-bit, prefer quantize before step_distill. If a recent experiment "
-        "was rejected, change the intervention instead of repeating it. When a 4-bit candidate has a residual peak-memory "
+        "was rejected, change the intervention instead of repeating it. Use the supplied validated M5.5 evaluation as evidence. When a 4-bit candidate has a residual peak-memory "
         "violation, prefer one registered runtime-memory operator over more weight compression; use the validated Design Gene "
         "as read-only evidence and do not modify its fields. For runtime experiments, treat peak-memory maximum (not mean) "
         "as the hard gate. Copy the TargetProfile quality limits exactly into "

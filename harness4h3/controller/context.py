@@ -18,6 +18,7 @@ class ControllerContext:
     relevant_failures: List[Mapping[str, Any]] = field(default_factory=list)
     pareto_front: List[Mapping[str, Any]] = field(default_factory=list)
     validated_design_genes: List[Mapping[str, Any]] = field(default_factory=list)
+    validated_evaluation: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Mapping[str, Any]:
         return asdict(self)

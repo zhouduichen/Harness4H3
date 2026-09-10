@@ -134,8 +134,10 @@ def test_runtime_context_exposes_design_gene_and_rule_controller_switches_layer(
         BudgetState(4, 2),
         tuple({"name": name, "description": "", "input_schema": {"mode": "str"}} for name in ("runtime_offload",)),
         validated_design_genes=[{"gene_id": "H3-NVFP4-Quantization-001", "status": "validated_m5_5"}],
+        validated_evaluation={"stage": "M5.5", "validated": True},
     )
     assert context_value.to_dict()["validated_design_genes"][0]["status"] == "validated_m5_5"
+    assert context_value.to_dict()["validated_evaluation"]["validated"] is True
     plan = RuleBasedMockController().plan(context_value)
     assert plan.operator == "runtime_offload"
     assert plan.operator_args == {"mode": "aggressive"}
