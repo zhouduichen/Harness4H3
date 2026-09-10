@@ -14,7 +14,7 @@ from harness4h3.benchmark.m6 import M6ValidationRunner
 from harness4h3.config import load_config
 from harness4h3.controller.context import ControllerContext
 from harness4h3.controller.provider import ControllerProviderError, OllamaStructuredController, RuleBasedMockController
-from harness4h3.controller.schemas import BudgetState
+from harness4h3.controller.schemas import BudgetState, CostEstimate, OperatorResult
 from harness4h3.evaluator.evaluator import SubprocessEvaluator
 from harness4h3.h3.state import ModelState
 from harness4h3.harness.loop import load_workflow
@@ -233,13 +233,22 @@ def main() -> int:
         if operator_name == "inference_chunking":
             operator_args = {"chunk_size": 4}
         child_id = "M%04d" % number
-        operator_result = registry.execute(
-            operator_name,
-            parent_candidate,
-            operator_args,
-            target,
-            ExecutionContext(root / args.benchmark_output / operator_name, child_id),
-        )
+        try:
+            operator_result = registry.execute(
+                operator_name,
+                parent_candidate,
+                operator_args,
+                target,
+                ExecutionContext(root / args.benchmark_output / operator_name, child_id),
+            )
+        except (TypeError, ValueError) as exc:
+            operator_result = OperatorResult(
+                status="failed",
+                output_state=None,
+                cost=CostEstimate(),
+                failure_type="runtime_policy_invalid",
+                message=str(exc),
+            )
         branch_payload: Dict[str, Any] = {"operator": operator_name, "operator_args": operator_args, "operator_result": operator_result.to_dict()}
         if operator_result.ok and operator_result.output_state is not None:
             branch_candidate = ModelCandidate(
