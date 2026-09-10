@@ -41,9 +41,10 @@ zero human optimization interventions. Rejected candidates are archived but
 never become the next active parent. Execution failures consume the failure
 budget; clean rejections do not.
 
-For real training, pass a fixed argv worker to the same entry point, for
-example `--external-operator-command python tools/h3_train_worker.py`. A0
-then builds registered `ExternalScriptOperator` instances. Each external worker must receive the
+For real training, use the A1 entry point described in
+[`docs/evogen-a1-real-model-evolution.md`](evogen-a1-real-model-evolution.md)
+with a fixed argv worker. A0's external seam builds registered
+`ExternalScriptOperator` instances. Each external worker must receive the
 immutable parent state, write a new child checkpoint inside its experiment
 artifact directory, and return a validated `ModelState`; the worker's reported
 GPU-hours then become the campaign's cost evidence. The evaluator/backend must

@@ -1,0 +1,13 @@
+{
+  "trainer_command": [
+    "D:/H3Training/.venv/Scripts/python.exe",
+    "D:/H3Training/train_worker.py"
+  ],
+  "trainer_timeout_s": 7200,
+  "teacher_signal_command": [
+    "D:/H3Training/.venv/Scripts/python.exe",
+    "D:/H3Training/teacher_signal_worker.py"
+  ],
+  "teacher_cache_dir": "D:/H3Training/cache/teacher-signals",
+  "deploy_model_dir": "D:/ComfyUI/models/diffusion_models"
+}

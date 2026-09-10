@@ -36,6 +36,10 @@ See [`docs/evogen-a0-model-evolution.md`](docs/evogen-a0-model-evolution.md)
 for fidelity tiers, GPU-hour budget semantics, lineage evidence, and the
 boundary between deterministic protocol tests and real training.
 
+The next milestone is A1, the first real model-changing run. It requires a
+real parent checkpoint, a trusted trainer worker, baseline metrics, and a
+reachable ComfyUI evaluator; see [`docs/evogen-a1-real-model-evolution.md`](docs/evogen-a1-real-model-evolution.md).
+
 ## 离线闭环
 
 安装 Python 3.9+ 环境：

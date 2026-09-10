@@ -37,6 +37,7 @@ from experiments.a0_model_evolution import (
     default_validated_nvfp4_candidate,
     run_campaign,
 )
+from experiments.a1_real_evolution import run_a1
 from .operators.model_evolution import build_external_model_evolution_registry, build_model_evolution_registry
 from .executor.local import LocalProcessExecutor
 from .target.profile import load_target_profile
@@ -331,6 +332,46 @@ def cmd_a0_evolve(args: argparse.Namespace) -> int:
     return 0 if result.status in {"completed", "target_satisfied"} else 1
 
 
+def cmd_a1_evolve(args: argparse.Namespace) -> int:
+    target = load_target_profile(Path(args.target).resolve())
+    if args.controller == "mock":
+        controller = A0RuleBasedController()
+    else:
+        controller = OllamaStructuredController(args.controller_model, args.controller_url, args.controller_timeout_s)
+    result = run_a1(
+        parent_checkpoint=Path(args.parent_checkpoint),
+        worker_command=tuple(args.worker_command) + ("--config", str(Path(args.worker_config).resolve())),
+        config_path=Path(args.config).resolve(),
+        target=target,
+        output_root=Path(args.output_root).resolve(),
+        base_url=args.base_url,
+        baseline_quality=args.baseline_quality,
+        baseline_hardware=HardwareMetrics(
+            model_size_gb=args.baseline_model_size_gb,
+            latency_s=args.baseline_latency_s,
+            peak_memory_gb=args.baseline_peak_memory_gb,
+        ),
+        controller=controller,
+        max_experiments=args.max_experiments,
+        max_gpu_hours=args.max_gpu_hours,
+        max_failed_experiments=args.max_failed_experiments,
+        worker_timeout_s=args.worker_timeout_s,
+    )
+    _emit(
+        {
+            "campaign": "A1",
+            "status": result.status,
+            "target_satisfied": result.report["target_satisfied"],
+            "experiments": result.report["total_experiments"],
+            "output_root": str(Path(args.output_root).resolve()),
+            "report": str(Path(args.output_root).resolve() / "report.json"),
+            "offline_simulation": False,
+        },
+        args.json,
+    )
+    return 0 if result.status in {"completed", "target_satisfied"} else 1
+
+
 def cmd_benchmark(args: argparse.Namespace) -> int:
     config = _config(args)
     target = load_target_profile(Path(args.target).resolve()) if args.target else None
@@ -512,6 +553,29 @@ def build_parser() -> argparse.ArgumentParser:
     a0.add_argument("--external-operator-timeout-s", type=float, default=3600.0)
     _json_flag(a0)
     a0.set_defaults(handler=cmd_a0_evolve)
+
+    a1 = subparsers.add_parser("a1-evolve", help="run the first real H3 model-evolution campaign")
+    a1.add_argument("--parent-checkpoint", required=True, help="local checkpoint accessible to the worker")
+    a1.add_argument("--worker-command", nargs="+", required=True, help="fixed argv for h3_model_worker.py")
+    a1.add_argument("--worker-config", required=True, help="trusted worker config containing trainer argv")
+    a1.add_argument("--worker-timeout-s", type=float, default=7200.0)
+    a1.add_argument("--config", default="configs/default.yaml")
+    a1.add_argument("--target", default="configs/targets/rtx5080_example.yaml")
+    a1.add_argument("--base-url", default="http://100.88.143.10:8188")
+    a1.add_argument("--output-root", default="var/a1-real-evolution")
+    a1.add_argument("--baseline-quality", type=float, required=True)
+    a1.add_argument("--baseline-model-size-gb", type=float, required=True)
+    a1.add_argument("--baseline-latency-s", type=float, required=True)
+    a1.add_argument("--baseline-peak-memory-gb", type=float, required=True)
+    a1.add_argument("--controller", choices=("mock", "ollama"), default="ollama")
+    a1.add_argument("--controller-model", default="qwen3.5:9b-q8_0")
+    a1.add_argument("--controller-url", default="http://100.88.143.10:11434")
+    a1.add_argument("--controller-timeout-s", type=float, default=180.0)
+    a1.add_argument("--max-experiments", type=int, default=2)
+    a1.add_argument("--max-gpu-hours", type=float, default=8.0)
+    a1.add_argument("--max-failed-experiments", type=int, default=2)
+    _json_flag(a1)
+    a1.set_defaults(handler=cmd_a1_evolve)
 
     benchmark = subparsers.add_parser("benchmark", help="run the independent real H3/ComfyUI benchmark")
     benchmark.add_argument("--checkpoint", required=True, help="local H3 .safetensors or .gguf checkpoint")
