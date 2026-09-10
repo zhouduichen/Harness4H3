@@ -13,7 +13,7 @@ from harness4h3.benchmark.h3 import H3BenchmarkRunner
 from harness4h3.benchmark.m6 import M6ValidationRunner
 from harness4h3.config import load_config
 from harness4h3.controller.context import ControllerContext
-from harness4h3.controller.provider import OllamaStructuredController, RuleBasedMockController
+from harness4h3.controller.provider import ControllerProviderError, OllamaStructuredController, RuleBasedMockController
 from harness4h3.controller.schemas import BudgetState
 from harness4h3.evaluator.evaluator import SubprocessEvaluator
 from harness4h3.h3.state import ModelState
@@ -171,7 +171,23 @@ def main() -> int:
     runtime_operators = [item for item in registry.visible() if str(item["name"]).startswith(("runtime_", "vae_", "inference_"))]
     gene = _load_gene(root)
     m55_evaluation = _load_m55_evaluation(root, gene)
-    plan, context = _controller_plan(args, target, parent, runtime_operators, gene, m55_evaluation)
+    try:
+        plan, context = _controller_plan(args, target, parent, runtime_operators, gene, m55_evaluation)
+    except ControllerProviderError as exc:
+        output = root / args.output
+        _persist(
+            output,
+            {
+                "target_profile_id": target.id,
+                "controller": {"provider": args.controller, "model": args.controller_model, "error": str(exc)},
+                "reference_metrics": REFERENCE_METRICS,
+                "m5_5_evaluation": m55_evaluation,
+                "branches": {},
+            },
+        )
+        print(json.dumps({"controller_error": str(exc)}, ensure_ascii=False))
+        print("RESULT_PATH", output.resolve())
+        return 1
     requested = [item.strip() for item in args.branches.split(",") if item.strip()]
     if requested == ["controller"]:
         requested = [plan.operator]
