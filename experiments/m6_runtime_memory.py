@@ -155,6 +155,7 @@ def main() -> int:
     parser.add_argument("--controller-model", default=os.environ.get("OLLAMA_MODEL", "qwen3.5:9b-q8_0"))
     parser.add_argument("--controller-url", default=os.environ.get("OLLAMA_BASE_URL", "http://100.88.143.10:11434"))
     parser.add_argument("--controller-timeout", type=float, default=180.0)
+    parser.add_argument("--request-timeout", type=float, default=30.0, help="ComfyUI request timeout in seconds")
     parser.add_argument("--branches", default="controller", help="controller or comma-separated runtime operator names")
     parser.add_argument("--repetitions", type=int, default=1)
     args = parser.parse_args()
@@ -180,7 +181,7 @@ def main() -> int:
     if unknown:
         raise ValueError("unknown runtime branch(es): " + ", ".join(unknown))
     runner = H3BenchmarkRunner(
-        MiniMaxH3Adapter(args.base_url, request_timeout_s=30, poll_interval_s=2, task_timeout_s=1800),
+        MiniMaxH3Adapter(args.base_url, request_timeout_s=args.request_timeout, poll_interval_s=2, task_timeout_s=1800),
         SubprocessEvaluator(config.evaluator.command, config.evaluator.timeout_s),
         load_workflow(config.workflow.template),
         config.workflow,
