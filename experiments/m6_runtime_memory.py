@@ -156,6 +156,7 @@ def main() -> int:
     parser.add_argument("--controller-timeout", type=float, default=180.0)
     parser.add_argument("--request-timeout", type=float, default=30.0, help="ComfyUI request timeout in seconds")
     parser.add_argument("--branches", default="controller", help="controller or comma-separated runtime operator names")
+    parser.add_argument("--splits", default="dev,heldout", help="comma-separated split names; use both for the M6 acceptance gate")
     parser.add_argument("--repetitions", type=int, default=1)
     args = parser.parse_args()
 
@@ -164,8 +165,11 @@ def main() -> int:
     target = load_target_profile(root / args.target)
     tasks = load_tasks(config.runtime.tasks_path)
     split_tasks = {split: [task for task in tasks if task.split == split] for split in ("dev", "heldout")}
-    if not split_tasks["dev"] or not split_tasks["heldout"]:
-        raise ValueError("M6 requires both dev and heldout tasks")
+    requested_splits = [item.strip() for item in args.splits.split(",") if item.strip()]
+    if not requested_splits or any(split not in split_tasks for split in requested_splits):
+        raise ValueError("--splits must contain only dev and/or heldout")
+    if any(not split_tasks[split] for split in requested_splits):
+        raise ValueError("selected M6 split has no tasks")
     parent = _state("M0001")
     registry = build_runtime_registry()
     runtime_operators = [item for item in registry.visible() if str(item["name"]).startswith(("runtime_", "vae_", "inference_"))]
@@ -182,6 +186,7 @@ def main() -> int:
                 "controller": {"provider": args.controller, "model": args.controller_model, "error": str(exc)},
                 "reference_metrics": REFERENCE_METRICS,
                 "m5_5_evaluation": m55_evaluation,
+                "acceptance_splits": requested_splits,
                 "branches": {},
             },
         )
@@ -222,6 +227,7 @@ def main() -> int:
         "controller": {"provider": args.controller, "model": args.controller_model, "context": context.to_dict(), "plan": plan.to_dict()},
         "reference_metrics": REFERENCE_METRICS,
         "m5_5_evaluation": m55_evaluation,
+        "acceptance_splits": requested_splits,
         "branches": {},
     }
     for number, operator_name in enumerate(requested, 2):
@@ -264,7 +270,8 @@ def main() -> int:
             branch_payload["branch_candidate"] = branch_candidate.to_dict()
             split_results = {}
             split_errors: Dict[str, Any] = {}
-            for split, selected in split_tasks.items():
+            for split in requested_splits:
+                selected = split_tasks[split]
                 try:
                     result = validator.run(
                         parent,
