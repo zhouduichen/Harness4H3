@@ -71,7 +71,33 @@ def _load_m55_evaluation(root: Path, gene: Mapping[str, Any]) -> Mapping[str, An
     except (OSError, ValueError, TypeError):
         raw = {}
     if isinstance(raw, Mapping) and isinstance(raw.get("results"), Mapping):
-        return {"stage": "M5.5", "source": str(path), "results": raw["results"]}
+        compact: Dict[str, Any] = {}
+        for label, result in raw["results"].items():
+            if not isinstance(result, Mapping):
+                continue
+            compact_result: Dict[str, Any] = {
+                "label": result.get("label", label),
+                "validated": bool(result.get("validated")),
+                "repetitions": result.get("repetitions"),
+                "pairwise": result.get("pairwise", []),
+            }
+            aggregates = result.get("aggregates")
+            if isinstance(aggregates, Mapping):
+                compact_result["aggregates"] = {
+                    str(role): {
+                        str(metric): {
+                            key: stats.get(key)
+                            for key in ("count", "mean", "median", "minimum", "maximum", "stddev")
+                            if isinstance(stats, Mapping) and key in stats
+                        }
+                        for metric, stats in values.items()
+                        if isinstance(values, Mapping)
+                    }
+                    for role, values in aggregates.items()
+                    if isinstance(values, Mapping)
+                }
+            compact[str(label)] = compact_result
+        return {"stage": "M5.5", "source": str(path), "results": compact}
     return {
         "stage": "M5.5",
         "source": "validated_design_gene",
