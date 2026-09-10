@@ -31,6 +31,14 @@ from .memory.trajectory import TrajectoryStore
 from .model.minimax_h3 import MiniMaxH3Adapter
 from .operators.fake import FakeOperatorBackend, build_fake_registry
 from .self_improve.evolve import EvolutionController
+from experiments.a0_model_evolution import (
+    A0Budget,
+    A0RuleBasedController,
+    default_validated_nvfp4_candidate,
+    run_campaign,
+)
+from .operators.model_evolution import build_external_model_evolution_registry, build_model_evolution_registry
+from .executor.local import LocalProcessExecutor
 from .target.profile import load_target_profile
 
 
@@ -266,6 +274,63 @@ def cmd_optimize(args: argparse.Namespace) -> int:
     return 0 if result.status == "target_satisfied" else 1
 
 
+def cmd_a0_evolve(args: argparse.Namespace) -> int:
+    target = load_target_profile(Path(args.target).resolve())
+    if args.controller == "ollama":
+        controller = OllamaStructuredController(args.controller_model, args.controller_url, args.controller_timeout_s)
+    else:
+        controller = A0RuleBasedController()
+    evaluator = CompositeEvaluator(FakeQualityEvaluator(), FakeHardwareEvaluator(), ConstraintEvaluator())
+    output_root = Path(args.output_root).resolve()
+    if args.external_operator_command:
+        registry = build_external_model_evolution_registry(
+            args.external_operator_command,
+            executor=LocalProcessExecutor(timeout_s=args.external_operator_timeout_s),
+            timeout_s=args.external_operator_timeout_s,
+        )
+        offline_simulation = False
+    else:
+        registry = build_model_evolution_registry()
+        offline_simulation = True
+    result = run_campaign(
+        target=target,
+        controller=controller,
+        registry=registry,
+        evaluator=evaluator,
+        output_root=output_root,
+        initial_candidate=default_validated_nvfp4_candidate(),
+        budget=A0Budget(
+            max_gpu_hours=args.max_gpu_hours,
+            max_experiments=args.max_experiments,
+            max_failed_experiments=args.max_failed_experiments,
+        ),
+        stop_on_target=args.stop_on_target,
+        offline_simulation=offline_simulation,
+    )
+    if args.output:
+        result_path = Path(args.output).resolve()
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(json.dumps(result.payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if args.report_output:
+        report_path = Path(args.report_output).resolve()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(result.report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    summary = {
+        "campaign": "A0",
+        "status": result.status,
+        "target_satisfied": result.report["target_satisfied"],
+        "experiments": result.report["total_experiments"],
+        "accepted_candidates": len(result.report["accepted_experiments"]),
+        "rejected_candidates": result.report["rejected_candidate_count"],
+        "failed_experiments": result.report["failed_experiment_count"],
+        "output_root": str(output_root),
+        "report": str(Path(args.report_output).resolve()) if args.report_output else str(output_root / "report.json"),
+        "offline_simulation": result.report["offline_simulation"],
+    }
+    _emit(summary, args.json)
+    return 0 if result.status in {"completed", "target_satisfied"} else 1
+
+
 def cmd_benchmark(args: argparse.Namespace) -> int:
     config = _config(args)
     target = load_target_profile(Path(args.target).resolve()) if args.target else None
@@ -429,6 +494,24 @@ def build_parser() -> argparse.ArgumentParser:
     optimize.add_argument("--max-controller-calls", type=int, default=5)
     _json_flag(optimize)
     optimize.set_defaults(handler=cmd_optimize)
+
+    a0 = subparsers.add_parser("a0-evolve", help="run Autonomous Model Evolution Campaign A0")
+    a0.add_argument("--target", default="configs/targets/rtx5080_example.yaml")
+    a0.add_argument("--output-root", default="var/a0-model-evolution")
+    a0.add_argument("--output", help="optional copy of the complete campaign JSON")
+    a0.add_argument("--report-output", help="optional copy of the research report JSON")
+    a0.add_argument("--controller", choices=("mock", "ollama"), default="mock")
+    a0.add_argument("--controller-model", default="qwen3.5:9b-q8_0")
+    a0.add_argument("--controller-url", default="http://127.0.0.1:11434")
+    a0.add_argument("--controller-timeout-s", type=float, default=180.0)
+    a0.add_argument("--max-gpu-hours", type=float, default=24.0)
+    a0.add_argument("--max-experiments", type=int, default=20)
+    a0.add_argument("--max-failed-experiments", type=int, default=5)
+    a0.add_argument("--stop-on-target", action="store_true")
+    a0.add_argument("--external-operator-command", nargs="+", help="fixed argv for real model/training worker")
+    a0.add_argument("--external-operator-timeout-s", type=float, default=3600.0)
+    _json_flag(a0)
+    a0.set_defaults(handler=cmd_a0_evolve)
 
     benchmark = subparsers.add_parser("benchmark", help="run the independent real H3/ComfyUI benchmark")
     benchmark.add_argument("--checkpoint", required=True, help="local H3 .safetensors or .gguf checkpoint")

@@ -22,6 +22,20 @@ Phase I 的 Controller LLM 权重固定，Harness 只允许它产生结构化 `E
 
 当前研究重点已经从 “build the harness” 切换为固定 Harness 下的 autonomous model/system optimization：`state → Controller → action → execute → verify → experience → next action`。Harness Evolution 和 Controller post-training 不属于本阶段。
 
+### Autonomous model evolution A0
+
+`a0-evolve` is the model-level inner loop for Student creation, structured
+pruning, distillation, recovery fine-tuning, step distillation, and
+quantization. It is intentionally separate from the M6 runtime-memory search.
+
+```bash
+PYTHONPATH=. .venv/bin/python -m harness4h3 a0-evolve --controller mock
+```
+
+See [`docs/evogen-a0-model-evolution.md`](docs/evogen-a0-model-evolution.md)
+for fidelity tiers, GPU-hour budget semantics, lineage evidence, and the
+boundary between deterministic protocol tests and real training.
+
 ## 离线闭环
 
 安装 Python 3.9+ 环境：
