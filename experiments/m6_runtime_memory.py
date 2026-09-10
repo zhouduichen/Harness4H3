@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
 from harness4h3.archive.model_candidate import ModelCandidate
+from harness4h3.backends.comfyui import BackendError
 from harness4h3.backends.comfyui import MiniMaxH3Adapter
 from harness4h3.benchmark.h3 import H3BenchmarkRunner
 from harness4h3.benchmark.m6 import M6ValidationRunner
@@ -18,6 +20,7 @@ from harness4h3.evaluator.evaluator import SubprocessEvaluator
 from harness4h3.h3.state import ModelState
 from harness4h3.harness.loop import load_workflow
 from harness4h3.harness.state import Task, load_tasks
+from harness4h3.memory.trajectory import Trajectory, TrajectoryStore
 from harness4h3.operators.base import ExecutionContext
 from harness4h3.operators.runtime_memory import build_runtime_registry
 from harness4h3.target.profile import load_target_profile
@@ -93,6 +96,7 @@ def main() -> int:
     parser.add_argument("--base-url", default=os.environ.get("COMFYUI_BASE_URL", "http://100.88.143.10:8188"))
     parser.add_argument("--output", default="var/m6-runtime/m6-validation.json")
     parser.add_argument("--benchmark-output", default="var/m6-runtime/runs")
+    parser.add_argument("--trajectory-output", default="var/m6-runtime/trajectories.jsonl")
     parser.add_argument("--controller", choices=("ollama", "mock"), default="ollama")
     parser.add_argument("--controller-model", default=os.environ.get("OLLAMA_MODEL", "qwen3.5:9b-q8_0"))
     parser.add_argument("--controller-url", default=os.environ.get("OLLAMA_BASE_URL", "http://100.88.143.10:11434"))
@@ -129,6 +133,7 @@ def main() -> int:
         system_sample_interval_s=1.0,
     )
     validator = M6ValidationRunner(runner)
+    trajectory_store = TrajectoryStore(root / args.trajectory_output)
     attribution = {
         "primary_intervention": "runtime_memory",
         "secondary_changes": [],
@@ -166,24 +171,83 @@ def main() -> int:
         branch_payload: Dict[str, Any] = {"operator": operator_name, "operator_args": operator_args, "operator_result": operator_result.to_dict()}
         if operator_result.ok and operator_result.output_state is not None:
             split_results = {}
+            split_errors: Dict[str, Any] = {}
             for split, selected in split_tasks.items():
-                result = validator.run(
-                    parent,
-                    operator_result.output_state,
-                    selected,
-                    label=f"{operator_name}-{split}",
-                    target=target,
-                    reference_metrics=REFERENCE_METRICS,
-                    operator_attribution=attribution,
-                    repetitions=args.repetitions,
-                )
-                split_results[split] = result.to_dict()
+                try:
+                    result = validator.run(
+                        parent,
+                        operator_result.output_state,
+                        selected,
+                        label=f"{operator_name}-{split}",
+                        target=target,
+                        reference_metrics=REFERENCE_METRICS,
+                        operator_attribution=attribution,
+                        repetitions=args.repetitions,
+                    )
+                    split_results[split] = result.to_dict()
+                except (BackendError, OSError, ValueError) as exc:
+                    split_errors[split] = {
+                        "failure_type": getattr(exc, "failure_type", "m6_validation_failure"),
+                        "message": str(exc),
+                    }
             branch_payload["splits"] = split_results
-            branch_payload["validated"] = all(item["validated"] for item in split_results.values())
+            if split_errors:
+                branch_payload["errors"] = split_errors
+            branch_payload["validated"] = bool(split_results) and not split_errors and all(
+                item["validated"] for item in split_results.values()
+            )
         else:
             branch_payload["splits"] = {}
             branch_payload["validated"] = False
         payload["branches"][operator_name] = branch_payload
+        split_scores = [
+            result.get("aggregates", {}).get("branch", {}).get("quality_score", {}).get("mean")
+            for result in branch_payload.get("splits", {}).values()
+            if isinstance(result, Mapping)
+        ]
+        score_values = [float(value) for value in split_scores if isinstance(value, (int, float))]
+        branch_failure = None
+        if not branch_payload["validated"]:
+            branch_failure = operator_result.failure_type
+            if branch_failure is None:
+                errors = branch_payload.get("errors", {})
+                if isinstance(errors, Mapping):
+                    branch_failure = next(
+                        (str(item.get("failure_type")) for item in errors.values() if isinstance(item, Mapping) and item.get("failure_type")),
+                        None,
+                    )
+            branch_failure = branch_failure or "m6_gate_failed"
+        trajectory_store.append(
+            Trajectory(
+                task_id="m6:%s" % operator_name,
+                harness_version=child_id,
+                split="m6",
+                inputs={
+                    "parent_model_id": parent.model_id,
+                    "operator": operator_name,
+                    "operator_args": operator_args,
+                    "target_profile_id": target.id,
+                    "controller_plan": plan.to_dict(),
+                },
+                steps=[
+                    {"action": "controller_plan", "operator": plan.operator, "operator_args": dict(plan.operator_args)},
+                    {"action": "runtime_operator", "operator": operator_name, "operator_result": operator_result.to_dict()},
+                    {"action": "m6_validation", "splits": branch_payload.get("splits", {}), "errors": branch_payload.get("errors", {})},
+                ],
+                final_result={"branch_model_id": child_id, "validated": branch_payload["validated"]},
+                score=(sum(score_values) / len(score_values)) if score_values else None,
+                failure_type=branch_failure,
+                cost={"tokens": 0.0, "wall_time": float(operator_result.cost.wall_time_s)},
+                evaluation={
+                    "target_profile_id": target.id,
+                    "operator_attribution": attribution,
+                    "splits": branch_payload.get("splits", {}),
+                    "errors": branch_payload.get("errors", {}),
+                },
+                critical_regression=not branch_payload["validated"],
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
         _persist(output, payload)
         print(json.dumps({"branch": operator_name, "validated": branch_payload["validated"]}, ensure_ascii=False))
     _persist(output, payload)

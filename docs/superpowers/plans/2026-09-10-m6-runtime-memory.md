@@ -29,11 +29,11 @@
 - `build_runtime_registry(backend=None)` returns the existing fake registry plus `runtime_offload`, `vae_tiling`, and `inference_chunking`.
 - `runtime_state["runtime_policy"]` contains `{ "kind": str, "args": {...} }`.
 
-- [ ] Write tests for schemas, argument validation, immutable child cloning, and unsupported values.
-- [ ] Run `PYTHONPATH=. pytest tests/unit/test_runtime_memory.py -q` and observe the new tests fail.
-- [ ] Implement the three operators with deterministic policy metadata and no checkpoint mutation.
-- [ ] Run the focused tests and then the full suite; expect all existing tests plus the new runtime tests to pass.
-- [ ] Commit `feat: add runtime memory operators`.
+- [x] Write tests for schemas, argument validation, immutable child cloning, and unsupported values.
+- [x] Run the focused tests and confirm the new runtime tests pass.
+- [x] Implement the three operators with deterministic policy metadata and no checkpoint mutation.
+- [x] Run the focused tests and then the full suite; all existing tests plus the new runtime tests pass.
+- [x] Commit `feat: add runtime memory operators`.
 
 ### Task 2: Apply runtime policies to ComfyUI workflows
 
@@ -46,10 +46,10 @@
 - `H3BenchmarkRunner._workflow` reads `state.runtime_state.runtime_policy` and returns a copied workflow.
 - `apply_runtime_policy(workflow, policy)` performs concrete node/input changes or raises `BackendError` with `runtime_policy_unsupported`.
 
-- [ ] Add tests proving policy application does not mutate the template and unsupported nodes fail explicitly.
-- [ ] Implement offload controls and guarded tiled/chunked node rewrites.
-- [ ] Run focused and full tests.
-- [ ] Commit `feat: apply runtime policies to benchmark workflows`.
+- [x] Add tests proving policy application does not mutate the template and unsupported nodes fail explicitly.
+- [x] Implement offload controls and guarded tiled/chunked node rewrites.
+- [x] Run focused and full tests.
+- [x] Commit `feat: apply runtime policies to benchmark workflows`.
 
 ### Task 3: Max-based M6 validation and controller context
 
@@ -65,10 +65,10 @@
 - `M6ValidationResult.to_dict()` includes per-run conditions, aggregate max/mean/median/min/std/CI, gate booleans, and branch decision.
 - Controller context includes read-only validated Design Gene evidence and available runtime operator schemas.
 
-- [ ] Write failing tests for max-memory rejection, quality/black-frame gates, and branch isolation.
-- [ ] Implement aggregation and strict gate evaluation.
-- [ ] Run focused/full tests.
-- [ ] Commit `feat: add max-based M6 validation`.
+- [x] Write tests for max-memory rejection, quality/black-frame gates, and branch isolation.
+- [x] Implement aggregation and strict gate evaluation.
+- [x] Run focused/full tests.
+- [x] Commit `feat: add max-based M6 validation`.
 
 ### Task 4: Real M6 experiment entry point and evidence
 
@@ -82,8 +82,7 @@
 - CLI evaluates selected runtime branches on dev and held-out tasks, supports `--branches` and atomic incremental JSON output, and exits zero only when all selected branches satisfy M6 gates.
 - Evidence records retain rejected branches and never claim TargetProfile feasibility from averages.
 
-- [ ] Add the real runner and fixed branch definitions.
-- [ ] Run unit tests and a remote RTX 5080 smoke/acceptance matrix.
-- [ ] Update evidence and Design Gene status only from measured max values.
-- [ ] Commit `feat: execute M6 runtime memory validation`.
-
+- [x] Add the real runner, fixed branch definitions, atomic evidence, and append-only trajectory output.
+- [ ] Run unit tests and a remote RTX 5080 smoke/acceptance matrix (blocked: host offline on 2026-09-10).
+- [x] Update repository evidence to record implementation and the unresolved real gate; Design Gene is now `validated` from M5.5 evidence.
+- [ ] Commit `feat: execute M6 runtime memory validation` after real RTX 5080 evidence is available.

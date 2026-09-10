@@ -1,6 +1,6 @@
 {
   "gene_id": "H3-NVFP4-Quantization-001",
-  "status": "validated_m5_5",
+  "status": "validated",
   "state": {
     "parent_model_id": "M0000",
     "child_model_id": "M0001",

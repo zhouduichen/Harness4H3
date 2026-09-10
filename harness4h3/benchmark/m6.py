@@ -48,7 +48,11 @@ def _summary_metrics(summary: BenchmarkSummary) -> Dict[str, Optional[float]]:
 
 def _aggregate(summaries: Sequence[BenchmarkSummary]) -> Mapping[str, Mapping[str, Any]]:
     names = ("quality_score", "latency_s", "peak_memory_gb", "model_size_gb", "black_frame_rate", "semantic_generation_valid_rate")
-    return {name: _stats(_summary_metrics(summary)[name] for summary in summaries) for name in names}
+    result = {name: _stats(_summary_metrics(summary)[name] for summary in summaries) for name in names}
+    # Keep the hardware-neutral key used by the existing benchmark and expose
+    # the explicit VRAM vocabulary required by the M6 evidence contract.
+    result["peak_vram_gb"] = dict(result["peak_memory_gb"])
+    return result
 
 
 def _reduction(before: Optional[float], after: Optional[float]) -> Optional[float]:
@@ -169,6 +173,13 @@ class M6ValidationRunner:
             "peak_memory_max_gb": peak_max,
             "peak_memory_target_gb": target_peak,
             "peak_memory_gate": peak_ok,
+            "peak_vram_mean_gb": branch_aggregate["peak_vram_gb"]["mean"],
+            "peak_vram_median_gb": branch_aggregate["peak_vram_gb"]["median"],
+            "peak_vram_min_gb": branch_aggregate["peak_vram_gb"]["minimum"],
+            "peak_vram_max_gb": branch_aggregate["peak_vram_gb"]["maximum"],
+            "peak_vram_std_gb": branch_aggregate["peak_vram_gb"]["stddev"],
+            "peak_vram_ci95_low_gb": branch_aggregate["peak_vram_gb"]["ci95_low"],
+            "peak_vram_ci95_high_gb": branch_aggregate["peak_vram_gb"]["ci95_high"],
         }
         validated = all(
             gates[name]

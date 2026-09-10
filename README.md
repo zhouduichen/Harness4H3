@@ -16,7 +16,7 @@ Autonomous Model Optimization
 
 Phase I 的 Controller LLM 权重固定，Harness 只允许它产生结构化 `ExperimentPlan` 并选择已注册的模型级 Operator。模型修改必须产生不可变的 `M0000`、`M0001`… candidate，经独立质量/硬件 evaluator 验证后进入 Pareto archive。Phase I 不训练 Controller LLM、不演化 Harness、不做 kernel/compiler search，也不允许 Controller 执行 shell 或修改源码、evaluator、benchmark 与目标约束。
 
-当前正式交付覆盖 M0–M5.5：完全离线 Fake H3 closed loop、结构化 Ollama/OpenAI Responses 控制器、safetensors/GGUF H3 Inspector、受限本地进程执行器、固定部署变体的真实 H3 quantize operator，以及带黑帧诊断/Operator Attribution 的受控真实 benchmark。M5 的原始 acceptance 仍限定在固定 RTX 5080 sanity 对照；M5.5 已按独立 dev、held-out 和 multi-seed 分组完成候选复核，但不把 TargetProfile 峰值显存约束改写为已满足。
+当前正式交付覆盖 M0–M5.5，并已实现 M6 runtime-memory validation：完全离线 Fake H3 closed loop、结构化 Ollama/OpenAI Responses 控制器、safetensors/GGUF H3 Inspector、受限本地进程执行器、固定部署变体的真实 H3 quantize operator，以及带黑帧诊断/Operator Attribution 的受控真实 benchmark。M5.5 已按独立 dev、held-out 和 multi-seed 分组完成候选复核；M6 从 M0001 NVFP4 派生 runtime branch，以峰值显存 max（而非均值）作为 16GB hard gate。真实 M6 acceptance 仍需在 RTX 5080 在线时执行，未把 TargetProfile 峰值显存约束预先改写为已满足。
 
 ## 离线闭环
 
@@ -135,3 +135,16 @@ PYTHONPATH=. .venv/bin/python experiments/m5_validation.py --sanity-repetitions 
 ```
 
 首条结构化 Design Gene 记录在 `docs/experience/design-gene-h3-nvfp4.json`，用于后续经验检索；它明确记录了缓存污染导致的黑帧诊断和 16GB 峰值显存剩余限制。
+
+## M6 Cross-Layer Runtime Memory
+
+`experiments/m6_runtime_memory.py` 从已验证的 `M0001` NVFP4 parent 分支出 `runtime_offload`、`vae_tiling` 和 `inference_chunking` 三个低风险 runtime operator。Controller 只接收这些 runtime operator、TargetProfile、M5.5 状态/指标和只读 Design Gene，并自主选择一个主要 intervention；权重、TargetProfile、evaluator 和 Harness Evolution 均不被修改。每个分支都执行独立 evaluator、每次运行前调用 `/free`、记录 Operator Attribution，并把结果同时写入原子 JSON evidence 与 append-only trajectory JSONL。
+
+```bash
+PYTHONPATH=. .venv/bin/python experiments/m6_runtime_memory.py \
+  --controller ollama --branches controller \
+  --base-url http://100.88.143.10:8188 \
+  --controller-url http://100.88.143.10:11434
+```
+
+M6 只有在 dev 与 held-out 两组同时满足生成/解码有效、黑帧率为 `0`、质量下降不超过 `0.05`、保留 M5.5 的模型体积与延迟收益，且 `peak_vram_max_gb <= 16.0` 时才返回成功。缺失节点能力、远端不可达和任一峰值超限都会作为显式失败记录保留。
