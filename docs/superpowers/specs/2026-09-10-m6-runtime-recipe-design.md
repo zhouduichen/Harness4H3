@@ -55,5 +55,5 @@ unsupported/critical failures reach the configured limit.
 
 Unit tests cover candidate identity/lineage, negative gene parsing, operator
 capability failures, recipe attribution, and continuation stop conditions.
-Existing 83-test coverage remains green, and real acceptance still requires
+The existing test suite remains green, and real acceptance still requires
 `peak_vram_max_gb <= 16.0` on both dev and held-out splits.
