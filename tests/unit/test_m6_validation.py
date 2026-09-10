@@ -58,12 +58,14 @@ def test_m6_acceptance_uses_peak_max_and_preserves_reference_efficiency():
         label="vae_tiling",
         target=type("Target", (), {"id": "rtx", "max_peak_memory_gb": 16.0, "max_quality_drop": 0.05})(),
         reference_metrics={"model_size_gb": 20.970379616, "latency_s": 205.0},
+        operator_attribution={"primary_intervention": "runtime_memory"},
     )
     assert result.validated is True
     assert result.gates["peak_memory_max_gb"] == 15.8
     assert result.gates["peak_memory_gate"] is True
     assert result.gates["peak_vram_max_gb"] == 15.8
     assert result.aggregates["branch"]["peak_vram_gb"]["mean"] == 15.8
+    assert result.operator_attribution["primary_intervention"] == "runtime_memory"
     assert benchmark.calls == [("M0001-m6-vae_tiling-r0", True), ("M0002-m6-vae_tiling-r0", True)]
 
 

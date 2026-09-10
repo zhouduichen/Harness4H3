@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from statistics import mean, median, stdev
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -74,6 +74,7 @@ class M6ValidationResult:
     aggregates: Mapping[str, Mapping[str, Mapping[str, Any]]]
     gates: Mapping[str, Any]
     validated: bool
+    operator_attribution: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -200,4 +201,5 @@ class M6ValidationRunner:
             aggregates={"parent": parent_aggregate, "branch": branch_aggregate},
             gates=gates,
             validated=bool(validated),
+            operator_attribution=attribution,
         )
