@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from harness4h3.controller.context import ControllerContext
-from harness4h3.controller.provider import OllamaStructuredController, OpenAIResponsesController
+from harness4h3.controller.provider import OllamaStructuredController, OpenAIResponsesController, RuleBasedMockController
 from harness4h3.controller.schemas import BudgetState
 from harness4h3.h3.state import ModelState
 from harness4h3.operators.fake import build_fake_registry
@@ -109,3 +109,33 @@ def test_openai_responses_provider_uses_strict_schema_and_store_false(controller
     assert request["text"]["format"]["type"] == "json_schema"
     assert request["text"]["format"]["strict"] is True
     assert requests[0][2]["Authorization"] == "Bearer not-a-real-key"
+
+
+def test_runtime_context_exposes_design_gene_and_rule_controller_switches_layer():
+    current = ModelState.from_dict(
+        {
+            **ModelState.fake_baseline().to_dict(),
+            "model_id": "M0001",
+            "parent_model_id": "M0000",
+            "architecture_name": "MiniMax-H3",
+            "quantization": {"bits": 4, "scheme": "nvfp4"},
+            "measured_metrics": {
+                "quality_score": 0.99,
+                "latency_s": 90.0,
+                "peak_memory_gb": 16.3,
+                "model_size_gb": 12.5,
+                "energy_j": 1.0,
+            },
+        }
+    )
+    context_value = ControllerContext(
+        TargetProfile("rtx", "gpu", "local", max_peak_memory_gb=16.0, max_quality_drop=0.05),
+        current,
+        BudgetState(4, 2),
+        tuple({"name": name, "description": "", "input_schema": {"mode": "str"}} for name in ("runtime_offload",)),
+        validated_design_genes=[{"gene_id": "H3-NVFP4-Quantization-001", "status": "validated_m5_5"}],
+    )
+    assert context_value.to_dict()["validated_design_genes"][0]["status"] == "validated_m5_5"
+    plan = RuleBasedMockController().plan(context_value)
+    assert plan.operator == "runtime_offload"
+    assert plan.operator_args == {"mode": "aggressive"}

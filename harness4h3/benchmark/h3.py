@@ -18,6 +18,7 @@ from ..evaluator.evaluator import EvaluationResult, EvaluatorError, SubprocessEv
 from ..h3.state import ModelState
 from ..harness.context import _render_prompt, _set_target
 from ..harness.state import Task
+from .runtime_policy import apply_runtime_policy
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,9 @@ class H3BenchmarkRunner:
             inputs = model_node.setdefault("inputs", {})
             inputs["unet_name"] = checkpoint_name
             workflow["127"] = model_node
+        runtime_policy = state.runtime_state.get("runtime_policy") if isinstance(state.runtime_state, Mapping) else None
+        if runtime_policy is not None:
+            apply_runtime_policy(workflow, runtime_policy)
         return workflow
 
     def run(

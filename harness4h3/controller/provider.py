@@ -126,7 +126,10 @@ def _controller_prompt(context: ControllerContext, schema: Mapping[str, Any]) ->
         "evaluator changes, benchmark changes, or target changes. Address the first blocking hard constraint, make one "
         "primary model modification, preserve quality, and declare at least the registered operator cost. If model size "
         "or memory is blocked and the model is not yet 4-bit, prefer quantize before step_distill. If a recent experiment "
-        "was rejected, change the intervention instead of repeating it. Copy the TargetProfile quality limits exactly into "
+        "was rejected, change the intervention instead of repeating it. When a 4-bit candidate has a residual peak-memory "
+        "violation, prefer one registered runtime-memory operator over more weight compression; use the validated Design Gene "
+        "as read-only evidence and do not modify its fields. For runtime experiments, treat peak-memory maximum (not mean) "
+        "as the hard gate. Copy the TargetProfile quality limits exactly into "
         "acceptance: use null for a limit absent from TargetProfile and never invent a stricter limit. operator_args "
         "must contain only the exact keys listed for the selected operator; keys belonging to any other operator are "
         "forbidden. Use quantize bits=4 when fake int4 quantization is selected. Use exactly "
@@ -235,10 +238,19 @@ class RuleBasedMockController:
         target = context.target_profile
         metrics = state.measured_metrics
         quantized = int(state.quantization.get("bits", 16)) <= 4
+        runtime_names = {str(item["name"]) for item in context.available_operators}
         memory_blocked = target.max_peak_memory_gb is not None and float(metrics["peak_memory_gb"]) > target.max_peak_memory_gb
         size_blocked = target.max_model_size_gb is not None and float(metrics["model_size_gb"]) > target.max_model_size_gb
         latency_blocked = target.max_latency_s is not None and float(metrics["latency_s"]) > target.max_latency_s
-        if (memory_blocked or size_blocked) and not quantized:
+        if quantized and memory_blocked and "runtime_offload" in runtime_names:
+            operator = "runtime_offload"
+            args = {"mode": "aggressive"}
+            diagnosis = "residual_runtime_peak_memory"
+            objective = "move the remaining memory bottleneck into the runtime layer"
+            hypothesis = "aggressive offload lowers peak VRAM without changing NVFP4 weights"
+            effects = {"peak_memory_gb": "decrease", "quality_score": "preserve", "model_size_gb": "unchanged"}
+            required = {"wall_time_s": 0.05, "gpu_hours": 0.0}
+        elif (memory_blocked or size_blocked) and not quantized:
             operator = "quantize"
             args: Mapping[str, Any] = {"bits": 4}
             diagnosis = "memory_or_model_size"

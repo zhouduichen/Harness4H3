@@ -15,6 +15,7 @@ from ..archive.model_store import ModelStore
 from ..archive.pareto import ParetoArchive
 from ..evaluator.composite import CompositeEvaluator
 from ..memory.experiment_store import ExperimentRecord, ExperimentStore
+from ..memory.design_gene import DesignGeneStore
 from ..operators.base import ExecutionContext, OperatorRegistry
 from ..target.profile import TargetProfile
 from .context import ControllerContext
@@ -90,6 +91,7 @@ class OptimizationLoop:
         run_root: Path,
         checkpoint_path: Path,
         max_repeated_failures: int = 2,
+        design_genes: Optional[DesignGeneStore] = None,
     ):
         self.controller = controller
         self.operators = operators
@@ -100,6 +102,7 @@ class OptimizationLoop:
         self.run_root = Path(run_root)
         self.checkpoint_path = Path(checkpoint_path)
         self.max_repeated_failures = max_repeated_failures
+        self.design_genes = design_genes
         self.validation = ValidationPipeline()
 
     def run(
@@ -300,7 +303,10 @@ class OptimizationLoop:
         recent = [item.to_dict() for item in list(self.experiments.read())[-8:]]
         failures = [item for item in recent if item.get("failure_type")]
         front = [entry.to_dict() for entry in self.pareto.front()]
-        return ControllerContext(target, current.state, state.budget, self.operators.visible(), recent, failures, front)
+        genes = []
+        if self.design_genes is not None:
+            genes = [gene.to_dict() for gene in list(self.design_genes.read())[-8:] if gene.status in {"validated", "validated_m5_5", "transferred"}]
+        return ControllerContext(target, current.state, state.budget, self.operators.visible(), recent, failures, front, genes)
 
     @staticmethod
     def _accepted(plan: ExperimentPlan, evaluation: EvaluationResult, baseline_quality: float) -> bool:
