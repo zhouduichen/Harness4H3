@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-from experiments.m6_campaign import (
+from research.experiments.m6_campaign import (
     build_research_report,
     classify_outcome,
     experiment_fingerprint,

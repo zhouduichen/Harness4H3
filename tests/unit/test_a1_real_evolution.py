@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from experiments.a0_model_evolution import A0RuleBasedController
-from experiments.a1_real_evolution import A1BootstrapController, TieredRealBenchmarkEvaluator, _hardware_metrics
+from research.experiments.a0_model_evolution import A0RuleBasedController
+from research.experiments.a1_real_evolution import A1BootstrapController, TieredRealBenchmarkEvaluator, _hardware_metrics
 from harness4h3.benchmark.h3 import BenchmarkSummary, BenchmarkTaskResult
 from harness4h3.controller.context import ControllerContext
 from harness4h3.controller.schemas import BudgetState, EvaluationResult, ExperimentPlan, HardwareMetrics
@@ -102,7 +102,7 @@ def test_a1_second_plan_uses_first_child_and_prior_evidence(tmp_path):
                 feasible=True,
             )
 
-    from experiments.a0_model_evolution import A0Budget, run_campaign
+    from research.experiments.a0_model_evolution import A0Budget, run_campaign
 
     result = run_campaign(
         target(),

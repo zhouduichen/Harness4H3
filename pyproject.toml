@@ -20,7 +20,7 @@ test = ["pytest>=8,<9"]
 harness4h3 = "harness4h3.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["harness4h3*"]
+include = ["harness4h3*", "research*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

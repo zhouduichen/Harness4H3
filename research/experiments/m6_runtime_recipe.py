@@ -28,14 +28,14 @@ from harness4h3.operators.base import ExecutionContext
 from harness4h3.operators.runtime_memory import build_runtime_registry
 from harness4h3.target.profile import load_target_profile
 
-from experiments.m6_campaign import (
+from research.experiments.m6_campaign import (
     build_research_report,
     classify_outcome,
     experiment_fingerprint,
     state_digest,
     validate_novelty,
 )
-from experiments.m6_runtime_memory import (
+from research.experiments.m6_runtime_memory import (
     REFERENCE_METRICS,
     _effective_operator_args,
     _load_gene,

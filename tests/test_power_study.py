@@ -1,4 +1,4 @@
-from experiments.power_study import bootstrap_ci, build_tasks, is_retryable_interruption
+from research.experiments.power_study import bootstrap_ci, build_tasks, is_retryable_interruption
 from harness4h3.memory.trajectory import Trajectory
 
 

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from experiments.m6_runtime_memory import _effective_operator_args
-from experiments.m6_runtime_recipe import _load_runtime_gene
+from research.experiments.m6_runtime_memory import _effective_operator_args
+from research.experiments.m6_runtime_recipe import _load_runtime_gene
 
 
 def test_controller_runtime_args_are_scoped_to_selected_operator():

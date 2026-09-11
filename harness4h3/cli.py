@@ -31,13 +31,13 @@ from .memory.trajectory import TrajectoryStore
 from .model.minimax_h3 import MiniMaxH3Adapter
 from .operators.fake import FakeOperatorBackend, build_fake_registry
 from .self_improve.evolve import EvolutionController
-from experiments.a0_model_evolution import (
+from research.experiments.a0_model_evolution import (
     A0Budget,
     A0RuleBasedController,
     default_validated_nvfp4_candidate,
     run_campaign,
 )
-from experiments.a1_real_evolution import run_a1
+from research.experiments.a1_real_evolution import run_a1
 from .operators.model_evolution import build_external_model_evolution_registry, build_model_evolution_registry
 from .executor.local import LocalProcessExecutor
 from .target.profile import load_target_profile

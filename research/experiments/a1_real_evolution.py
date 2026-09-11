@@ -20,7 +20,7 @@ from harness4h3.operators.base import OperatorRegistry
 from harness4h3.operators.model_evolution import build_external_model_evolution_registry
 from harness4h3.target.profile import TargetProfile, load_target_profile
 
-from experiments.a0_model_evolution import (
+from research.experiments.a0_model_evolution import (
     A0Budget,
     A0CampaignResult,
     A0RuleBasedController,
