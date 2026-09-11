@@ -15,10 +15,14 @@ Remote host and source revision:
 - ComfyUI version: `0.34.0` from `D:\ComfyUI\comfyui_version.py`.
 - Git remote: `https://github.com/comfyanonymous/ComfyUI.git`.
 - Git revision: `e7051b03`.
-- The ComfyUI HTTP service was **not running** during this run: no Python
-  process matching ComfyUI and no listener on TCP `8188`. Therefore no
-  runtime model instance, `named_parameters()` dump, real forward probe, or
-  benchmark was performed.
+- At the beginning of the source-only reconnaissance the ComfyUI HTTP service
+  was stopped. It was then started from the command line with
+  `D:\ComfyUI\main.py --enable-dynamic-vram --listen 127.0.0.1,100.88.143.10
+  --reserve-vram 1`.
+- A real non-mutating H3 inference smoke run was subsequently completed through
+  the existing workflow. This proves live model load and forward/generation,
+  but not `named_parameters()` trainability, backward, optimizer update, or
+  child checkpoint save/load.
 
 Confidence levels:
 
@@ -194,6 +198,30 @@ ComfyUI code:
    under `@torch.no_grad()`. Its current native schedule calls
    `model(x, sigmas[i] * s_in, **extra_args)` at lines 121-125 and updates
    with `(x - denoised) / sigma`.
+
+### C.3 Live runtime smoke evidence
+
+The service was reachable at `http://100.88.143.10:8188`. The existing
+workflow was submitted without changing any model file:
+
+```text
+prompt_id: 2ce6ae21-5d5f-4275-ab7e-8c009961e776
+workflow: examples/workflow_api.json
+checkpoint node: minimax_h3_fl2va_pruned_nvfp4.safetensors
+steps: 4
+seed: 42
+status: success
+ComfyUI execution: 43.58 s
+adapter wall time: 45.6752259999048 s
+artifact: /Users/huangjiahao/MinMax-H3/var/a1-runtime-recon/sanity-visible-subject/sanity-visible-subject_00001_.mp4
+machine-readable result: /Users/huangjiahao/MinMax-H3/var/a1-runtime-recon/sanity-visible-subject-result.json
+```
+
+The remote log confirms Qwen text encoder loading, H3 model loading with
+`model_type FLOW_AV`, BF16 inference dtype, Turbo LoRA attachment, native
+`ModelSamplingAV` 4-step Euler execution, and Video VAE decode. This is a
+real forward/generation result only; it is not a model-changing experiment
+and produced no M0001.
 
 ### C.2 Forward signature and inputs
 
@@ -401,15 +429,17 @@ conditioning, VAE memory, and ComfyUI patcher/offload behavior were not
 measured. `supported_models.py:973`'s `memory_usage_factor=0.114` is an
 inference memory heuristic, not a training budget.
 
-The first live implementation must therefore begin with a read-only loaded
-model audit and a minimal forward/backward probe only after a valid child save
-strategy is established. No such probe was run in this reconnaissance.
+The live inference smoke confirms that the model can be loaded and run on this
+GPU, but it did not measure backward activations or optimizer memory. A
+training implementation must still begin with a read-only loaded-model audit
+and a minimal forward/backward probe only after a valid child save strategy is
+established.
 
 ## J. Blockers and failure/rejection information
 
-1. **ComfyUI service unavailable:** the host is reachable, but no process is
-   serving `127.0.0.1:8188`; no live model instance was available for
-   `named_parameters()`, `requires_grad`, or a forward probe.
+1. **Runtime trainability still unconfirmed:** ComfyUI is now running and a
+   real H3 forward/generation succeeded, but no live `named_parameters()` dump
+   or backward probe was performed.
 2. **Quantized parent:** the real M0000 candidate is NVFP4 safetensors; the
    active quantized loader marks the quantized weights non-trainable. A valid
    trainable subset and optimizer contract remain to be verified.
@@ -424,19 +454,20 @@ strategy is established. No such probe was run in this reconnaissance.
    train/finetune/dataset implementation. This does not prove that no
    external/original training repository exists; its source has not been
    identified and must not be guessed.
-6. **No failure taxonomy from a real experiment:** no smoke test was started,
-   so there is no real training, checkpoint, benchmark, rejection, or failure
-   record to report.
+6. **No model-changing experiment:** the real inference smoke succeeded, but
+   no training, checkpoint mutation, benchmark evaluation, rejection, or
+   failure taxonomy record exists yet.
 
-Because blockers 1–5 remain, A1-T0 is still blocked. Implementing a trainer
-now would violate the requirement to stop when a key H3 fact is unconfirmed.
+Because blockers 2–5 remain, A1-T0 is still blocked. The successful inference
+smoke does not satisfy the model-changing requirements, and implementing a
+trainer now would violate the requirement to stop when a key H3 fact is
+unconfirmed.
 
 ## K. Exact next implementation step
 
 Do not modify Harness4H3-v1.0 and do not add an orchestration abstraction.
-After the Windows ComfyUI service is deliberately started, perform one
-read-only runtime audit using the existing ComfyUI loader and the current
-checkpoint:
+With the Windows ComfyUI service now running, perform one read-only runtime
+audit using the existing ComfyUI loader and the current checkpoint:
 
 1. load `minimax_h3_fl2va_pruned_nvfp4.safetensors` through
    `comfy.sd.load_diffusion_model`, without changing the parent file;
