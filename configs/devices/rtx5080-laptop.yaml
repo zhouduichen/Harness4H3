@@ -1,0 +1,63 @@
+schema_version: 1
+id: windows-rtx5080-laptop
+platform:
+  os: Windows
+  python: 3.11.9
+  pytorch: 2.11.0+cu128
+  cuda: "12.8"
+hardware:
+  gpu_name: NVIDIA GeForce RTX 5080 Laptop GPU
+  gpu_count: 1
+  vram_gb: 15.92
+  ram_gb: 31.45
+  supported_dtypes:
+    - float32
+    - float16
+    - bfloat16
+paths:
+  comfyui:
+    path: 'D:\ComfyUI'
+    required: true
+  checkpoint_manifest:
+    path: configs/models/minimax_h3_rtx5080.yaml
+    required: true
+  artifacts:
+    path: var
+    required: false
+services:
+  comfyui:
+    url: http://127.0.0.1:8188
+    health_path: /system_stats
+    required_for:
+      - inference
+      - benchmark
+  controller:
+    url: http://127.0.0.1:11434
+    health_path: /api/tags
+    required_for:
+      - controller
+limits:
+  max_peak_vram_gb: 16.0
+  max_parallel_experiments: 1
+formats:
+  - safetensors
+  - gguf
+capabilities:
+  inference:
+    enabled: true
+    reason: verified through the existing H3 ComfyUI backend
+  benchmark:
+    enabled: true
+    reason: measured benchmark evidence is archived
+  controller:
+    enabled: true
+    reason: Ollama structured controller endpoint was verified
+  recovery_finetune:
+    enabled: false
+    reason: official BF16 transformer exceeds verified VRAM and RAM
+  prune:
+    enabled: false
+    reason: no real H3 pruning backend is registered
+  distill:
+    enabled: false
+    reason: no real H3 teacher/student training backend is registered
