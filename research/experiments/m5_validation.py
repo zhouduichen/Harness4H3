@@ -58,7 +58,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     config = load_config(root / args.config)
     target = load_target_profile(root / args.target)
     tasks = load_tasks(config.runtime.tasks_path)

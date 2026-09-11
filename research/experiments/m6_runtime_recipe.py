@@ -186,7 +186,7 @@ def main() -> int:
     if args.max_iterations <= 0 or args.max_failed_experiments < 0:
         raise ValueError("iteration and failure budgets must be positive/non-negative")
 
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     config = load_config(root / args.config)
     target = load_target_profile(root / args.target)
     tasks = load_tasks(config.runtime.tasks_path)
