@@ -492,3 +492,107 @@ status is:
 ```text
 A1-T0 blocked; trainer not implemented; no real M0001 exists.
 ```
+
+## L. External community trainer deployment and preflight — 2026-09-11
+
+The community supervised trainer identified in the new execution plan was
+deployed to `D:\H3Training` from
+[`IAmIronMan42/MiniMax-H3-FineTuning`](https://github.com/IAmIronMan42/MiniMax-H3-FineTuning).
+The Git clone path was unavailable because the remote Git proxy pointed at an
+unreachable local port; the repository source was therefore downloaded as a
+GitHub archive. This does not change Harness4H3.
+
+### L.1 Independent environment
+
+The trainer has its own `D:\H3Training\.venv`; ComfyUI's environment was not
+upgraded. The installed preflight environment is:
+
+```text
+Python       3.11.9
+PyTorch      2.11.0+cu128
+CUDA build   12.8
+GPU          NVIDIA GeForce RTX 5080 Laptop GPU
+VRAM         17,094,475,776 bytes (~15.92 GiB)
+RAM          33,752,997,888 bytes (~31.45 GiB)
+Diffusers    pinned source revision abc5e9bf...
+Transformers 4.57.3
+Accelerate   1.15.0
+PEFT         0.20.0
+AV           18.1.0
+Safetensors 0.8.0
+DeepSpeed    not installed (not required for the single-process preflight)
+```
+
+`train.py --help` now imports successfully. The trainer's documented single
+GPU command is `--trainable heads --strategy ddp`; its source still executes
+`MiniMaxH3Transformer3DModel.from_pretrained(...).to(device)` at
+`D:\H3Training\train.py:159`, and has no quantization or disk-offload path.
+The head-only mode changes which parameters receive gradients, not the base
+model residency requirement. These semantics and the rectified-flow target
+are described in the trainer's [README](https://github.com/IAmIronMan42/MiniMax-H3-FineTuning)
+and [FIXES.md](https://github.com/IAmIronMan42/MiniMax-H3-FineTuning/blob/main/FIXES.md).
+
+### L.2 Real parent compatibility preflight
+
+The current real parent was passed to the community trainer without writing to
+it:
+
+```text
+model: D:\ComfyUI\models\diffusion_models\minimax_h3_fl2va_pruned_nvfp4.safetensors
+variant: fl2va
+trainable: heads
+strategy: ddp
+max_steps: 1
+```
+
+The preflight failed before model construction. `from_pretrained()` treated
+the single-file NVFP4 checkpoint as a Diffusers model directory/config and
+returned:
+
+```text
+OSError: It looks like the config file at
+'D:\ComfyUI\models\diffusion_models\minimax_h3_fl2va_pruned_nvfp4.safetensors'
+is not a valid JSON file.
+```
+
+This is a genuine rejected compatibility preflight, not a training result.
+The parent file remains unchanged and no child checkpoint was produced.
+
+### L.3 Official model/resource blocker
+
+The official `MiniMaxAI/MiniMax-H3` repository contains a Diffusers
+transformer layout, but it is not present on the remote host. The reachable
+mirror metadata reports approximately:
+
+```text
+FL2VA/transformer  66,280,524,863 bytes (~61.73 GiB)
+FL2VA/text_encoder 66,726,510,529 bytes (~62.14 GiB)
+FL2VA/video_vae    10,415,694,629 bytes (~9.70 GiB)
+FL2VA/audio_vae       605,461,455 bytes (~0.56 GiB)
+```
+
+The trainer needs the transformer in BF16 and calls `.to(cuda)`. The
+transformer alone exceeds the RTX 5080's VRAM by roughly 4x; the host also
+does not have enough RAM to hold the full BF16 transformer. Downloading the
+official assets therefore cannot make this trainer runnable on the current
+host, and was not started. The existing ComfyUI NVFP4 model cannot be passed
+to this trainer as a substitute, as the compatibility preflight above proves.
+
+### L.4 Current execution status
+
+```text
+community trainer source deployed        yes
+independent CUDA environment              yes
+real parent accepted by community trainer no
+real forward/backward                     no
+optimizer.step                            no
+real child checkpoint                     no
+M0001                                     no
+benchmark after training                  no
+```
+
+The next implementation step requires one explicit capability change:
+either a training-compatible quantized Diffusers H3 checkpoint, a host with
+enough GPU/multi-GPU memory for the official BF16 transformer, or authorization
+to implement a separate ComfyUI-NVFP4-aware training path. Until one exists,
+A1-T0 remains blocked and no mock or fake model-changing experiment is valid.
