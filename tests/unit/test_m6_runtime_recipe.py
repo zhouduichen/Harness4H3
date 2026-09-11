@@ -21,7 +21,7 @@ def test_runtime_recipe_defaults_are_safe_for_new_operators():
 
 
 def test_rejected_runtime_gene_is_loaded_as_read_only_context(tmp_path):
-    gene_path = tmp_path / "docs" / "experience" / "design-gene-m6-vae-tiling.json"
+    gene_path = tmp_path / "research" / "evidence" / "design-genes" / "design-gene-m6-vae-tiling.json"
     gene_path.parent.mkdir(parents=True)
     gene_path.write_text(json.dumps({"gene_id": "H3-M6-VAE-Tiling-001", "status": "rejected"}))
     assert _load_runtime_gene(tmp_path)["status"] == "rejected"

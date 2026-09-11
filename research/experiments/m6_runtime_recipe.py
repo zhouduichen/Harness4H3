@@ -46,7 +46,7 @@ from research.experiments.m6_runtime_memory import (
 
 
 def _load_runtime_gene(root: Path) -> Mapping[str, Any]:
-    path = root / "docs/experience/design-gene-m6-vae-tiling.json"
+    path = root / "research/evidence/design-genes/design-gene-m6-vae-tiling.json"
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):

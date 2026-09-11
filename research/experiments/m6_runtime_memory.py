@@ -100,7 +100,7 @@ def _state(model_id: str) -> ModelState:
 
 
 def _load_gene(root: Path) -> Mapping[str, Any]:
-    path = root / "docs/experience/design-gene-h3-nvfp4.json"
+    path = root / "research/evidence/design-genes/design-gene-h3-nvfp4.json"
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
