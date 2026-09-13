@@ -32,11 +32,18 @@ def fixture(**changes):
 
 def test_dmd2_updates_critic_every_step_and_student_on_interval():
     method, batches = fixture(generator_update_interval=2)
+    student_before = clone(method.student_model)
+    critic_before = clone(method.critic_model)
+    teacher_before = clone(method.teacher_model)
     result = TrainerEngine(TrainerConfig(seed=31, max_gradient_norm=10.0)).run(method, batches, max_steps=4)
     assert result.optimizer_steps["critic"] == 4
     assert result.optimizer_steps["student"] == 2
     assert method.ema.num_updates == 2
     assert method.critic_updates == 4
+    assert not equal(student_before, clone(method.student_model))
+    assert not equal(critic_before, clone(method.critic_model))
+    assert equal(teacher_before, clone(method.teacher_model))
+    assert all(not parameter.requires_grad for parameter in method.teacher_model.parameters())
 
 
 def test_dmd2_loss_is_finite_and_gradients_nonzero():
@@ -63,6 +70,18 @@ def test_dmd2_text_only_mode_needs_no_real_latent():
     )
     result = TrainerEngine(TrainerConfig(seed=2, max_gradient_norm=10.0)).run(method, [batch], max_steps=1)
     assert result.optimizer_steps == {"critic": 1, "student": 1}
+
+
+def test_dmd2_real_latent_mode_rejects_noise_only_batch():
+    method, _ = fixture(generator_update_interval=1, data_mode="real_latent")
+    config = method.student_model.config
+    generator = torch.Generator().manual_seed(89)
+    batch = PreparedBatch(
+        conditioning=Conditioning(torch.randn(1, config.condition_dim, generator=generator)),
+        noise=ModalLatents(video=torch.randn(1, config.video_tokens, config.latent_dim, generator=generator)),
+    )
+    with pytest.raises(RuntimeError, match="invalid_training_config.*real_latent"):
+        TrainerEngine(TrainerConfig(seed=2)).run(method, [batch], max_steps=1)
 
 
 def test_dmd2_optional_real_latent_losses_are_exercised():

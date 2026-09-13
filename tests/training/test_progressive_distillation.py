@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 
 import pytest
 
@@ -12,6 +13,8 @@ from h3_training.algorithms.progressive_distillation import (
     plan_binary_stages,
 )
 from h3_training.data.dataset import SyntheticH3Dataset
+from h3_training.data.schema import ModalLatents
+from h3_training.engine.state import TrainingFailure
 from h3_training.engine.trainer import TrainerConfig, TrainerEngine
 from h3_training.tiny.model import TinyH3Model
 
@@ -65,3 +68,16 @@ def test_progressive_resume_matches_uninterrupted(tmp_path):
     resumed = resumed_engine.run(resumed_method, resumed_batches, max_steps=6, resume_from=path)
     assert equal(clone(full_method.student_model), clone(resumed_method.student_model))
     assert resumed.loop_state == full_result.loop_state
+
+
+def test_video_only_requires_zero_audio_weight():
+    method, _ = fixture()
+    method.config = replace(method.config, audio_weight=0.0)
+    sample = SyntheticH3Dataset(1, 91)[0]
+    video_only = replace(sample, latents=ModalLatents(video=sample.latents.video))
+    result = TrainerEngine(TrainerConfig(seed=13)).run(method, [[video_only]], max_steps=1)
+    assert result.optimizer_steps == {"student": 1}
+
+    invalid, _ = fixture()
+    with pytest.raises(TrainingFailure, match="absent audio modality"):
+        TrainerEngine(TrainerConfig(seed=13)).run(invalid, [[video_only]], max_steps=1)

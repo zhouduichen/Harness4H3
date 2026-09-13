@@ -178,6 +178,8 @@ class DMD2(TrainingMethod):
             return self.adapter.prediction_to_clean(source, prediction, timesteps)
 
     def training_step(self, batch: PreparedBatch, iteration: int) -> StepOutput:
+        if self.config.data_mode == "real_latent" and batch.latents is None:
+            raise TrainingFailure("invalid_training_config", "real_latent mode requires real latents")
         update_student = iteration % self.config.generator_update_interval == 0
         generated = self._generator_sample(batch, update_student)
         detached_generated = self._map(generated, lambda value: value.detach())

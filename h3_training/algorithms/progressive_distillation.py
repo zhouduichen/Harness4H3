@@ -184,6 +184,10 @@ class ProgressiveDistillation(TrainingMethod):
             ("audio", endpoint.audio, target.audio, self.config.audio_weight),
         ):
             if actual is None:
+                if weight != 0:
+                    raise TrainingFailure(
+                        "invalid_training_config", f"absent {name} modality must have zero weight"
+                    )
                 continue
             if weight <= 0:
                 raise TrainingFailure("invalid_training_config", f"present {name} modality has zero weight")
