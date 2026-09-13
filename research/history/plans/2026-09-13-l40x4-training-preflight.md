@@ -1,6 +1,6 @@
 # 4×L40 Training Preflight Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add safe, testable four-L40 device, distributed smoke-recipe, and worker configuration prerequisites without enabling or implementing real H3 training.
 
@@ -32,7 +32,7 @@
 - Consumes: optional `hardware.gpu_name_contains`, `hardware.gpu_count`, `hardware.min_vram_gib_per_gpu`, `hardware.min_system_ram_gib`, `hardware.distributed_backend`, and path-entry `required_for` lists.
 - Produces: `preflight(profile_path: Path, operator: Optional[str], check_services: bool = True, timeout_s: float = 3.0, check_hardware: bool = True) -> Dict[str, Any]` and stable `hardware.*`/`runtime.torch` checks.
 
-- [ ] **Step 1: Add failing test helpers and passing four-GPU test**
+- [x] **Step 1: Add failing test helpers and passing four-GPU test**
 
 Add these helpers to `tests/unit/test_device_preflight.py`:
 
@@ -89,7 +89,7 @@ def test_preflight_accepts_four_matching_l40_gpus(tmp_path, monkeypatch):
     assert check(result, "runtime.torch")["status"] == "passed"
 ```
 
-- [ ] **Step 2: Run the focused test and verify failure**
+- [x] **Step 2: Run the focused test and verify failure**
 
 Run:
 
@@ -99,7 +99,7 @@ python3 -m pytest -q tests/unit/test_device_preflight.py::test_preflight_accepts
 
 Expected: fail because `run`, `MEMINFO_PATH`, `_torch_observation`, and hardware checks do not exist.
 
-- [ ] **Step 3: Implement fixed hardware observations**
+- [x] **Step 3: Implement fixed hardware observations**
 
 In `tools/device_preflight.py`, import `subprocess.run`, `subprocess.PIPE`, and `sys`; define:
 
@@ -152,7 +152,7 @@ past `preflight`. Compare all GPUs against the declared count, name substring,
 and minimum GiB. Require PyTorch CUDA availability and the same visible device
 count as `hardware.gpu_count`.
 
-- [ ] **Step 4: Implement hardware skipping and operation-scoped paths**
+- [x] **Step 4: Implement hardware skipping and operation-scoped paths**
 
 Add `check_hardware` to `preflight`. When hardware requirements exist and it
 is false, append `skipped` entries for all five checks and force overall status
@@ -172,7 +172,7 @@ parser.add_argument("--skip-hardware", action="store_true")
 
 and pass `check_hardware=not args.skip_hardware`.
 
-- [ ] **Step 5: Add negative hardware/path tests**
+- [x] **Step 5: Add negative hardware/path tests**
 
 Add parameterized cases for three hardware mismatches:
 
@@ -201,7 +201,7 @@ Also add explicit tests for missing `nvidia-smi`, malformed output,
 with disjoint `required_for: [recovery_finetune]` and
 `required_for: [benchmark]` lists.
 
-- [ ] **Step 6: Run focused tests and commit**
+- [x] **Step 6: Run focused tests and commit**
 
 Run:
 
@@ -229,7 +229,7 @@ Expected: all device-preflight tests pass; no M6 file is staged.
 - Consumes: the extended device-profile preflight and existing `h3_model_worker.py` fixed-argv contract.
 - Produces: one pending device requirement profile, one immutable one-step FSDP recipe, and one non-fixture Linux worker example.
 
-- [ ] **Step 1: Write failing configuration-contract tests**
+- [x] **Step 1: Write failing configuration-contract tests**
 
 Create `tests/unit/test_l40x4_configs.py`:
 
@@ -292,7 +292,7 @@ def test_l40x4_worker_uses_fixed_four_rank_linux_argv():
     assert raw["deploy_model_dir"] == "/opt/ComfyUI/models/diffusion_models"
 ```
 
-- [ ] **Step 2: Run tests and verify missing-file failures**
+- [x] **Step 2: Run tests and verify missing-file failures**
 
 Run:
 
@@ -302,7 +302,7 @@ python3 -m pytest -q tests/unit/test_l40x4_configs.py
 
 Expected: three failures because the configuration files do not exist.
 
-- [ ] **Step 3: Create the pending device profile**
+- [x] **Step 3: Create the pending device profile**
 
 Copy the exact device-profile fields from the approved design. Add required
 paths for `/opt/Harness4H3`, `/models/MiniMax-H3`,
@@ -312,7 +312,7 @@ separate `recovery_finetune` and `benchmark` paths. Configure localhost
 ComfyUI and Controller health endpoints. Keep all real capabilities disabled
 with concrete reasons.
 
-- [ ] **Step 4: Create the fixed smoke recipe and worker example**
+- [x] **Step 4: Create the fixed smoke recipe and worker example**
 
 Create the complete recipe shown in the approved design, including finite
 loss, non-zero gradient, optimizer-step, parent immutability, changed expected
@@ -336,7 +336,7 @@ Create the worker JSON with:
 }
 ```
 
-- [ ] **Step 5: Prove the unconfigured profile blocks safely**
+- [x] **Step 5: Prove the unconfigured profile blocks safely**
 
 Run:
 
@@ -347,7 +347,7 @@ python3 tools/device_preflight.py --profile configs/devices/l40x4-server.yaml --
 Expected: exit `2`; result includes disabled capability and missing/unmatched
 local prerequisites. It must not contain `status: ready`.
 
-- [ ] **Step 6: Run configuration tests and commit**
+- [x] **Step 6: Run configuration tests and commit**
 
 Run:
 
@@ -375,7 +375,7 @@ committed.
 - Consumes: the pending profile, smoke recipe, worker example, and preflight command.
 - Produces: a reproducible host-setup checklist and honest research-status record.
 
-- [ ] **Step 1: Document the 4×L40 setup gate**
+- [x] **Step 1: Document the 4×L40 setup gate**
 
 Add a `4×L40 pending training host` section to `docs/device-porting.md` that
 links all three configurations and gives this order:
@@ -394,13 +394,13 @@ install host and NVIDIA driver
 
 State that ordinary DDP is invalid because it replicates the full transformer.
 
-- [ ] **Step 2: Update research capability status**
+- [x] **Step 2: Update research capability status**
 
 In `research/README.md`, add that a four-L40 FSDP preflight configuration is
 prepared but unverified; no forward/backward, optimizer step, or child exists
 from that host.
 
-- [ ] **Step 3: Run full verification**
+- [x] **Step 3: Run full verification**
 
 Run:
 
@@ -414,14 +414,14 @@ git diff --check
 Expected: full tests and compileall pass; preflight returns exit `2` and a
 machine-readable blocked result.
 
-- [ ] **Step 4: Mark plan/spec complete and archive them**
+- [x] **Step 4: Mark plan/spec complete and archive them**
 
 Change the current design status to `implemented and archived`, mark every
 checkbox in this plan complete, create `research/history/plans` and
 `research/history/specs` if needed, and move the two current files with
 `git mv`.
 
-- [ ] **Step 5: Commit documentation/history and inspect the worktree**
+- [x] **Step 5: Commit documentation/history and inspect the worktree**
 
 Run:
 

@@ -103,3 +103,47 @@ the trajectory.
 - Controller and evaluator configurations are frozen for the run.
 - Output roots have enough free disk space and are excluded from Git.
 - Unsupported model-changing operators remain disabled.
+
+## 4×L40 pending training host
+
+The repository includes a safe, unverified prerequisite set for a future
+four-GPU L40 server:
+
+- [device requirements](../configs/devices/l40x4-server.yaml);
+- [A1-T0 FSDP smoke recipe](../configs/experiments/a1-t0-l40x4.yaml); and
+- [fixed Linux worker example](../configs/a1-worker.l40x4.example.json).
+
+Prepare the host in this order:
+
+```text
+install Linux host and NVIDIA driver
+→ run nvidia-smi and record the actual four-GPU topology
+→ install the Python/PyTorch CUDA environment
+→ place the official Diffusers H3 assets
+→ deploy the trainer without enabling recovery_finetune
+→ create the one-sample smoke manifest
+→ run device preflight and persist its JSON
+→ review the measured hardware/runtime evidence
+→ implement and run isolated A1-T0
+→ enable recovery_finetune only after every A1-T0 authenticity gate passes
+```
+
+Run the preflight on the L40 host:
+
+```bash
+python tools/device_preflight.py \
+  --profile configs/devices/l40x4-server.yaml \
+  --operator recovery_finetune --skip-services --json \
+  > var/preflight/l40x4.json
+```
+
+The profile requires four visible GPUs whose names contain `NVIDIA L40`, at
+least 40 GiB reported memory per GPU, at least 128 GiB system RAM, CUDA-enabled
+PyTorch with four visible devices, and all operation-specific paths. These are
+requirements, not claims about a server that has not been measured.
+
+Ordinary DDP is not valid for this model because it replicates the complete
+BF16 transformer on every GPU. The smoke recipe fixes `fsdp_full_shard`, four
+ranks, BF16, head-only training, precomputed conditioning, micro-batch one,
+one sample, and one optimizer step. It remains `execution_enabled: false`
+until a real trainer is deployed and reviewed.

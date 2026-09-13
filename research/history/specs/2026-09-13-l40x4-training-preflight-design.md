@@ -1,6 +1,6 @@
 # 4×L40 Training Preflight Design
 
-Status: approved direction; implementation pending.
+Status: implemented and archived.
 
 ## Purpose
 

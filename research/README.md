@@ -61,6 +61,7 @@ separately.
 | M5/M5.5 quantized comparison | Measured | Reported size/latency/quality under recorded controls |
 | M6 runtime-memory branches | Measured | Reported outcomes, including VRAM rejection |
 | A1 model-changing training | Blocked | Reconnaissance and resource blocker only |
+| 4×L40 distributed preflight | Configuration prepared, host unverified | Requirements and blocked preflight only |
 | Pruning/distillation optimization | Not implemented | Interface intent only |
 | Harness superiority over baselines | Not evaluated | No superiority claim |
 
@@ -104,6 +105,13 @@ inputs, metrics, failures, and provenance.
 - Energy/GPU-hour evidence is incomplete for several runs.
 - Human recipe, fixed pipeline, random search, LLM-only, and LLM+Harness have
   not yet been compared under one powered protocol.
+
+A [four-L40 device requirement profile](../configs/devices/l40x4-server.yaml),
+[FSDP A1-T0 recipe](../configs/experiments/a1-t0-l40x4.yaml), and
+[fixed worker example](../configs/a1-worker.l40x4.example.json) are prepared
+for host setup. They are not execution evidence: no L40 hardware observation,
+H3 forward/backward pass, optimizer step, or child checkpoint has been
+recorded from that host.
 
 ## Next valid model-changing experiment
 
