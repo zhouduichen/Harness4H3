@@ -4,6 +4,7 @@ This validates role ownership, score-difference gradients, alternating
 optimizers, EMA, and resume. It is not an H3 production recipe.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
 
@@ -48,7 +49,10 @@ class TimestepNoiseSampler:
         self.samples_drawn = 0
 
     def timestep(self, batch_size: int, modalities: ModalLatents) -> ModalTimesteps:
-        values = torch.rand(batch_size, generator=self.generator) * 0.9 + 0.05
+        reference = modalities.video if modalities.video is not None else modalities.audio
+        assert reference is not None
+        values = torch.rand(batch_size, generator=self.generator, dtype=torch.float32) * 0.9 + 0.05
+        values = values.to(device=reference.device, dtype=reference.dtype)
         self.samples_drawn += batch_size
         return ModalTimesteps(
             video=values if modalities.video is not None else None,
@@ -57,9 +61,15 @@ class TimestepNoiseSampler:
 
     def noise_like(self, latents: ModalLatents) -> ModalLatents:
         self.samples_drawn += sum(value.shape[0] for value in (latents.video, latents.audio) if value is not None)
+
+        def sample(value):
+            generator_device = getattr(self.generator, "device", torch.device("cpu"))
+            noise = torch.randn(value.shape, generator=self.generator, device=generator_device, dtype=torch.float32)
+            return noise.to(device=value.device, dtype=value.dtype)
+
         return ModalLatents(
-            video=torch.randn(latents.video.shape, generator=self.generator, dtype=latents.video.dtype) if latents.video is not None else None,
-            audio=torch.randn(latents.audio.shape, generator=self.generator, dtype=latents.audio.dtype) if latents.audio is not None else None,
+            video=sample(latents.video) if latents.video is not None else None,
+            audio=sample(latents.audio) if latents.audio is not None else None,
         )
 
     def state_dict(self) -> Mapping[str, Any]:
@@ -123,8 +133,16 @@ class DMD2(TrainingMethod):
         self.ema = StudentEMA(student_model, config.ema_decay)
         self.critic_updates = 0
         self.student_updates = 0
+        self.fake_score_updates = 0
+        self.trainable_parameter_names = frozenset()
+        self.frozen_parameter_names = frozenset()
 
     def prepare(self) -> None:
+        all_names = frozenset(name for name, _ in self.student_model.named_parameters())
+        if not all_names:
+            raise TrainingFailure("no_trainable_parameters", "DMD2 student has no parameters")
+        self.trainable_parameter_names = all_names
+        self.frozen_parameter_names = frozenset()
         for parameter in self.student_model.parameters():
             parameter.requires_grad_(True)
         for parameter in self.critic_model.parameters():
@@ -161,6 +179,18 @@ class DMD2(TrainingMethod):
             audio=clean.audio - noise.audio if clean.audio is not None else None,
         )
 
+    @staticmethod
+    @contextmanager
+    def _freeze_parameters(module: nn.Module):
+        previous = [parameter.requires_grad for parameter in module.parameters()]
+        try:
+            for parameter in module.parameters():
+                parameter.requires_grad_(False)
+            yield
+        finally:
+            for parameter, requires_grad in zip(module.parameters(), previous):
+                parameter.requires_grad_(requires_grad)
+
     def _generator_sample(self, batch: PreparedBatch, with_grad: bool) -> ModalLatents:
         source = batch.noise
         if source is None:
@@ -169,8 +199,8 @@ class DMD2(TrainingMethod):
             source = self.sampler.noise_like(batch.latents)
         sample = source.video if source.video is not None else source.audio
         timesteps = ModalTimesteps(
-            video=torch.zeros(sample.shape[0]) if source.video is not None else None,
-            audio=torch.zeros(sample.shape[0]) if source.audio is not None else None,
+            video=source.video.new_zeros(source.video.shape[0]) if source.video is not None else None,
+            audio=source.audio.new_zeros(source.audio.shape[0]) if source.audio is not None else None,
         )
         context = torch.enable_grad() if with_grad else torch.no_grad()
         with context:
@@ -207,6 +237,7 @@ class DMD2(TrainingMethod):
                 fake_prediction = self.adapter.predict(
                     self.critic, score_noisy, score_timestep, batch.conditioning
                 )
+                self.fake_score_updates += 1
                 teacher_clean = self.adapter.prediction_to_clean(score_noisy, teacher_prediction, score_timestep)
                 fake_clean = self.adapter.prediction_to_clean(score_noisy, fake_prediction, score_timestep)
 
@@ -228,12 +259,17 @@ class DMD2(TrainingMethod):
                     generated, batch.latents, self.config.video_weight, self.config.audio_weight
                 )
             if self.config.adversarial_weight:
-                adversarial_prediction = self.adapter.predict(
-                    self.critic, generated, ModalTimesteps(
-                        video=torch.ones(sample.shape[0]) if generated.video is not None else None,
-                        audio=torch.ones(sample.shape[0]) if generated.audio is not None else None,
-                    ), batch.conditioning
-                )
+                with self._freeze_parameters(self.critic_model):
+                    adversarial_prediction = self.adapter.predict(
+                        self.critic, generated, ModalTimesteps(
+                            video=generated.video.new_ones(generated.video.shape[0])
+                            if generated.video is not None
+                            else None,
+                            audio=generated.audio.new_ones(generated.audio.shape[0])
+                            if generated.audio is not None
+                            else None,
+                        ), batch.conditioning
+                    )
                 zeros = self._map(generated, torch.zeros_like)
                 adversarial_loss = self._mse(
                     adversarial_prediction, zeros, self.config.video_weight, self.config.audio_weight
@@ -283,10 +319,15 @@ class DMD2(TrainingMethod):
             "ema": self.ema.state_dict(),
             "critic_updates": self.critic_updates,
             "student_updates": self.student_updates,
+            "fake_score_updates": self.fake_score_updates,
+            "generator_update_interval": self.config.generator_update_interval,
         }
 
     def load_algorithm_state(self, state):
+        if int(state.get("generator_update_interval", self.config.generator_update_interval)) != self.config.generator_update_interval:
+            raise TrainingFailure("resume_mismatch", "DMD2 generator update interval does not match")
         self.sampler.load_state_dict(state["sampler"])
         self.ema.load_state_dict(state["ema"])
         self.critic_updates = int(state["critic_updates"])
         self.student_updates = int(state["student_updates"])
+        self.fake_score_updates = int(state.get("fake_score_updates", self.student_updates))

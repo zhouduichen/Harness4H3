@@ -18,6 +18,7 @@ from h3_training.algorithms.progressive_distillation import (
     ProgressiveDistillation,
     ProgressiveDistillationConfig,
 )
+from h3_training.algorithms.dmd2 import DMD2, DMD2Config
 from h3_training.algorithms.recovery_finetune import RecoveryConfig, RecoveryFineTune
 from h3_training.data.dataset import SyntheticH3Dataset
 from h3_training.engine.evidence import capture_parent, save_verified_child, sha256_file
@@ -41,7 +42,7 @@ def run(request: Mapping[str, Any], result_path: Path, maximum_steps: int, datas
     started = time.perf_counter()
     try:
         operator = str(request.get("operator", ""))
-        if operator not in {"recovery_finetune", "step_distill"}:
+        if operator not in {"recovery_finetune", "step_distill", "dmd2"}:
             raise TrainingFailure("unsupported_training_operator", operator)
         parent = request.get("parent")
         args = request.get("operator_args")
@@ -65,7 +66,7 @@ def run(request: Mapping[str, Any], result_path: Path, maximum_steps: int, datas
                 metadata,
             )
             child_nfe = int(metadata["sampling_nfe"])
-        else:
+        elif operator == "step_distill":
             target_nfe = _positive_int(args.get("target_steps"), "target_steps", 1024)
             teacher_nfe = int(metadata["sampling_nfe"])
             try:
@@ -82,6 +83,26 @@ def run(request: Mapping[str, Any], result_path: Path, maximum_steps: int, datas
                 metadata,
             )
             child_nfe = target_nfe
+        else:
+            requested_steps = _positive_int(args.get("training_steps"), "training_steps", 10_000_000)
+            training_steps = min(requested_steps, maximum_steps)
+            interval = _positive_int(args.get("generator_update_interval", 2), "generator_update_interval", 1024)
+            critic = copy.deepcopy(parent_model)
+            method = DMD2(
+                parent_model,
+                teacher,
+                critic,
+                adapter,
+                DMD2Config(
+                    student_learning_rate=2e-3,
+                    critic_learning_rate=2e-3,
+                    generator_update_interval=interval,
+                    data_mode="text_only",
+                    sampler_seed=seed + 2,
+                ),
+                metadata,
+            )
+            child_nfe = int(metadata["sampling_nfe"])
         child_id = str(request.get("child_model_id", ""))
         parent_id = str(parent.get("id", ""))
         if not child_id or not parent_id or child_id == parent_id:
@@ -136,6 +157,12 @@ def run(request: Mapping[str, Any], result_path: Path, maximum_steps: int, datas
                 "algorithm": method.algorithm_name,
                 "requested_training_steps": requested_steps,
                 "effective_training_steps": training_steps,
+                "experimental": operator == "dmd2",
+                "dmd2_role_updates": {
+                    "critic": getattr(method, "critic_updates", 0),
+                    "student": getattr(method, "student_updates", 0),
+                    "fake_score": getattr(method, "fake_score_updates", 0),
+                },
             },
             "runtime_state": {"backend": "tiny_cpu_reference", "metrics_stale": False},
             "measured_metrics": dict(evaluation.metrics),
@@ -167,6 +194,12 @@ def run(request: Mapping[str, Any], result_path: Path, maximum_steps: int, datas
                     "unchanged_frozen_tensors": child.unchanged_frozen,
                     "child_reloaded": child.reloaded,
                     "evaluation": dict(evaluation.metrics),
+                    "experimental": operator == "dmd2",
+                    "dmd2_role_updates": {
+                        "critic": getattr(method, "critic_updates", 0),
+                        "student": getattr(method, "student_updates", 0),
+                        "fake_score": getattr(method, "fake_score_updates", 0),
+                    },
                 },
             },
         )

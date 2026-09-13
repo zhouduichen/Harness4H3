@@ -5,7 +5,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from h3_training.adapters.tiny import TinyH3Adapter
-from h3_training.algorithms.dmd2 import DMD2, DMD2Config
+from h3_training.algorithms.dmd2 import DMD2, DMD2Config, TimestepNoiseSampler
 from h3_training.data.dataset import SyntheticH3Dataset
 from h3_training.data.schema import Conditioning, ModalLatents, PreparedBatch
 from h3_training.engine.trainer import TrainerConfig, TrainerEngine
@@ -40,6 +40,7 @@ def test_dmd2_updates_critic_every_step_and_student_on_interval():
     assert result.optimizer_steps["student"] == 2
     assert method.ema.num_updates == 2
     assert method.critic_updates == 4
+    assert method.fake_score_updates == 2
     assert not equal(student_before, clone(method.student_model))
     assert not equal(critic_before, clone(method.critic_model))
     assert equal(teacher_before, clone(method.teacher_model))
@@ -96,6 +97,42 @@ def test_dmd2_optional_real_latent_losses_are_exercised():
     output = method.training_step(batch, iteration=1)
     assert output.losses["regression_loss"].item() > 0
     assert output.losses["adversarial_loss"].item() > 0
+
+
+def test_dmd2_critic_phase_only_builds_critic_gradients():
+    method, raw = fixture(generator_update_interval=2)
+    method.prepare()
+    batch = method.prepare_batch(raw[0], torch.Generator().manual_seed(9))
+    output = method.training_step(batch, iteration=1)
+    output.losses["critic_loss"].backward()
+    assert any(p.grad is not None and torch.count_nonzero(p.grad) for p in method.critic_model.parameters())
+    assert all(p.grad is None for p in method.student_model.parameters())
+
+
+def test_dmd2_student_adversarial_loss_freezes_critic_parameters():
+    method, raw = fixture(generator_update_interval=1, adversarial_weight=0.2)
+    method.prepare()
+    batch = method.prepare_batch(raw[0], torch.Generator().manual_seed(10))
+    output = method.training_step(batch, iteration=1)
+    output.losses["adversarial_loss"].backward()
+    assert any(p.grad is not None and torch.count_nonzero(p.grad) for p in method.student_model.parameters())
+    assert all(p.grad is None for p in method.critic_model.parameters())
+    assert all(p.requires_grad for p in method.critic_model.parameters())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_dmd2_sampler_preserves_cuda_device_and_latent_dtype():
+    latents = ModalLatents(
+        video=torch.randn(1, 4, 8, device="cuda", dtype=torch.float16),
+        audio=torch.randn(1, 3, 8, device="cuda", dtype=torch.float16),
+    )
+    sampler = TimestepNoiseSampler(7)
+    noise = sampler.noise_like(latents)
+    timestep = sampler.timestep(1, latents)
+    assert noise.video.device.type == "cuda"
+    assert noise.video.dtype == latents.video.dtype
+    assert timestep.video.device.type == "cuda"
+    assert timestep.video.dtype == latents.video.dtype
 
 
 def test_dmd2_resume_restores_roles_optimizers_ema_and_sampler(tmp_path):

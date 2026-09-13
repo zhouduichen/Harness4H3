@@ -21,6 +21,7 @@ MODEL_OPERATORS = (
     "distill",
     "step_distill",
     "recovery_finetune",
+    "dmd2",
     "quantize",
 )
 
@@ -172,6 +173,16 @@ class ModelEvolutionBackend:
                 "training_steps": training_steps,
             }
             cost = CostEstimate(wall_time_s=1.5, gpu_hours=0.5)
+        elif name == "dmd2":
+            training_steps = int(args["training_steps"])
+            metrics["quality_score"] = min(0.999, metrics["quality_score"] + min(0.02, training_steps / 100000.0))
+            state_changes["algorithm_state"] = {
+                **copy.deepcopy(dict(parent.state.algorithm_state)),
+                "dmd2": "offline_experimental_reference",
+                "training_steps": training_steps,
+                "experimental": True,
+            }
+            cost = CostEstimate(wall_time_s=3.0, gpu_hours=1.5)
         elif name == "quantize":
             bits = int(args["bits"])
             factor = 0.55 if bits == 4 else 0.72
@@ -253,6 +264,11 @@ class ModelEvolutionOperator:
                 raise OperatorValidationError("step_distill.target_steps must be positive and below current steps")
         elif self.name == "recovery_finetune" and int(args["training_steps"]) <= 0:
             raise OperatorValidationError("recovery_finetune.training_steps must be positive")
+        elif self.name == "dmd2":
+            if int(args["training_steps"]) <= 0:
+                raise OperatorValidationError("dmd2.training_steps must be positive")
+            if "generator_update_interval" in args and int(args["generator_update_interval"]) <= 0:
+                raise OperatorValidationError("dmd2.generator_update_interval must be positive")
         elif self.name == "quantize":
             bits = int(args["bits"])
             if bits not in {4, 8}:
@@ -294,6 +310,11 @@ def build_model_evolution_registry(backend: Optional[ModelEvolutionBackend] = No
             {"training_steps": (int,)},
             CostEstimate(1.5, 0.5),
         ),
+        "dmd2": (
+            "Experimental DMD2 reference update with alternating critic and student roles",
+            {"training_steps": (int,)},
+            CostEstimate(3.0, 1.5),
+        ),
         "quantize": ("Quantize model weights to a lower precision", {"bits": (int,)}, CostEstimate(0.8, 0.2)),
     }
     for name, (description, args, cost) in definitions.items():
@@ -331,6 +352,11 @@ def build_external_model_evolution_registry(
         ),
         "step_distill": ("Distill an H3 sampling trajectory", {"target_steps": (int,)}, CostEstimate(7200.0, 4.0)),
         "recovery_finetune": ("Recovery fine-tune after a structural change", {"training_steps": (int,)}, CostEstimate(3600.0, 2.0)),
+        "dmd2": (
+            "Experimental DMD2 reference training on TinyH3-compatible workers",
+            {"training_steps": (int,)},
+            CostEstimate(10800.0, 6.0),
+        ),
         "quantize": ("Quantize H3 weights with a real worker", {"bits": (int,)}, CostEstimate(1800.0, 1.0)),
     }
     registry = OperatorRegistry()

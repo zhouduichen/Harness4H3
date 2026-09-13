@@ -41,11 +41,12 @@ TRAINING_FAILURE_TYPES = frozenset(
         "unchanged_child",
         "frozen_tensor_changed",
         "child_reload_failed",
+        "device_unavailable",
     }
 )
 
 
-TRAINING_OPERATORS = frozenset({"recovery_finetune", "step_distill"})
+TRAINING_OPERATORS = frozenset({"recovery_finetune", "step_distill", "dmd2"})
 REQUIRED_TRAINING_METRICS = frozenset(
     {
         "initial_loss",

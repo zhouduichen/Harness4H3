@@ -120,7 +120,7 @@ class A0CampaignResult:
 def _tier_for(operator: str) -> int:
     if operator in {"create_student", "prune_blocks", "prune_heads", "prune_channels"}:
         return 1
-    if operator in {"distill", "recovery_finetune"}:
+    if operator in {"distill", "recovery_finetune", "dmd2"}:
         return 2
     return 3
 
@@ -220,6 +220,7 @@ class A0RuleBasedController:
             "distill": (2.0, 0.75),
             "step_distill": (2.5, 1.0),
             "recovery_finetune": (1.5, 0.5),
+            "dmd2": (3.0, 1.5),
             "quantize": (0.8, 0.2),
         }
         wall_time_s, gpu_hours = cost_by_operator[operator]
@@ -466,6 +467,9 @@ class A0Campaign:
 
             experiment_id = plan.experiment_id if plan else "exp_%04d" % budget.used_experiments
             reason = "accepted_candidate" if outcome == "accepted_candidate" else failure_type or "acceptance_rejected"
+            keep = outcome == "accepted_candidate"
+            final_accept = bool(keep and self.stop_on_target and target_satisfied)
+            decision_status = "final_accept" if final_accept else "search_keep" if keep else "reject"
             active_after = model_store.active()
             record: Dict[str, Any] = {
                 "iteration": budget.used_experiments - 1,
@@ -487,6 +491,11 @@ class A0Campaign:
                 "quality_metrics": dict(evaluation.quality_metrics) if evaluation else {},
                 "hardware_metrics": evaluation.hardware.__dict__ if evaluation else {},
                 "outcome": outcome,
+                "keep": keep,
+                "decision_status": decision_status,
+                "search_keep": decision_status == "search_keep",
+                "final_accept": final_accept,
+                "reject": decision_status == "reject",
                 "accept_reject_reason": reason,
                 "failure_type": failure_type,
                 "operator_executed": operator_result is not None,
@@ -509,6 +518,7 @@ class A0Campaign:
                 "operator_args": operator_args,
                 "hypothesis": record["hypothesis"],
                 "outcome": outcome,
+                "decision_status": decision_status,
                 "failure_type": failure_type,
             })
             if record["operator"] and len([item for item in recent if item.get("operator") == record["operator"]]) > 1:

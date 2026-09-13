@@ -69,3 +69,29 @@ def test_named_nonfinite_loss_is_rejected_even_when_total_is_finite():
 
     with pytest.raises(RuntimeError, match="nonfinite_loss.*auxiliary"):
         TrainerEngine().run(BadAuxiliaryLoss(), batches(), max_steps=1)
+
+
+def test_engine_consumes_a_stream_without_materializing_the_loader():
+    class StreamingBatches:
+        def __iter__(self):
+            for _ in range(2):
+                yield PreparedBatch(Conditioning(torch.ones(1, 1)))
+
+        def __len__(self):
+            raise AssertionError("the training engine must not ask for loader length")
+
+    method = CountingMethod()
+    result = TrainerEngine(TrainerConfig(max_gradient_norm=10.0)).run(
+        method, StreamingBatches(), max_steps=2
+    )
+    assert result.loop_state.sampler_position == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_engine_moves_model_and_prepared_batch_to_cuda():
+    method = CountingMethod()
+    result = TrainerEngine(
+        TrainerConfig(device="cuda", max_gradient_norm=10.0)
+    ).run(method, batches(), max_steps=1)
+    assert result.optimizer_steps["student"] == 1
+    assert next(method.parameters()).is_cuda

@@ -40,12 +40,23 @@ class TinyH3Adapter(DenoisingModelAdapter):
             video=torch.cat(video) if all(value is not None for value in video) else None,
             audio=torch.cat(audio) if all(value is not None for value in audio) else None,
         )
+
+        def random_tensor(shape, reference, uniform: bool = False):
+            # Keep the algorithm generator on CPU for reproducible checkpoints,
+            # then transfer the sampled value to the actual model tensor.
+            generator_device = getattr(generator, "device", torch.device("cpu"))
+            sampler = torch.rand if uniform else torch.randn
+            value = sampler(shape, generator=generator, device=generator_device, dtype=torch.float32)
+            return value.to(device=reference.device, dtype=reference.dtype)
+
         noise = ModalLatents(
-            video=torch.randn(latents.video.shape, generator=generator) if latents.video is not None else None,
-            audio=torch.randn(latents.audio.shape, generator=generator) if latents.audio is not None else None,
+            video=random_tensor(latents.video.shape, latents.video) if latents.video is not None else None,
+            audio=random_tensor(latents.audio.shape, latents.audio) if latents.audio is not None else None,
         )
         batch_size = len(samples)
-        timestep = torch.rand(batch_size, generator=generator)
+        reference = latents.video if latents.video is not None else latents.audio
+        assert reference is not None
+        timestep = random_tensor((batch_size,), reference, uniform=True)
         return PreparedBatch(
             conditioning=Conditioning(torch.cat([sample.text_embedding for sample in samples])),
             latents=latents,
@@ -66,6 +77,8 @@ class TinyH3Adapter(DenoisingModelAdapter):
 
     def add_noise(self, clean: ModalLatents, noise: ModalLatents, timestep: ModalTimesteps) -> ModalLatents:
         def mix(clean_value, noise_value, time):
+            time = time.to(device=clean_value.device, dtype=clean_value.dtype)
+            noise_value = noise_value.to(device=clean_value.device, dtype=clean_value.dtype)
             while time.ndim < clean_value.ndim:
                 time = time.unsqueeze(-1)
             return time * clean_value + (1.0 - time) * noise_value
@@ -79,6 +92,8 @@ class TinyH3Adapter(DenoisingModelAdapter):
 
     def prediction_to_clean(self, noisy: ModalLatents, prediction: ModalPrediction, timestep: ModalTimesteps) -> ModalLatents:
         def clean(value, velocity, time):
+            time = time.to(device=value.device, dtype=value.dtype)
+            velocity = velocity.to(device=value.device, dtype=value.dtype)
             while time.ndim < value.ndim:
                 time = time.unsqueeze(-1)
             return value + (1.0 - time) * velocity

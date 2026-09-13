@@ -87,8 +87,42 @@ def test_tiny_worker_rejects_non_binary_distillation(tmp_path):
     assert result["failure_type"] == "invalid_training_config"
 
 
+def test_tiny_worker_runs_experimental_dmd2_and_marks_it(tmp_path):
+    parent_path, request_path, result_path = request(
+        tmp_path,
+        "dmd2",
+        {"training_steps": 2, "generator_update_interval": 2},
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(WORKER),
+            "--request",
+            str(request_path),
+            "--result",
+            str(result_path),
+            "--max-training-steps",
+            "2",
+        ],
+        cwd=tmp_path,
+        check=False,
+    )
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert completed.returncode == 0, result
+    assert result["status"] == "success"
+    assert result["metrics"]["experimental"] is True
+    assert result["output_state"]["algorithm_state"]["experimental"] is True
+    assert result["output_state"]["algorithm_state"]["dmd2_role_updates"] == {
+        "critic": 2,
+        "student": 1,
+        "fake_score": 1,
+    }
+    assert result["metrics"]["parent_sha256"] != result["metrics"]["child_sha256"]
+    assert parent_path.is_file()
+
+
 def test_tiny_worker_rejects_unsupported_operator(tmp_path):
-    _, request_path, result_path = request(tmp_path, "dmd2", {"training_steps": 1})
+    _, request_path, result_path = request(tmp_path, "unknown_algorithm", {"training_steps": 1})
     completed = subprocess.run(
         [sys.executable, str(WORKER), "--request", str(request_path), "--result", str(result_path)],
         cwd=tmp_path,

@@ -50,6 +50,7 @@ def test_create_student_changes_architecture_without_mutating_parent(tmp_path):
         ("prune_channels", {"ratio": 0.1}),
         ("distill", {"dataset_fraction": 0.1, "training_steps": 100}),
         ("recovery_finetune", {"training_steps": 100}),
+        ("dmd2", {"training_steps": 100}),
         ("step_distill", {"target_steps": 8}),
         ("quantize", {"bits": 4}),
     ],

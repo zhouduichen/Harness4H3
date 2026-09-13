@@ -228,7 +228,7 @@ class OptimizationLoop:
                 decision_failure = "quality_critical_regression" if evaluation.critical_regression else "acceptance_rejected"
             new_budget = state.budget.consume(operator_result.cost, failed=failed, controller_calls=1)
             next_model_id = child.id if child is not None and keep else current.id
-            decision = {"keep": keep, "continue_from": next_model_id}
+            decision = self._decision(keep, next_model_id, evaluation)
             record = self._record(
                 state,
                 target,
@@ -346,7 +346,7 @@ class OptimizationLoop:
             cost=asdict(CostEstimate()),
             evaluation=None,
             failure_type=error.code,
-            decision={"keep": False, "continue_from": current.id},
+            decision=self._decision(False, current.id),
             pareto_update={"front": [entry.candidate_id for entry in self.pareto.front()]},
             created_at=self._now(),
         )
@@ -382,7 +382,7 @@ class OptimizationLoop:
             None,
             None,
             key,
-            {"keep": False, "continue_from": current.id},
+            self._decision(False, current.id),
             [entry.candidate_id for entry in self.pareto.front()],
         )
         self.experiments.append(record)
@@ -430,6 +430,30 @@ class OptimizationLoop:
             pareto_update={"front": front_ids},
             created_at=self._now(),
         )
+
+    @staticmethod
+    def _decision(
+        keep: bool,
+        next_model_id: str,
+        evaluation: Optional[EvaluationResult] = None,
+    ) -> Mapping[str, Any]:
+        """Expose semantic decisions while preserving the legacy keep flag.
+
+        ``keep`` and ``continue_from`` remain authoritative for the existing
+        protocol. The explicit status separates a retained search point from a
+        terminally accepted candidate and from a rejection.
+        """
+        final_accept = bool(keep and evaluation is not None and evaluation.feasible)
+        status = "final_accept" if final_accept else "search_keep" if keep else "reject"
+        return {
+            "keep": keep,
+            "continue_from": next_model_id,
+            "status": status,
+            "decision_status": status,
+            "search_keep": status == "search_keep",
+            "final_accept": final_accept,
+            "reject": status == "reject",
+        }
 
     def _controller_metadata(self) -> Mapping[str, Any]:
         return {

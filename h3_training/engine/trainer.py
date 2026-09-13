@@ -32,6 +32,44 @@ class TrainerConfig:
         return canonical_digest(asdict(self))
 
 
+class _BatchCursor:
+    """Cycle a re-iterable loader without materializing the whole epoch."""
+
+    def __init__(self, source: Iterable[Any]) -> None:
+        self.source = source
+        self.iterator = iter(source)
+        self.one_shot = self.iterator is source
+
+    def _restart(self) -> None:
+        if self.one_shot:
+            raise TrainingFailure(
+                "invalid_training_config",
+                "dataloader must be re-iterable when training needs more than one pass",
+            )
+        self.iterator = iter(self.source)
+
+    def next(self) -> Any:
+        try:
+            return next(self.iterator)
+        except StopIteration:
+            self._restart()
+            try:
+                return next(self.iterator)
+            except StopIteration as exc:
+                raise TrainingFailure("invalid_training_config", "dataloader must not be empty") from exc
+
+    def skip(self, count: int) -> None:
+        if count < 0:
+            raise TrainingFailure("resume_mismatch", "sampler position must not be negative")
+        if count and self.one_shot:
+            raise TrainingFailure(
+                "resume_mismatch",
+                "exact resume requires a re-iterable dataloader",
+            )
+        for _ in range(count):
+            self.next()
+
+
 class TrainerEngine:
     def __init__(self, config: TrainerConfig = TrainerConfig()) -> None:
         self.config = config
@@ -72,6 +110,37 @@ class TrainerEngine:
         method.on_optimizers_stepped(tuple(scheduled))
         return {"gradient_norm": norm, **{f"optimizer_step/{name}": 1.0 for name in scheduled}}
 
+    @staticmethod
+    def _move_batch(batch: PreparedBatch, device: torch.device, dtype: Optional[torch.dtype]) -> PreparedBatch:
+        def move(value):
+            if value is None:
+                return None
+            target_dtype = dtype if dtype is not None and value.is_floating_point() else value.dtype
+            return value.to(device=device, dtype=target_dtype)
+
+        def move_modal(value):
+            if value is None:
+                return None
+            return type(value)(video=move(value.video), audio=move(value.audio))
+
+        conditioning = type(batch.conditioning)(
+            text=move(batch.conditioning.text),
+            negative_text=move(batch.conditioning.negative_text),
+        )
+        return PreparedBatch(
+            conditioning=conditioning,
+            latents=move_modal(batch.latents),
+            noise=move_modal(batch.noise),
+            timesteps=(
+                type(batch.timesteps)(video=move(batch.timesteps.video), audio=move(batch.timesteps.audio))
+                if batch.timesteps is not None
+                else None
+            ),
+            sample_ids=batch.sample_ids,
+            metadata=batch.metadata,
+        )
+
+
     def run(
         self,
         method: TrainingMethod,
@@ -81,9 +150,13 @@ class TrainerEngine:
     ) -> TrainingRunResult:
         if max_steps <= 0:
             raise TrainingFailure("invalid_training_config", "max_steps must be positive")
-        batches = list(dataloader)
-        if not batches:
-            raise TrainingFailure("invalid_training_config", "dataloader must not be empty")
+        try:
+            device = torch.device(self.config.device)
+        except (TypeError, RuntimeError) as exc:
+            raise TrainingFailure("invalid_training_config", f"invalid device: {self.config.device}") from exc
+        if device.type == "cuda" and not torch.cuda.is_available():
+            raise TrainingFailure("device_unavailable", f"CUDA is not available for device {self.config.device}")
+        method.to(device)
         method.prepare()
         state = LoopState()
         if resume_from is not None:
@@ -92,12 +165,17 @@ class TrainerEngine:
             )
         if max_steps < state.global_step:
             raise TrainingFailure("resume_mismatch", "max_steps precedes checkpoint step")
+        cursor = _BatchCursor(dataloader)
+        cursor.skip(state.sampler_position)
+        parameter_dtype = next(
+            (parameter.dtype for parameter in method.parameters() if parameter.is_floating_point()), None
+        )
         initial_loss = None
         final_loss = float("nan")
         maximum_gradient_norm = 0.0
         started = time.perf_counter()
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
         for iteration in range(state.global_step + 1, max_steps + 1):
             scheduled = dict(method.optimizers(iteration))
             if not scheduled:
@@ -106,11 +184,12 @@ class TrainerEngine:
                 optimizer.zero_grad(set_to_none=True)
             accumulated = 0.0
             for accumulation_index in range(self.config.gradient_accumulation_steps):
-                raw = batches[state.sampler_position % len(batches)]
+                raw = cursor.next()
                 state.sampler_position += 1
                 batch = method.prepare_batch(raw, self.generator) if hasattr(method, "prepare_batch") else raw
                 if not isinstance(batch, PreparedBatch):
                     raise TrainingFailure("invalid_training_config", "training method did not prepare a batch")
+                batch = self._move_batch(batch, device, parameter_dtype)
                 try:
                     output = method.training_step(batch, iteration)
                 except RuntimeError as exc:
@@ -132,7 +211,7 @@ class TrainerEngine:
             state.global_step = iteration
             state.accumulation_position = 0
             final_loss = accumulated / self.config.gradient_accumulation_steps
-        peak = torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
+        peak = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
         return TrainingRunResult(
             loop_state=state,
             initial_loss=float(initial_loss if initial_loss is not None else final_loss),
