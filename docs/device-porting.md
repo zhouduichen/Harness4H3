@@ -131,6 +131,7 @@ install Linux host and NVIDIA driver
 Run the preflight on the L40 host:
 
 ```bash
+mkdir -p var/preflight
 python tools/device_preflight.py \
   --profile configs/devices/l40x4-server.yaml \
   --operator recovery_finetune --skip-services --json \
