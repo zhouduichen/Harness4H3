@@ -65,18 +65,22 @@ tests. Qwen is a tested Controller choice, not a protocol requirement.
 ```bash
 .venv/bin/python tools/device_preflight.py \
   --profile configs/devices/my-device.yaml \
-  --operator benchmark --json
+  --operator benchmark \
+  --result var/preflight/benchmark.json --json
 ```
 
 Interpret the checks literally:
 
 - `profile.schema`: required fields are structurally valid;
 - `capability.NAME`: the requested operation is declared available;
-- `path.NAME`: a required path exists on the target host;
+- `path.NAME`: a required path exists and, when declared, has the expected
+  `file` or `directory` kind;
 - `service.NAME`: a required HTTP health endpoint is reachable.
 
-Exit code `0` means ready. Exit code `2` means blocked. Fix the reported fact
-or disable the capability; do not bypass the check with a fixture.
+Exit code `0` means ready. Exit code `2` means blocked. A profile with
+`verification.status: pending`, a disabled capability, or a skipped required
+probe is intentionally blocked. Fix the reported fact and record the evidence;
+do not bypass the check with a fixture or by editing the result.
 
 ## 6. Establish a baseline before optimization
 
@@ -120,31 +124,64 @@ install Linux host and NVIDIA driver
 → run nvidia-smi and record the actual four-GPU topology
 → install the Python/PyTorch CUDA environment
 → place the official Diffusers H3 assets
-→ deploy the trainer without enabling recovery_finetune
-→ create the one-sample smoke manifest
-→ run device preflight and persist its JSON
-→ review the measured hardware/runtime evidence
-→ implement and run isolated A1-T0
-→ enable recovery_finetune only after every A1-T0 authenticity gate passes
+→ place the Harness repository and ComfyUI/custom nodes
+→ create the evidence directories and one-sample manifest
+→ run the benchmark preflight and persist its JSON
+→ start ComfyUI and verify /system_stats
+→ run one real sanity baseline and persist its EvaluationResult
+→ mark only measured inference capability as verified
+→ rerun benchmark preflight without --skip-services
+→ run dev and held-out baseline only after sanity succeeds
+→ keep recovery_finetune, prune, and distill disabled
 ```
 
-Run the preflight on the L40 host:
+The first preflight may correctly return `blocked`: the checked-in L40 profile
+is pending and its capabilities are disabled. That result is useful setup
+evidence. Do not enable a capability until the corresponding real service or
+backend has been exercised and its evidence is available.
+
+Run the initial hardware/path preflight on the L40 host:
 
 ```bash
 mkdir -p var/preflight
 python tools/device_preflight.py \
   --profile configs/devices/l40x4-server.yaml \
-  --operator recovery_finetune --skip-services --json \
-  > var/preflight/l40x4.json
+  --operator benchmark --skip-services \
+  --result var/preflight/l40x4-setup.json --json
 ```
+
+On PowerShell, create the directory with
+`New-Item -ItemType Directory -Force var/preflight` and use the same command
+with `.venv\Scripts\python.exe`.
 
 The profile requires four visible GPUs whose names contain `NVIDIA L40`, at
 least 40 GiB reported memory per GPU, at least 128 GiB system RAM, CUDA-enabled
 PyTorch with four visible devices, and all operation-specific paths. These are
 requirements, not claims about a server that has not been measured.
 
+For the real inference baseline, use the existing benchmark command after
+ComfyUI sanity generation succeeds:
+
+```bash
+python -m harness4h3 benchmark \
+  --checkpoint /models/MiniMax-H3/<verified-inference-checkpoint> \
+  --target <approved-target-profile>.yaml \
+  --base-url http://127.0.0.1:8188 \
+  --split sanity --reset-backend-before-run \
+  --result var/benchmark/l40x4-sanity.json --json
+```
+
+The checkpoint and target arguments above must be replaced with the measured
+assets and an intentionally approved target. Do not use
+`configs/targets/rtx5080_example.yaml` to make an L40 performance claim unless
+that target is explicitly adopted and recorded as a controlled variable.
+Run `dev` and `heldout` only after `sanity` returns valid output. Preserve the
+workflow, task manifests, checkpoint hash, profile, preflight JSON, and all
+EvaluationResult files together.
+
 Ordinary DDP is not valid for this model because it replicates the complete
 BF16 transformer on every GPU. The smoke recipe fixes `fsdp_full_shard`, four
 ranks, BF16, head-only training, precomputed conditioning, micro-batch one,
 one sample, and one optimizer step. It remains `execution_enabled: false`
-until a real trainer is deployed and reviewed.
+until a real trainer is deployed and reviewed. The current migration work does
+not deploy or implement that trainer.

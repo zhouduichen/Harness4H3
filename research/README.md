@@ -65,6 +65,15 @@ separately.
 | Pruning/distillation optimization | Not implemented | Interface intent only |
 | Harness superiority over baselines | Not evaluated | No superiority claim |
 
+## Current execution priority
+
+The next execution step is to move the repository to the target host, replace
+unverified device-profile facts with observations, run the persisted preflight,
+and establish a real H3 ComfyUI sanity/dev/held-out baseline. M6 is optional
+runtime-memory research and is not required for this migration. A1 remains
+blocked until a source-grounded trainer performs the real forward/backward,
+optimizer-step, child-save, parent-immutability, and child-reload checks.
+
 ## Experiment programs
 
 | Program | Purpose | Execution level |

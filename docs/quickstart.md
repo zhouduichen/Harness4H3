@@ -60,13 +60,15 @@ profile:
 ```bash
 .venv/bin/python tools/device_preflight.py \
   --profile configs/devices/rtx5080-laptop.yaml \
-  --operator benchmark --json
+  --operator benchmark \
+  --result var/preflight/benchmark.json --json
 ```
 
 `ready` means the declared capability, required local paths, and required
 health endpoints passed. `blocked` means the experiment must not start. To
 validate profile structure and local paths without network probes, add
-`--skip-services`.
+`--skip-services`. The `--result` option persists the complete decision even
+when it is blocked.
 
 ## 5. Run a real benchmark
 
@@ -97,4 +99,6 @@ kept as explicit research entry points:
 ```
 
 See the [research index](../research/README.md) before interpreting their
-outputs as scientific evidence.
+outputs as scientific evidence. M6 is an optional runtime-memory study; it is
+not required for moving the Harness to another device or establishing a real
+H3 baseline.

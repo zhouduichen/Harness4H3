@@ -24,6 +24,12 @@ fine-tuning, pruning, or distillation backend.
 | Model-changing fine-tuning | Source-reconnaissance only | Blocked by memory/implementation |
 | Real pruning/distillation | Contract only | Not implemented |
 
+The current execution priority is device migration, measured preflight, and a
+real ComfyUI baseline on the target host. M6 runtime-memory work is optional
+and does not replace the missing real H3 trainer. Until a source-grounded
+trainer passes A1-T0, model-changing capabilities remain disabled and no
+M0001 or autonomous real model-evolution claim is allowed.
+
 Engineering completeness is not presented as a new optimization algorithm.
 The research contribution under test is the evidence-grounded, device-aware
 closed-loop protocol. See the [research index](research/README.md) for claims,
@@ -79,7 +85,8 @@ device:
 ```bash
 .venv/bin/python tools/device_preflight.py \
   --profile configs/devices/rtx5080-laptop.yaml \
-  --operator benchmark --json
+  --operator benchmark \
+  --result var/preflight/benchmark.json --json
 ```
 
 The checked-in RTX 5080 profile intentionally reports
