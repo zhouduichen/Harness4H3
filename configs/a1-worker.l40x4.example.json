@@ -1,0 +1,12 @@
+{
+  "trainer_command": [
+    "/opt/h3-training/.venv/bin/torchrun",
+    "--standalone",
+    "--nproc_per_node=4",
+    "/opt/h3-training/train_worker.py",
+    "--config",
+    "/opt/Harness4H3/configs/experiments/a1-t0-l40x4.yaml"
+  ],
+  "trainer_timeout_s": 7200,
+  "deploy_model_dir": "/opt/ComfyUI/models/diffusion_models"
+}

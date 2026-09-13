@@ -1,0 +1,59 @@
+schema_version: 1
+experiment_id: A1-T0-L40X4-SMOKE
+execution_enabled: false
+operator: recovery_finetune
+objective: verify one authentic distributed H3 optimizer update without claiming quality improvement
+model:
+  implementation: diffusers_minimax_h3
+  variant: FL2VA
+  parent_checkpoint: /models/MiniMax-H3/FL2VA/transformer
+  checkpoint_format: diffusers
+  dtype: bfloat16
+  trainable_scope: heads
+distributed:
+  launcher: torchrun
+  strategy: fsdp_full_shard
+  world_size: 4
+  backend: nccl
+  use_orig_params: true
+memory:
+  micro_batch_size: 1
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: true
+  precompute_text_embeddings: true
+  precompute_vae_latents: true
+  cpu_offload: false
+optimization:
+  optimizer: adamw
+  learning_rate: 0.000001
+  max_steps: 1
+  gradient_clip_norm: 1.0
+  seed: 20260913
+data:
+  manifest: /opt/h3-training/data/a1-t0-smoke.jsonl
+  sample_count: 1
+  num_workers: 0
+checkpoint:
+  output_dir: /opt/h3-training/runs/A1-T0-L40X4-SMOKE
+  save_distributed: sharded
+  consolidate_child: true
+  export_format: safetensors
+  require_diffusers_reload: true
+  require_comfyui_reload: true
+evidence:
+  required:
+    - finite_initial_loss
+    - finite_final_loss
+    - nonzero_gradient_norm
+    - optimizer_steps
+    - trainable_parameter_count
+    - peak_vram_per_rank
+    - wall_time
+    - gpu_time
+    - parent_hash_before
+    - parent_hash_after
+    - changed_expected_tensors
+    - unchanged_frozen_tensors
+    - child_hash
+    - diffusers_reload
+    - comfyui_reload

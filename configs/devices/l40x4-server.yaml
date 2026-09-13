@@ -1,0 +1,93 @@
+schema_version: 1
+id: linux-l40x4-training-server
+verification:
+  status: pending
+  evidence_path: var/preflight/l40x4.json
+platform:
+  os: linux
+  python: unverified
+  pytorch: unverified
+  cuda: unverified
+hardware:
+  gpu_name_contains: NVIDIA L40
+  gpu_count: 4
+  min_vram_gib_per_gpu: 40
+  min_system_ram_gib: 128
+  distributed_backend: nccl
+paths:
+  repository:
+    path: /opt/Harness4H3
+    required: true
+    required_for:
+      - recovery_finetune
+      - benchmark
+  official_h3_model:
+    path: /models/MiniMax-H3
+    required: true
+    required_for:
+      - recovery_finetune
+  trainer:
+    path: /opt/h3-training/train_worker.py
+    required: true
+    required_for:
+      - recovery_finetune
+  smoke_recipe:
+    path: configs/experiments/a1-t0-l40x4.yaml
+    required: true
+    required_for:
+      - recovery_finetune
+  training_data:
+    path: /opt/h3-training/data/a1-t0-smoke.jsonl
+    required: true
+    required_for:
+      - recovery_finetune
+  comfyui:
+    path: /opt/ComfyUI
+    required: true
+    required_for:
+      - benchmark
+  deployment_dir:
+    path: /opt/ComfyUI/models/diffusion_models
+    required: true
+    required_for:
+      - benchmark
+  artifacts:
+    path: /opt/Harness4H3/var
+    required: false
+services:
+  comfyui:
+    url: http://127.0.0.1:8188
+    health_path: /system_stats
+    required_for:
+      - benchmark
+  controller:
+    url: http://127.0.0.1:11434
+    health_path: /api/tags
+    required_for:
+      - controller
+limits:
+  max_parallel_experiments: 1
+  max_world_size: 4
+  max_training_steps_smoke: 1
+formats:
+  - diffusers
+  - safetensors
+capabilities:
+  inference:
+    enabled: false
+    reason: pending ComfyUI deployment and measured generation smoke test
+  benchmark:
+    enabled: false
+    reason: pending ComfyUI deployment and measured benchmark preflight
+  controller:
+    enabled: false
+    reason: pending structured Controller endpoint verification
+  recovery_finetune:
+    enabled: false
+    reason: pending measured hardware/runtime preflight and real trainer deployment
+  prune:
+    enabled: false
+    reason: no real H3 pruning backend is registered
+  distill:
+    enabled: false
+    reason: no real H3 teacher/student training backend is registered
