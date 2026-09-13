@@ -24,6 +24,12 @@ def test_l40x4_device_profile_is_pending_and_safe():
     assert raw["capabilities"]["recovery_finetune"]["enabled"] is False
     assert raw["capabilities"]["prune"]["enabled"] is False
     assert raw["capabilities"]["distill"]["enabled"] is False
+    assert raw["paths"]["repository"]["kind"] == "directory"
+    assert raw["paths"]["official_h3_model"]["kind"] == "directory"
+    assert raw["paths"]["trainer"]["kind"] == "file"
+    assert raw["paths"]["smoke_recipe"]["kind"] == "file"
+    assert raw["paths"]["comfyui"]["kind"] == "directory"
+    assert raw["paths"]["deployment_dir"]["kind"] == "directory"
 
 
 def test_l40x4_smoke_recipe_is_bounded_and_sharded():

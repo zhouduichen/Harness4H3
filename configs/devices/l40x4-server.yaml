@@ -18,42 +18,50 @@ paths:
   repository:
     path: /opt/Harness4H3
     required: true
+    kind: directory
     required_for:
       - recovery_finetune
       - benchmark
   official_h3_model:
     path: /models/MiniMax-H3
     required: true
+    kind: directory
     required_for:
       - recovery_finetune
   trainer:
     path: /opt/h3-training/train_worker.py
     required: true
+    kind: file
     required_for:
       - recovery_finetune
   smoke_recipe:
     path: configs/experiments/a1-t0-l40x4.yaml
     required: true
+    kind: file
     required_for:
       - recovery_finetune
   training_data:
     path: /opt/h3-training/data/a1-t0-smoke.jsonl
     required: true
+    kind: file
     required_for:
       - recovery_finetune
   comfyui:
     path: /opt/ComfyUI
     required: true
+    kind: directory
     required_for:
       - benchmark
   deployment_dir:
     path: /opt/ComfyUI/models/diffusion_models
     required: true
+    kind: directory
     required_for:
       - benchmark
   artifacts:
     path: /opt/Harness4H3/var
     required: false
+    kind: directory
 services:
   comfyui:
     url: http://127.0.0.1:8188

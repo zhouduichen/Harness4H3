@@ -42,6 +42,19 @@ def _load_profile(path: Path) -> Mapping[str, Any]:
     return raw
 
 
+def write_result(path: Path, result: Mapping[str, Any]) -> Path:
+    """Persist one preflight result without exposing a partial JSON file."""
+    target = Path(path).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(target.name + ".tmp")
+    temporary.write_text(
+        json.dumps(dict(result), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(target)
+    return target
+
+
 def _schema_errors(raw: Mapping[str, Any]) -> List[str]:
     errors = []
     if raw.get("schema_version") != 1:
@@ -54,6 +67,9 @@ def _schema_errors(raw: Mapping[str, Any]) -> List[str]:
     formats = raw.get("formats")
     if not isinstance(formats, list) or not formats or not all(isinstance(item, str) and item for item in formats):
         errors.append("formats must be a non-empty list of strings")
+    verification = raw.get("verification")
+    if verification is not None and not isinstance(verification, Mapping):
+        errors.append("verification must be a mapping when declared")
     return errors
 
 
@@ -200,6 +216,18 @@ def preflight(
     if schema_errors:
         return {"status": "blocked", "profile_id": profile_id, "operator": operator, "checks": checks}
 
+    verification = raw.get("verification")
+    if isinstance(verification, Mapping):
+        verification_status = str(verification.get("status", "")).strip().lower()
+        verified = verification_status in {"verified", "measured"}
+        checks.append(
+            _check(
+                "profile.verification",
+                verified,
+                "status=%s; required verified or measured" % (verification_status or "missing"),
+            )
+        )
+
     capabilities = raw["capabilities"]
     if operator:
         capability = capabilities.get(operator)
@@ -221,7 +249,18 @@ def preflight(
         value = str(entry.get("path", "")).strip()
         resolved = _resolve_path(value) if value else None
         exists = bool(resolved and resolved.exists())
-        checks.append(_check("path.%s" % name, exists, str(resolved) if resolved else "path is required"))
+        kind = str(entry.get("kind", "")).strip().lower()
+        kind_ok = kind in {"", "file", "directory"} and (
+            not exists
+            or kind == ""
+            or (kind == "file" and resolved.is_file())
+            or (kind == "directory" and resolved.is_dir())
+        )
+        passed = exists and kind_ok
+        detail = str(resolved) if resolved else "path is required"
+        if exists and kind and not kind_ok:
+            detail = "%s; expected %s" % (resolved, kind)
+        checks.append(_check("path.%s" % name, passed, detail))
 
     if check_services and operator:
         for name, entry in raw["services"].items():
@@ -249,6 +288,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-services", action="store_true")
     parser.add_argument("--skip-hardware", action="store_true")
     parser.add_argument("--timeout-s", type=float, default=3.0)
+    parser.add_argument("--result", type=Path, help="persist the complete result as JSON")
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -262,13 +302,17 @@ def main() -> int:
         timeout_s=args.timeout_s,
         check_hardware=not args.skip_hardware,
     )
+    output = dict(result)
+    if args.result:
+        result_path = write_result(args.result, {**output, "result": str(args.result.resolve())})
+        output["result"] = str(result_path)
     if args.json:
-        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        print(json.dumps(output, ensure_ascii=False, sort_keys=True))
     else:
-        print("%s: %s" % (result.get("profile_id") or args.profile, result["status"]))
-        for item in result["checks"]:
+        print("%s: %s" % (output.get("profile_id") or args.profile, output["status"]))
+        for item in output["checks"]:
             print("[%s] %s: %s" % (item["status"], item["name"], item["detail"]))
-    return 0 if result["status"] == "ready" else 2
+    return 0 if output["status"] == "ready" else 2
 
 
 if __name__ == "__main__":

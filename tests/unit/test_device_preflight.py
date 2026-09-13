@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from urllib.error import URLError
 
@@ -221,6 +222,69 @@ def test_preflight_skip_hardware_remains_blocked(tmp_path):
     assert result["status"] == "blocked"
     assert check(result, "hardware.gpu_count")["status"] == "skipped"
     assert check(result, "runtime.torch")["status"] == "skipped"
+
+
+def test_preflight_blocks_pending_verification(tmp_path, monkeypatch):
+    install_hardware_observations(
+        tmp_path,
+        monkeypatch,
+        "NVIDIA L40, 46068\n" * 4,
+    )
+    raw = distributed_profile(tmp_path)
+    raw["verification"] = {"status": "pending"}
+    result = device_preflight.preflight(
+        write_profile(tmp_path, raw),
+        "recovery_finetune",
+        check_services=False,
+    )
+    assert result["status"] == "blocked"
+    assert check(result, "profile.verification")["status"] == "failed"
+    assert "pending" in check(result, "profile.verification")["detail"]
+
+
+def test_preflight_accepts_verified_profile(tmp_path, monkeypatch):
+    install_hardware_observations(
+        tmp_path,
+        monkeypatch,
+        "NVIDIA L40, 46068\n" * 4,
+    )
+    raw = distributed_profile(tmp_path)
+    raw["verification"] = {"status": "verified"}
+    result = device_preflight.preflight(
+        write_profile(tmp_path, raw),
+        "recovery_finetune",
+        check_services=False,
+    )
+    assert result["status"] == "ready"
+    assert check(result, "profile.verification")["status"] == "passed"
+
+
+def test_write_result_persists_exact_json(tmp_path):
+    result = {"status": "blocked", "checks": [{"name": "x", "status": "failed"}]}
+    output = device_preflight.write_result(tmp_path / "preflight.json", result)
+    assert output == (tmp_path / "preflight.json").resolve()
+    assert json.loads(output.read_text(encoding="utf-8")) == result
+    assert not (tmp_path / "preflight.json.tmp").exists()
+
+
+def test_preflight_rejects_file_kind_for_directory(tmp_path):
+    raw = valid_profile(tmp_path)
+    raw["paths"]["workspace"]["kind"] = "file"
+    result = device_preflight.preflight(write_profile(tmp_path, raw), "benchmark", check_services=False)
+    assert result["status"] == "blocked"
+    assert check(result, "path.workspace")["status"] == "failed"
+    assert "expected file" in check(result, "path.workspace")["detail"]
+
+
+def test_preflight_rejects_directory_kind_for_file(tmp_path):
+    raw = valid_profile(tmp_path)
+    file_path = tmp_path / "workspace-file"
+    file_path.write_text("not a directory", encoding="utf-8")
+    raw["paths"]["workspace"] = {"path": str(file_path), "required": True, "kind": "directory"}
+    result = device_preflight.preflight(write_profile(tmp_path, raw), "benchmark", check_services=False)
+    assert result["status"] == "blocked"
+    assert check(result, "path.workspace")["status"] == "failed"
+    assert "expected directory" in check(result, "path.workspace")["detail"]
 
 
 def test_preflight_filters_paths_by_operation(tmp_path):
