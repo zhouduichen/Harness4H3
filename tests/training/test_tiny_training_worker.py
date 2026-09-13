@@ -77,3 +77,15 @@ def test_tiny_worker_rejects_non_binary_distillation(tmp_path):
     result = json.loads(result_path.read_text(encoding="utf-8"))
     assert completed.returncode != 0
     assert result["failure_type"] == "invalid_training_config"
+
+
+def test_tiny_worker_rejects_unsupported_operator(tmp_path):
+    _, request_path, result_path = request(tmp_path, "dmd2", {"training_steps": 1})
+    completed = subprocess.run(
+        [sys.executable, str(WORKER), "--request", str(request_path), "--result", str(result_path)],
+        cwd=tmp_path,
+        check=False,
+    )
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert completed.returncode != 0
+    assert result["failure_type"] == "unsupported_training_operator"

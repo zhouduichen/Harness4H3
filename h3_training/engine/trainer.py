@@ -3,13 +3,14 @@
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, List, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 import torch
 
 from h3_training.algorithms.base import StepOutput, TrainingMethod
 from h3_training.data.schema import PreparedBatch
 from .checkpoint import canonical_digest, load_training_checkpoint, save_training_checkpoint
+from .evidence import ChildEvidence, ParentEvidence, save_verified_child
 from .optimizer import finite_total_loss, gradient_norm
 from .state import LoopState, TrainingFailure, TrainingRunResult
 
@@ -35,6 +36,41 @@ class TrainerEngine:
     def __init__(self, config: TrainerConfig = TrainerConfig()) -> None:
         self.config = config
         self.generator = torch.Generator(device="cpu").manual_seed(config.seed)
+
+    def backward(self, losses: Mapping[str, torch.Tensor], accumulation_steps: int) -> None:
+        if accumulation_steps <= 0:
+            raise TrainingFailure("invalid_training_config", "accumulation_steps must be positive")
+        if "total_loss" not in losses:
+            raise TrainingFailure("invalid_training_config", "losses must contain total_loss")
+        for name, loss in losses.items():
+            try:
+                finite_total_loss(loss)
+            except TrainingFailure as exc:
+                raise TrainingFailure(exc.code, f"{name}: {exc.detail}") from exc
+        try:
+            (losses["total_loss"] / accumulation_steps).backward()
+        except RuntimeError as exc:
+            if "out of memory" in str(exc).lower():
+                raise TrainingFailure("training_oom", str(exc)) from exc
+            raise
+
+    def optimizer_step(self, method: TrainingMethod, iteration: int) -> Mapping[str, float]:
+        scheduled = dict(method.optimizers(iteration))
+        if not scheduled:
+            raise TrainingFailure("invalid_training_config", "iteration has no scheduled optimizer")
+        norm = gradient_norm(method.grad_clip_targets(iteration).values(), self.config.max_gradient_norm)
+        for optimizer in scheduled.values():
+            try:
+                optimizer.step()
+            except RuntimeError as exc:
+                if "out of memory" in str(exc).lower():
+                    raise TrainingFailure("training_oom", str(exc)) from exc
+                raise
+        for name, scheduler in method.schedulers().items():
+            if name in scheduled:
+                scheduler.step()
+        method.on_optimizers_stepped(tuple(scheduled))
+        return {"gradient_norm": norm, **{f"optimizer_step/{name}": 1.0 for name in scheduled}}
 
     def run(
         self,
@@ -81,32 +117,18 @@ class TrainerEngine:
                     if "out of memory" in str(exc).lower():
                         raise TrainingFailure("training_oom", str(exc)) from exc
                     raise
-                finite_total_loss(output.losses["total_loss"])
                 loss = output.losses["total_loss"]
                 if initial_loss is None:
                     initial_loss = float(loss.detach())
                 accumulated += float(loss.detach())
-                try:
-                    (loss / self.config.gradient_accumulation_steps).backward()
-                except RuntimeError as exc:
-                    if "out of memory" in str(exc).lower():
-                        raise TrainingFailure("training_oom", str(exc)) from exc
-                    raise
+                self.backward(output.losses, self.config.gradient_accumulation_steps)
                 state.microbatches_consumed += 1
                 state.accumulation_position = accumulation_index + 1
-            norm = gradient_norm(method.grad_clip_targets(iteration).values(), self.config.max_gradient_norm)
+            step_metrics = self.optimizer_step(method, iteration)
+            norm = step_metrics["gradient_norm"]
             maximum_gradient_norm = max(maximum_gradient_norm, norm)
-            for name, optimizer in scheduled.items():
-                try:
-                    optimizer.step()
-                except RuntimeError as exc:
-                    if "out of memory" in str(exc).lower():
-                        raise TrainingFailure("training_oom", str(exc)) from exc
-                    raise
+            for name in scheduled:
                 state.optimizer_steps[name] = state.optimizer_steps.get(name, 0) + 1
-            for scheduler in method.schedulers().values():
-                scheduler.step()
-            method.on_optimizers_stepped(tuple(scheduled))
             state.global_step = iteration
             state.accumulation_position = 0
             final_loss = accumulated / self.config.gradient_accumulation_steps
@@ -125,3 +147,14 @@ class TrainerEngine:
         return save_training_checkpoint(
             path, method, loop_state, self.config.parent_sha256, self.config.digest, self.generator
         )
+
+    def save_child(
+        self,
+        method: TrainingMethod,
+        parent: ParentEvidence,
+        path: Path,
+    ) -> ChildEvidence:
+        role = getattr(method, "student", None)
+        if role is None:
+            raise TrainingFailure("invalid_training_config", "method has no student role")
+        return save_verified_child(role, parent, path)

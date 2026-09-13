@@ -59,3 +59,13 @@ def test_oom_has_stable_failure():
 
     with pytest.raises(RuntimeError, match="training_oom"):
         TrainerEngine().run(OOMMethod(), batches(), max_steps=1)
+
+
+def test_named_nonfinite_loss_is_rejected_even_when_total_is_finite():
+    class BadAuxiliaryLoss(CountingMethod):
+        def training_step(self, batch, iteration):
+            output = super().training_step(batch, iteration)
+            return StepOutput({**output.losses, "auxiliary": output.losses["total_loss"] * float("nan")})
+
+    with pytest.raises(RuntimeError, match="nonfinite_loss.*auxiliary"):
+        TrainerEngine().run(BadAuxiliaryLoss(), batches(), max_steps=1)
