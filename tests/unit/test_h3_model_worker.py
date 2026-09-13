@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKER = ROOT / "tools" / "h3_model_worker.py"
 TRAINER = ROOT / "tests" / "fixtures" / "h3_model_trainer_fixture.py"
 INVALID_TRAINER = ROOT / "tests" / "fixtures" / "h3_model_trainer_invalid.py"
+TINY_TRAINER = ROOT / "tools" / "tiny_training_worker.py"
 
 
 def _request(tmp_path: Path) -> Tuple[Path, Path]:
@@ -128,3 +129,42 @@ def test_worker_runs_through_external_operator_contract(tmp_path):
     assert result.output_state.model_id == "M0001"
     assert result.metrics["real_worker"] is True
     assert result.metrics["offline_simulation"] is False
+
+
+def test_worker_preserves_tiny_trainer_authenticity_metrics(tmp_path):
+    from h3_training.tiny.factory import create_tiny_checkpoint, load_tiny_checkpoint
+
+    parent_path = create_tiny_checkpoint(tmp_path / "M0000.pt", "M0000", sampling_nfe=4, seed=4)
+    state = ModelState(
+        model_id="M0000",
+        parent_model_id=None,
+        checkpoint_path=str(parent_path),
+        architecture_name="TinyH3",
+        sampling_steps=4,
+        provenance={"kind": "tiny_reference", "offline_simulation": False},
+    )
+    parent = ModelCandidate("M0000", None, 0, str(parent_path), state, None, "baseline")
+    config_path = tmp_path / "worker.json"
+    config_path.write_text(
+        json.dumps({"trainer_command": [sys.executable, str(TINY_TRAINER), "--max-training-steps", "2"]}),
+        encoding="utf-8",
+    )
+    operator = ExternalScriptOperator(
+        "recovery_finetune",
+        "TinyH3 training",
+        (sys.executable, str(WORKER), "--config", str(config_path)),
+        {"training_steps": (int,)},
+        LocalProcessExecutor(timeout_s=30),
+        CostEstimate(wall_time_s=1.0),
+        timeout_s=30,
+    )
+    result = operator.execute(
+        parent,
+        {"training_steps": 2},
+        ExecutionContext(tmp_path / "tiny-worker-run", "M0001"),
+    )
+    assert result.ok, result.message
+    assert result.metrics["child_reloaded"] is True
+    assert result.metrics["parent_sha256"] != result.metrics["child_sha256"]
+    _, metadata = load_tiny_checkpoint(Path(result.output_state.checkpoint_path))
+    assert metadata["model_id"] == "M0001"
