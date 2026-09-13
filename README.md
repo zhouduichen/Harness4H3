@@ -9,8 +9,9 @@ optimization experiments. It studies one bounded question:
 
 The repository provides the experiment protocol, constrained operator
 execution, model/system lineage, independent evaluation, Pareto archive, and
-append-only trajectory. It does **not** currently provide a working H3
-fine-tuning, pruning, or distillation backend.
+append-only trajectory. It also includes a real PyTorch TinyH3 reference
+trainer for validating those contracts. It does **not** currently provide a
+working MiniMax-H3 fine-tuning, pruning, or distillation backend.
 
 ## Capability status
 
@@ -21,8 +22,11 @@ fine-tuning, pruning, or distillation backend.
 | H3 generation through ComfyUI | Measured on RTX 5080 Laptop | Available |
 | Quality/hardware benchmark | Measured on RTX 5080 Laptop | Available |
 | Runtime-memory interventions | Measured, including rejected results | Experimental |
+| TinyH3 training loop | Real PyTorch weights, gradients, resume, and lineage | Available for CPU contract testing |
+| Recovery / progressive distillation | Real TinyH3 algorithm tests | Reference implementation |
+| DMD2 multi-role trainer | Real TinyH3 gradients, alternating updates, EMA, and resume | Reference skeleton |
 | Model-changing fine-tuning | Source-reconnaissance only | Blocked by memory/implementation |
-| Real pruning/distillation | Contract only | Not implemented |
+| Real MiniMax-H3 pruning/distillation | Fail-closed adapter contract | Not implemented |
 
 The current execution priority is device migration, measured preflight, and a
 real ComfyUI baseline on the target host. M6 runtime-memory work is optional
@@ -78,6 +82,19 @@ Run the fully offline protocol smoke test:
   --target configs/targets/mobile_example.yaml \
   --session-dir var/offline-smoke --session-id offline-smoke --json
 ```
+
+Install the optional training dependencies and run the real-weight TinyH3
+reference loop on CPU:
+
+```bash
+.venv/bin/python -m pip install -e '.[test,training]'
+.venv/bin/python -m research.experiments.tiny_real_closed_loop \
+  --output-root var/tiny-real-closed-loop
+```
+
+This creates and independently evaluates `M0000 -> M0001 -> M0002` using
+real tensors, backward passes, optimizer state, child hashes, and checkpoint
+reloads. TinyH3 is deliberately small and is not MiniMax-H3 evidence.
 
 Before using a real device, run the declarative capability preflight on that
 device:

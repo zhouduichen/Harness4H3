@@ -101,8 +101,25 @@ A real child is acceptable only when all of the following are evidenced:
 
 The current adapter verifies path separation, file existence, H3 architecture
 label, bounded cost fields, artifact staging, and parent-overwrite protection.
-The missing real trainer must provide the weight-level and training-level
-proofs above.
+`tools/tiny_training_worker.py` now provides the weight-level and
+training-level proofs above for the explicit `TinyH3` reference architecture.
+The missing real MiniMax-H3 trainer must provide the same proofs for actual H3
+weights.
+
+## TinyH3 reference validation
+
+After installing `.[test,training]`, the complete two-process adapter chain
+can be exercised with:
+
+```bash
+.venv/bin/python -m research.experiments.tiny_real_closed_loop \
+  --output-root var/tiny-real-closed-loop
+```
+
+The fixed sequence performs recovery fine-tuning followed by one binary
+progressive-distillation stage. Both children contain real PyTorch tensors and
+are evaluated after reload. This is protocol and algorithm evidence only; it
+is not MiniMax-H3 training, quality, compatibility, or hardware evidence.
 
 ## Stable adapter failures
 
@@ -122,7 +139,7 @@ checkpoint.
 
 ## Current implementation boundary
 
-No checked-in trainer currently satisfies this contract for real H3 weights.
+No checked-in trainer currently satisfies this contract for real MiniMax-H3 weights.
 The RTX 5080 reconnaissance found that the official BF16 transformer alone is
 about 61.73 GiB, beyond the measured 15.92 GiB VRAM and 31.45 GiB RAM. Real
 `recovery_finetune`, pruning, and distillation therefore remain disabled in
