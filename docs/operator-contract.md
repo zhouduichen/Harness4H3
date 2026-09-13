@@ -80,10 +80,13 @@ A successful trainer returns:
 }
 ```
 
-For a real model-changing experiment, `metrics` must include training loss,
-gradient norm, optimizer steps, trainable parameter count, peak VRAM, parent
-and child hashes, and changed tensor/parameter counts. These values must be
-measured by the trainer, not synthesized by the adapter.
+For `recovery_finetune` and `step_distill`, `metrics` must include finite
+training losses, a positive gradient norm, optimizer steps, trainable
+parameter count, parent before/after SHA-256 digests, child hash, changed
+tensor count, unchanged frozen-tensor count, and successful child reload.
+Peak VRAM is included when measurable. These values must be measured by the
+trainer, not synthesized by the adapter; the worker also checks the parent and
+staged-child hashes independently.
 
 ## Authenticity requirements
 
@@ -131,11 +134,13 @@ is not MiniMax-H3 training, quality, compatibility, or hardware evidence.
 | `training_process` | Trainer exited nonzero |
 | `missing_trainer_result` | Trainer produced no result JSON |
 | `invalid_trainer_result` | Result lacks successful `output_state` |
+| `invalid_training_evidence` | A training result lacks or contradicts required authenticity metrics |
 
 Trainer-specific failures such as `training_oom`, non-finite loss, zero
 gradient, immutable-parent violation, unchanged child, save failure, or reload
-failure must remain explicit and must not fall back to a fixture or copied
-checkpoint.
+failure remain explicit when the trainer reports them. `training_process` is
+used only when a nonzero trainer exit has no valid stable failure result.
+Failures must not fall back to a fixture or copied checkpoint.
 
 ## Current implementation boundary
 

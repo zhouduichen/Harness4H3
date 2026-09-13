@@ -107,6 +107,9 @@ def run(request: Mapping[str, Any], result_path: Path, maximum_steps: int, datas
         )
         child_path = Path(str(request["artifacts_dir"])).resolve() / "trainer-child.pt"
         child = save_verified_child(method.student, evidence, child_path)
+        parent_after_hash = sha256_file(parent_path)
+        if parent_after_hash != child.parent_sha256:
+            raise TrainingFailure("parent_modified", "parent bytes changed before worker completion")
         evaluation = TinyCheckpointEvaluator(dataset_size=4, base_seed=seed + 10_000).evaluate_checkpoint(child_path)
         parent_state = dict(parent.get("state") or {})
         parameter_count = sum(parameter.numel() for parameter in method.student_model.parameters())
@@ -148,12 +151,17 @@ def run(request: Mapping[str, Any], result_path: Path, maximum_steps: int, datas
                     "real_worker": True,
                     "offline_simulation": False,
                     "algorithm": method.algorithm_name,
-                    "optimizer_steps": result.loop_state.global_step,
-                    "optimizer_steps_by_role": result.optimizer_steps,
-                    "initial_loss": result.initial_loss,
-                    "final_loss": result.final_loss,
-                    "max_gradient_norm": result.max_gradient_norm,
-                    "parent_sha256": child.parent_sha256,
+                "optimizer_steps": result.loop_state.global_step,
+                "optimizer_steps_by_role": result.optimizer_steps,
+                "initial_loss": result.initial_loss,
+                "final_loss": result.final_loss,
+                "gradient_norm": result.max_gradient_norm,
+                "max_gradient_norm": result.max_gradient_norm,
+                "peak_memory_bytes": result.peak_memory_bytes,
+                "trainable_parameter_count": trainable_parameter_count,
+                "parent_sha256": child.parent_sha256,
+                "parent_sha256_before": child.parent_sha256,
+                "parent_sha256_after": parent_after_hash,
                     "child_sha256": child.child_sha256,
                     "changed_trainable_tensors": child.changed_trainable,
                     "unchanged_frozen_tensors": child.unchanged_frozen,

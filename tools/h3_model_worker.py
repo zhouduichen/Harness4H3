@@ -13,16 +13,55 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 
 MAX_JSON_BYTES = 8 * 1024 * 1024
+
+
+TRAINING_FAILURE_TYPES = frozenset(
+    {
+        "unsupported_training_operator",
+        "invalid_training_config",
+        "no_trainable_parameters",
+        "nonfinite_loss",
+        "zero_gradient",
+        "training_oom",
+        "checkpoint_corrupt",
+        "resume_mismatch",
+        "cache_corrupt",
+        "parent_modified",
+        "unchanged_child",
+        "frozen_tensor_changed",
+        "child_reload_failed",
+    }
+)
+
+
+TRAINING_OPERATORS = frozenset({"recovery_finetune", "step_distill"})
+REQUIRED_TRAINING_METRICS = frozenset(
+    {
+        "initial_loss",
+        "final_loss",
+        "gradient_norm",
+        "optimizer_steps",
+        "trainable_parameter_count",
+        "parent_sha256",
+        "parent_sha256_before",
+        "parent_sha256_after",
+        "child_sha256",
+        "changed_trainable_tensors",
+        "unchanged_frozen_tensors",
+        "child_reloaded",
+    }
+)
 
 
 def _read_json(path: Path) -> Mapping[str, Any]:
@@ -37,6 +76,14 @@ def _read_json(path: Path) -> Mapping[str, Any]:
 def _write_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _resolve_config(path_value: str, cwd: Path) -> Path:
@@ -133,6 +180,16 @@ def _stage_child(raw_state: Mapping[str, Any], request: Mapping[str, Any], artif
     suffix = source.suffix.lower() if source.suffix.lower() in {".safetensors", ".gguf", ".ckpt", ".pt"} else ".safetensors"
     staged = (artifacts_dir / (child_id + suffix)).resolve()
     shutil.copy2(source, staged)
+    staged_evidence = None
+    source_evidence = source.with_suffix(source.suffix + ".evidence.json")
+    if source_evidence.is_file():
+        manifest = dict(_read_json(source_evidence))
+        if manifest.get("child_sha256") != _sha256_file(source):
+            raise ValueError("trainer evidence manifest does not match child checkpoint")
+        staged_evidence = staged.with_suffix(staged.suffix + ".evidence.json")
+        manifest["path"] = str(staged)
+        manifest["manifest_path"] = str(staged_evidence)
+        _write_json(staged_evidence, manifest)
     deployment: Dict[str, Any] = {"deployed": False}
     deploy_value = config.get("deploy_model_dir")
     if deploy_value:
@@ -149,10 +206,22 @@ def _stage_child(raw_state: Mapping[str, Any], request: Mapping[str, Any], artif
     provenance = dict(state.get("provenance") or {})
     provenance.update({"real_worker": True, "offline_simulation": False, "deployment": deployment})
     state["provenance"] = provenance
-    return {"state": state, "deployment": deployment}
+    return {
+        "state": state,
+        "deployment": deployment,
+        "evidence_manifest": str(staged_evidence) if staged_evidence else None,
+    }
 
 
-def _failure(result_path: Path, failure_type: str, message: str, wall_time_s: float = 0.0) -> int:
+def _failure(
+    result_path: Path,
+    failure_type: str,
+    message: str,
+    wall_time_s: float = 0.0,
+    metrics: Optional[Mapping[str, Any]] = None,
+) -> int:
+    failure_metrics = dict(metrics or {})
+    failure_metrics.update({"real_worker": True, "offline_simulation": False})
     _write_json(
         result_path,
         {
@@ -160,10 +229,62 @@ def _failure(result_path: Path, failure_type: str, message: str, wall_time_s: fl
             "failure_type": failure_type,
             "message": message,
             "cost": {"wall_time_s": float(wall_time_s), "gpu_hours": 0.0, "controller_calls": 0},
-            "metrics": {"real_worker": True, "offline_simulation": False},
+            "metrics": failure_metrics,
         },
     )
     return 1
+
+
+def _propagated_training_failure(payload: Any) -> Optional[Tuple[str, str, Mapping[str, Any]]]:
+    if not isinstance(payload, Mapping) or payload.get("status") != "failed":
+        return None
+    failure_type = payload.get("failure_type")
+    if not isinstance(failure_type, str) or failure_type not in TRAINING_FAILURE_TYPES:
+        return None
+    message = str(payload.get("message") or failure_type)
+    metrics = payload.get("metrics")
+    return failure_type, message, dict(metrics) if isinstance(metrics, Mapping) else {}
+
+
+def _validate_training_evidence(
+    operator: str,
+    trainer_result: Mapping[str, Any],
+    parent_sha256: Optional[str],
+) -> Mapping[str, Any]:
+    if operator not in TRAINING_OPERATORS:
+        return {}
+    metrics = trainer_result.get("metrics")
+    if not isinstance(metrics, Mapping):
+        raise ValueError("training result must contain measured metrics")
+    missing = sorted(REQUIRED_TRAINING_METRICS - set(metrics))
+    if missing:
+        raise ValueError("missing measured training metric(s): %s" % ", ".join(missing))
+    for name in ("initial_loss", "final_loss", "gradient_norm"):
+        value = metrics[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ValueError("training metric %s must be finite" % name)
+    if float(metrics["gradient_norm"]) <= 0:
+        raise ValueError("training metric gradient_norm must be positive")
+    for name in ("optimizer_steps", "trainable_parameter_count", "changed_trainable_tensors"):
+        value = metrics[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("training metric %s must be a positive integer" % name)
+    frozen_count = metrics["unchanged_frozen_tensors"]
+    if isinstance(frozen_count, bool) or not isinstance(frozen_count, int) or frozen_count < 0:
+        raise ValueError("training metric unchanged_frozen_tensors must be a non-negative integer")
+    if metrics["child_reloaded"] is not True:
+        raise ValueError("training result did not prove child reload")
+    for name in ("parent_sha256", "child_sha256"):
+        value = metrics[name]
+        if not isinstance(value, str) or len(value) != 64:
+            raise ValueError("training metric %s must be a SHA-256 digest" % name)
+    if metrics["parent_sha256"] == metrics["child_sha256"]:
+        raise ValueError("training result reports identical parent and child hashes")
+    if metrics["parent_sha256_before"] != metrics["parent_sha256"] or metrics["parent_sha256_after"] != metrics["parent_sha256"]:
+        raise ValueError("training result parent before/after hashes do not agree")
+    if parent_sha256 is not None and metrics["parent_sha256"] != parent_sha256:
+        raise ValueError("training result parent hash does not match the immutable parent")
+    return dict(metrics)
 
 
 def run(request_path: Path, result_path: Path, config_path: Path) -> int:
@@ -176,6 +297,13 @@ def run(request_path: Path, result_path: Path, config_path: Path) -> int:
         parent = request["parent"]
         if not isinstance(parent, Mapping) or not parent.get("id") or not request.get("child_model_id"):
             raise ValueError("request requires parent and child_model_id")
+        parent_value = parent.get("checkpoint_path")
+        parent_path = None
+        parent_sha256 = None
+        if parent_value and "://" not in str(parent_value):
+            parent_path = Path(str(parent_value)).resolve()
+            if parent_path.is_file():
+                parent_sha256 = _sha256_file(parent_path)
         teacher_cache = _cache_manifest(request, config, cwd)
         artifacts_dir = Path(str(request["artifacts_dir"])).resolve()
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -215,13 +343,37 @@ def run(request_path: Path, result_path: Path, config_path: Path) -> int:
         (cwd / "trainer.stderr.log").write_text(completed.stderr, encoding="utf-8")
         elapsed = time.monotonic() - started
         if completed.returncode != 0:
+            if trainer_result_path.is_file():
+                try:
+                    trainer_failure = _propagated_training_failure(_read_json(trainer_result_path))
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    trainer_failure = None
+                if trainer_failure is not None:
+                    failure_type, message, metrics = trainer_failure
+                    return _failure(result_path, failure_type, message, elapsed, metrics)
             return _failure(result_path, "training_process", "trainer exited with status %d" % completed.returncode, elapsed)
         if not trainer_result_path.is_file():
             return _failure(result_path, "missing_trainer_result", "trainer did not create trainer_result.json", elapsed)
         trainer_result = _read_json(trainer_result_path)
+        trainer_failure = _propagated_training_failure(trainer_result)
+        if trainer_failure is not None:
+            failure_type, message, metrics = trainer_failure
+            return _failure(result_path, failure_type, message, elapsed, metrics)
         if trainer_result.get("status") != "success" or not isinstance(trainer_result.get("output_state"), Mapping):
             return _failure(result_path, "invalid_trainer_result", "trainer result must contain success and output_state", elapsed)
+        if parent_path is not None and parent_sha256 != _sha256_file(parent_path):
+            return _failure(result_path, "parent_modified", "parent checkpoint hash changed during training", elapsed)
+        try:
+            training_metrics = _validate_training_evidence(operator, trainer_result, parent_sha256)
+        except ValueError as exc:
+            return _failure(result_path, "invalid_training_evidence", str(exc), elapsed)
         staged = _stage_child(trainer_result["output_state"], request, Path(str(request["artifacts_dir"])).resolve(), config)
+        if operator in TRAINING_OPERATORS:
+            staged_hash = _sha256_file(Path(staged["state"]["checkpoint_path"]))
+            if staged_hash != training_metrics["child_sha256"]:
+                return _failure(result_path, "invalid_training_evidence", "child hash does not match staged checkpoint", elapsed)
+            if not staged["evidence_manifest"]:
+                return _failure(result_path, "invalid_training_evidence", "training child evidence manifest is missing", elapsed)
         reported_cost = trainer_result.get("cost") if isinstance(trainer_result.get("cost"), Mapping) else {}
         reported_gpu_hours = float(reported_cost.get("gpu_hours", 0.0))
         if reported_gpu_hours < 0:
@@ -240,6 +392,7 @@ def run(request_path: Path, result_path: Path, config_path: Path) -> int:
                 "operator": operator,
                 "teacher_cache": teacher_cache,
                 "deployment": staged["deployment"],
+                "child_evidence_manifest": staged["evidence_manifest"],
                 **dict(trainer_result.get("metrics") or {}),
             },
         }

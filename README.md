@@ -28,6 +28,24 @@ working MiniMax-H3 fine-tuning, pruning, or distillation backend.
 | Model-changing fine-tuning | Source-reconnaissance only | Blocked by memory/implementation |
 | Real MiniMax-H3 pruning/distillation | Fail-closed adapter contract | Not implemented |
 
+## Current gate
+
+The current milestone is **Phase 0 — Algorithm & Harness Pre-GPU Validation**.
+It is complete only when the TinyH3 CPU reference proves real gradients,
+optimizer updates, immutable parent/child evidence, exact resume, stable
+failures, and the worker-to-evaluator closed loop. This is mechanism evidence,
+not MiniMax-H3 training or quality evidence.
+
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/python -m compileall -q harness4h3 h3_training tools research
+.venv/bin/python -m research.experiments.tiny_real_closed_loop \
+  --output-root var/phase0-final-closed-loop
+```
+
+See the [Phase 0 validation evidence](research/evidence/phase0-validation-2026-09-13.md)
+and the [validation plan](docs/validation-plan.md).
+
 The current execution priority is device migration, measured preflight, and a
 real ComfyUI baseline on the target host. M6 runtime-memory work is optional
 and does not replace the missing real H3 trainer. Until a source-grounded

@@ -60,6 +60,7 @@ separately.
 | H3 ComfyUI generation | Measured | Load/generation validity on recorded host |
 | M5/M5.5 quantized comparison | Measured | Reported size/latency/quality under recorded controls |
 | M6 runtime-memory branches | Measured | Reported outcomes, including VRAM rejection |
+| Phase 0 TinyH3 algorithm/harness gate | CPU reference | Training, checkpoint, resume, failure, and closed-loop mechanism only |
 | A1 model-changing training | Blocked | Reconnaissance and resource blocker only |
 | 4×L40 distributed preflight | Configuration prepared, host unverified | Requirements and blocked preflight only |
 | Pruning/distillation optimization | Not implemented | Interface intent only |
@@ -67,7 +68,8 @@ separately.
 
 ## Current execution priority
 
-The next execution step is to move the repository to the target host, replace
+Phase 0 is now the pre-GPU software gate and does not alter the real-H3 claim
+boundary. The next execution step is to move the repository to the target host, replace
 unverified device-profile facts with observations, run the persisted preflight,
 and establish a real H3 ComfyUI sanity/dev/held-out baseline. M6 is optional
 runtime-memory research and is not required for this migration. A1 remains
@@ -97,6 +99,7 @@ Real records are immutable research evidence:
 - [Source-grounded H3 training reconnaissance](evidence/real-experiments/2026-09-11-a1-h3-training-recon.md)
 - [Accepted NVFP4 Design Gene](evidence/design-genes/design-gene-h3-nvfp4.json)
 - [Rejected VAE-tiling Design Gene](evidence/design-genes/design-gene-m6-vae-tiling.json)
+- [Phase 0 algorithm and Harness validation](evidence/phase0-validation-2026-09-13.md)
 
 Negative and blocked results are retained because they constrain the next
 valid experiment. Files under `var/` are local run artifacts and are ignored

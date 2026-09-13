@@ -1,4 +1,5 @@
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -61,6 +62,13 @@ def test_tiny_worker_returns_real_child_and_metrics(tmp_path, operator, operator
     assert result["status"] == "success"
     assert result["metrics"]["real_worker"] is True
     assert result["metrics"]["optimizer_steps"] > 0
+    assert result["metrics"]["gradient_norm"] > 0
+    assert result["metrics"]["trainable_parameter_count"] > 0
+    assert result["metrics"]["peak_memory_bytes"] >= 0
+    assert math.isfinite(result["metrics"]["initial_loss"])
+    assert math.isfinite(result["metrics"]["final_loss"])
+    assert result["metrics"]["parent_sha256_before"] == result["metrics"]["parent_sha256_after"]
+    assert result["metrics"]["parent_sha256"] == result["metrics"]["parent_sha256_before"]
     assert result["metrics"]["parent_sha256"] != result["metrics"]["child_sha256"]
     assert result["metrics"]["child_reloaded"] is True
     assert metadata["sampling_nfe"] == expected_nfe

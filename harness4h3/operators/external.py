@@ -3,21 +3,21 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence, Tuple
+from typing import Any, Mapping, Optional, Sequence
 
 from ..archive.model_candidate import ModelCandidate
 from ..controller.schemas import CostEstimate, OperatorResult
 from ..executor.local import LocalProcessExecutor
+from ..h3.checkpoint import sha256_file
 from ..h3.state import ModelState
 from ..target.profile import TargetProfile
 from .base import ExecutionContext, OperatorValidationError
 
 
-def _checkpoint_fingerprint(path: Path) -> Optional[Tuple[int, int, int]]:
+def _checkpoint_digest(path: Path) -> Optional[str]:
     if not path.is_file():
         return None
-    stat = path.stat()
-    return stat.st_size, stat.st_mtime_ns, getattr(stat, "st_ino", 0)
+    return sha256_file(path)
 
 
 @dataclass(frozen=True)
@@ -84,13 +84,13 @@ class ExternalScriptOperator:
         }
         request_path.write_text(json.dumps(request, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         parent_path = Path(parent.checkpoint_path).resolve() if "://" not in parent.checkpoint_path else None
-        before = _checkpoint_fingerprint(parent_path) if parent_path is not None else None
+        before = _checkpoint_digest(parent_path) if parent_path is not None else None
         process = self.executor.execute(
             self.command + ("--request", request_path.name, "--result", result_path.name),
             experiment_dir,
             timeout_s=self.timeout_s,
         )
-        after = _checkpoint_fingerprint(parent_path) if parent_path is not None else None
+        after = _checkpoint_digest(parent_path) if parent_path is not None else None
         if before != after:
             return OperatorResult(
                 "failed",
@@ -101,14 +101,31 @@ class ExternalScriptOperator:
                 message="external operator changed or removed the parent checkpoint",
             )
         if not process.ok:
+            failure_type = process.failure_type
+            message = process.message
+            metrics = {"process": process.to_dict()}
+            if not process.timed_out and result_path.is_file():
+                try:
+                    if result_path.stat().st_size <= 8 * 1024 * 1024:
+                        failed_result = json.loads(result_path.read_text(encoding="utf-8"))
+                        if isinstance(failed_result, Mapping) and failed_result.get("status") == "failed":
+                            reported_failure = failed_result.get("failure_type")
+                            if isinstance(reported_failure, str) and reported_failure:
+                                failure_type = reported_failure
+                                message = str(failed_result.get("message") or message)
+                                reported_metrics = failed_result.get("metrics")
+                                if isinstance(reported_metrics, Mapping):
+                                    metrics.update(dict(reported_metrics))
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    pass
             return OperatorResult(
                 "failed",
                 None,
                 CostEstimate(wall_time_s=process.wall_time_s),
                 artifacts=[process.stdout_path, process.stderr_path],
-                metrics={"process": process.to_dict()},
-                failure_type=process.failure_type,
-                message=process.message,
+                metrics=metrics,
+                failure_type=failure_type,
+                message=message,
             )
         try:
             if result_path.stat().st_size > 8 * 1024 * 1024:
@@ -138,7 +155,15 @@ class ExternalScriptOperator:
                 "success",
                 state,
                 output_cost,
-                artifacts=[process.stdout_path, process.stderr_path, str(child_checkpoint)],
+                artifacts=[
+                    process.stdout_path,
+                    process.stderr_path,
+                    str(child_checkpoint),
+                    *([str(raw.get("metrics", {}).get("child_evidence_manifest"))]
+                      if isinstance(raw.get("metrics"), Mapping)
+                      and raw.get("metrics", {}).get("child_evidence_manifest")
+                      else []),
+                ],
                 metrics={"process": process.to_dict(), **dict(raw.get("metrics") or {})},
             )
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:

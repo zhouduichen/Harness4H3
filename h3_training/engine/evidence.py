@@ -52,6 +52,9 @@ def capture_parent(path: Path, role: ModelRole, trainable_names) -> ParentEviden
 
 
 def save_verified_child(role: ModelRole, parent: ParentEvidence, path: Path) -> ChildEvidence:
+    path = Path(path)
+    if path.resolve() == parent.path.resolve():
+        raise TrainingFailure("invalid_training_config", "child checkpoint path must differ from parent")
     if sha256_file(parent.path) != parent.sha256:
         raise TrainingFailure("parent_modified", "parent bytes changed during training")
     current = {name: value.detach().cpu() for name, value in role.model.state_dict().items()}
@@ -63,7 +66,6 @@ def save_verified_child(role: ModelRole, parent: ParentEvidence, path: Path) -> 
     }
     if frozen_changed:
         raise TrainingFailure("frozen_tensor_changed", ",".join(sorted(frozen_changed)[:5]))
-    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
@@ -73,6 +75,8 @@ def save_verified_child(role: ModelRole, parent: ParentEvidence, path: Path) -> 
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+    if sha256_file(parent.path) != parent.sha256:
+        raise TrainingFailure("parent_modified", "parent bytes changed while publishing child")
     child_hash = sha256_file(path)
     if child_hash == parent.sha256:
         raise TrainingFailure("unchanged_child", "child bytes equal parent bytes")

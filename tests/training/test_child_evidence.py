@@ -42,6 +42,18 @@ def test_unchanged_child_and_parent_mutation_fail(tmp_path):
         save_verified_child(role, parent, tmp_path / "child.pt")
 
 
+def test_child_path_collision_is_rejected_without_overwriting_parent(tmp_path):
+    parent_path = create_tiny_checkpoint(tmp_path / "parent.pt", model_id="M0000")
+    original = parent_path.read_bytes()
+    role = role_from(parent_path)
+    trainable = {name for name, _ in role.model.named_parameters() if name.startswith("video_head.")}
+    parent = capture_parent(parent_path, role, trainable)
+    role.model.video_head.weight.data.add_(0.01)
+    with pytest.raises(TrainingFailure, match="child checkpoint path must differ"):
+        save_verified_child(role, parent, parent_path)
+    assert parent_path.read_bytes() == original
+
+
 def test_frozen_tensor_mutation_fails(tmp_path):
     parent_path = create_tiny_checkpoint(tmp_path / "parent.pt", model_id="M0000")
     role = role_from(parent_path)

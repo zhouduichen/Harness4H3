@@ -20,10 +20,15 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKER = ROOT / "tools" / "h3_model_worker.py"
 TRAINER = ROOT / "tests" / "fixtures" / "h3_model_trainer_fixture.py"
 INVALID_TRAINER = ROOT / "tests" / "fixtures" / "h3_model_trainer_invalid.py"
+FAILURE_TRAINER = ROOT / "tests" / "fixtures" / "h3_model_trainer_failure.py"
 TINY_TRAINER = ROOT / "tools" / "tiny_training_worker.py"
 
 
-def _request(tmp_path: Path) -> Tuple[Path, Path]:
+def _request(
+    tmp_path: Path,
+    operator: str = "create_student",
+    operator_args: Optional[dict] = None,
+) -> Tuple[Path, Path]:
     parent_path = tmp_path / "parent.safetensors"
     parent_path.write_bytes(b"immutable H3 parent")
     state = ModelState.from_dict({**ModelState.fake_baseline().to_dict(), "checkpoint_path": str(parent_path)})
@@ -36,10 +41,10 @@ def _request(tmp_path: Path) -> Tuple[Path, Path]:
     request_path.write_text(
         json.dumps(
             {
-                "operator": "create_student",
+                "operator": operator,
                 "parent": parent.to_dict(),
                 "child_model_id": "M0001",
-                "operator_args": {"width_ratio": 0.5, "block_ratio": 0.5},
+                "operator_args": operator_args or {"width_ratio": 0.5, "block_ratio": 0.5},
                 "artifacts_dir": str(artifacts),
             }
         ),
@@ -105,6 +110,43 @@ def test_worker_rejects_invalid_trainer_result(tmp_path):
     assert result["failure_type"] == "invalid_trainer_result"
 
 
+def test_worker_rejects_training_result_without_authenticity_metrics(tmp_path):
+    request_path, result_path = _request(tmp_path, "recovery_finetune", {"training_steps": 1})
+    config_path = tmp_path / "worker.json"
+    _config(config_path, TRAINER)
+    import subprocess
+
+    completed = subprocess.run(
+        [sys.executable, str(WORKER), "--config", str(config_path), "--request", request_path.name, "--result", result_path.name],
+        cwd=request_path.parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["failure_type"] == "invalid_training_evidence"
+
+
+def test_worker_preserves_stable_training_failure_from_trainer(tmp_path):
+    request_path, result_path = _request(tmp_path)
+    config_path = tmp_path / "worker.json"
+    _config(config_path, FAILURE_TRAINER)
+    import subprocess
+
+    completed = subprocess.run(
+        [sys.executable, str(WORKER), "--config", str(config_path), "--request", request_path.name, "--result", result_path.name],
+        cwd=request_path.parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["failure_type"] == "invalid_training_config"
+    assert result["message"] == "the trainer rejected the bounded configuration"
+
+
 def test_worker_runs_through_external_operator_contract(tmp_path):
     parent_path = tmp_path / "parent.safetensors"
     parent_path.write_bytes(b"immutable H3 parent")
@@ -131,6 +173,32 @@ def test_worker_runs_through_external_operator_contract(tmp_path):
     assert result.output_state.model_id == "M0001"
     assert result.metrics["real_worker"] is True
     assert result.metrics["offline_simulation"] is False
+
+
+def test_external_operator_preserves_worker_training_failure(tmp_path):
+    parent_path = tmp_path / "parent.safetensors"
+    parent_path.write_bytes(b"immutable H3 parent")
+    state = ModelState.from_dict({**ModelState.fake_baseline().to_dict(), "checkpoint_path": str(parent_path)})
+    parent = ModelCandidate("M0000", None, 0, str(parent_path), state, None, "baseline")
+    config_path = tmp_path / "worker.json"
+    _config(config_path, FAILURE_TRAINER)
+    operator = ExternalScriptOperator(
+        "recovery_finetune",
+        "fixture training failure",
+        (sys.executable, str(WORKER), "--config", str(config_path)),
+        {"training_steps": (int,)},
+        LocalProcessExecutor(timeout_s=10),
+        CostEstimate(wall_time_s=1.0),
+        timeout_s=10,
+    )
+    result = operator.execute(
+        parent,
+        {"training_steps": 1},
+        ExecutionContext(tmp_path / "operator-run", "M0001"),
+    )
+    assert not result.ok
+    assert result.failure_type == "invalid_training_config"
+    assert "bounded configuration" in result.message
 
 
 def test_worker_preserves_tiny_trainer_authenticity_metrics(tmp_path):
@@ -169,5 +237,10 @@ def test_worker_preserves_tiny_trainer_authenticity_metrics(tmp_path):
     assert result.ok, result.message
     assert result.metrics["child_reloaded"] is True
     assert result.metrics["parent_sha256"] != result.metrics["child_sha256"]
+    evidence_manifest = Path(result.metrics["child_evidence_manifest"])
+    assert evidence_manifest.is_file()
+    evidence = json.loads(evidence_manifest.read_text(encoding="utf-8"))
+    assert evidence["path"] == result.output_state.checkpoint_path
+    assert evidence["child_sha256"] == result.metrics["child_sha256"]
     _, metadata = load_tiny_checkpoint(Path(result.output_state.checkpoint_path))
     assert metadata["model_id"] == "M0001"
