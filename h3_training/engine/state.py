@@ -1,7 +1,7 @@
 """Stable engine state and failure taxonomy."""
 
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, Mapping
 
 
 class TrainingFailure(RuntimeError):
@@ -19,3 +19,15 @@ class LoopState:
     microbatches_consumed: int = 0
     accumulation_position: int = 0
     optimizer_steps: Dict[str, int] = field(default_factory=dict)
+    sampler_position: int = 0
+
+
+@dataclass(frozen=True)
+class TrainingRunResult:
+    loop_state: LoopState
+    initial_loss: float
+    final_loss: float
+    max_gradient_norm: float
+    optimizer_steps: Mapping[str, int]
+    wall_time_s: float
+    peak_memory_bytes: int
