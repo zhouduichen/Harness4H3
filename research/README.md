@@ -116,8 +116,9 @@ benchmark loop.
 
 ## Research history
 
-Completed and superseded designs are kept under `history/`. They document why
-the frozen protocol exists but are not the current onboarding path. Active
-usage is documented in [the repository README](../README.md),
+Completed and superseded [specifications](history/specs/) and
+[implementation plans](history/plans/) are kept under `history/`. They
+document why the frozen protocol exists but are not the current onboarding
+path. Active usage is documented in [the repository README](../README.md),
 [optimization protocol](../docs/optimization-flow.md), and
 [device porting guide](../docs/device-porting.md).

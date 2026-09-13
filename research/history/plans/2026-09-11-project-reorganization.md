@@ -1,6 +1,6 @@
 # Harness4H3 Project Reorganization Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Reorganize Harness4H3 into a portable research harness whose reusable system, reproducible experiments, device facts, evidence, and historical material are immediately distinguishable.
 
@@ -41,7 +41,7 @@
 - Consumes: Existing experiment functions and CLI command behavior.
 - Produces: Importable modules under `research.experiments.*`; installed distributions contain `harness4h3*` and `research*`.
 
-- [ ] **Step 1: Record the dirty-file content hashes**
+- [x] **Step 1: Record the dirty-file content hashes**
 
 Run:
 
@@ -52,7 +52,7 @@ git diff --binary -- experiments/m6_campaign.py experiments/m6_runtime_recipe.py
 
 Expected: two SHA-256 values and a backup patch outside the repository.
 
-- [ ] **Step 2: Move the experiment package with Git history**
+- [x] **Step 2: Move the experiment package with Git history**
 
 Run:
 
@@ -74,7 +74,7 @@ Create `research/__init__.py` containing:
 """Reproducible Harness4H3 research programs and records."""
 ```
 
-- [ ] **Step 3: Update executable imports and package discovery**
+- [x] **Step 3: Update executable imports and package discovery**
 
 Mechanically replace the import prefix `experiments.` with
 `research.experiments.` in `harness4h3/cli.py`, all moved research programs,
@@ -95,7 +95,7 @@ Set package discovery in `pyproject.toml` to:
 include = ["harness4h3*", "research*"]
 ```
 
-- [ ] **Step 4: Prove imports and CLI parsing still work**
+- [x] **Step 4: Prove imports and CLI parsing still work**
 
 Run:
 
@@ -106,7 +106,7 @@ Run:
 
 Expected: selected tests pass; help lists all existing commands.
 
-- [ ] **Step 5: Verify user changes survived the move and commit**
+- [x] **Step 5: Verify user changes survived the move and commit**
 
 Run:
 
@@ -132,7 +132,7 @@ Expected: the original M6 additions remain present; the commit records renames r
 - Consumes: A YAML mapping with `schema_version`, `id`, `platform`, `hardware`, `paths`, `services`, `limits`, `formats`, and `capabilities`.
 - Produces: `preflight(profile_path: Path, operator: str | None, check_services: bool = True) -> dict`; CLI JSON with `status`, `profile_id`, `operator`, and stable `checks` entries.
 
-- [ ] **Step 1: Write failing validation and capability tests**
+- [x] **Step 1: Write failing validation and capability tests**
 
 Create the test module with this concrete structure (the implementation may
 return additional checks, but these names and outcomes are fixed):
@@ -235,7 +235,7 @@ def test_preflight_reports_unreachable_required_service(tmp_path, monkeypatch):
 
 Assertions use stable check names: `profile.schema`, `capability.<operator>`, `path.<name>`, and `service.<name>`; success returns `status == "ready"`, any failed check returns `status == "blocked"`.
 
-- [ ] **Step 2: Run the tests to verify the tool is absent**
+- [x] **Step 2: Run the tests to verify the tool is absent**
 
 Run:
 
@@ -245,7 +245,7 @@ Run:
 
 Expected: collection fails because `tools/device_preflight.py` does not exist.
 
-- [ ] **Step 3: Implement the minimal preflight tool**
+- [x] **Step 3: Implement the minimal preflight tool**
 
 Use `yaml.safe_load`, `pathlib.Path`, `urllib.parse.urljoin`, and `urllib.request.urlopen`. Validate the exact required top-level mappings, resolve relative paths against the repository root, check only paths marked `required: true`, check only services whose `required_for` contains the requested operator, and never execute a model or experiment. Return checks in this shape:
 
@@ -265,7 +265,7 @@ python tools/device_preflight.py --profile PATH [--operator NAME] [--skip-servic
 
 Exit `0` for `ready`, `2` for `blocked` or invalid input.
 
-- [ ] **Step 4: Add the measured RTX 5080 profile**
+- [x] **Step 4: Add the measured RTX 5080 profile**
 
 The profile records Windows, one RTX 5080 Laptop GPU, `15.92` GiB VRAM, approximately `31.45` GiB RAM, the verified checkpoint manifest, ComfyUI/controller health endpoints, accepted `safetensors`/`gguf` formats, and explicit capability declarations:
 
@@ -288,7 +288,7 @@ capabilities:
     reason: no real H3 teacher/student training backend is registered
 ```
 
-- [ ] **Step 5: Run focused tests and commit**
+- [x] **Step 5: Run focused tests and commit**
 
 Run:
 
@@ -319,7 +319,7 @@ Expected: tests pass; the real profile command exits `2` and reports the declare
 - Consumes: Existing evidence bytes and research script lookups.
 - Produces: One evidence tree and one history tree; active code resolves Design Genes at their new paths.
 
-- [ ] **Step 1: Record evidence hashes and move files with Git**
+- [x] **Step 1: Record evidence hashes and move files with Git**
 
 Run:
 
@@ -334,7 +334,7 @@ git mv docs/evogen-rsi-research.md research/history/
 git mv REUSE_MATRIX.md research/history/reuse-matrix.md
 ```
 
-- [ ] **Step 2: Update active code to the new Design Gene locations**
+- [x] **Step 2: Update active code to the new Design Gene locations**
 
 Use repository-root-relative paths:
 
@@ -345,7 +345,7 @@ root / "research/evidence/design-genes/design-gene-m6-vae-tiling.json"
 
 Do not edit the moved evidence records themselves.
 
-- [ ] **Step 3: Remove local metadata and prevent recurrence**
+- [x] **Step 3: Remove local metadata and prevent recurrence**
 
 Delete only `/Users/huangjiahao/MinMax-H3/Harness4H3/docs/.DS_Store` and add this line to `.gitignore`:
 
@@ -353,7 +353,7 @@ Delete only `/Users/huangjiahao/MinMax-H3/Harness4H3/docs/.DS_Store` and add thi
 .DS_Store
 ```
 
-- [ ] **Step 4: Verify evidence bytes and research imports**
+- [x] **Step 4: Verify evidence bytes and research imports**
 
 Create an after-hash list using the moved paths and compare hash columns, not path columns. Run:
 
@@ -364,7 +364,7 @@ git diff --check
 
 Expected: evidence hashes are unchanged and focused tests pass.
 
-- [ ] **Step 5: Commit the evidence/history separation**
+- [x] **Step 5: Commit the evidence/history separation**
 
 Run:
 
@@ -391,7 +391,7 @@ git commit -m "docs: separate research evidence and history"
 - Consumes: Existing CLI, device preflight, benchmark command, worker contract, experiment/evidence locations.
 - Produces: A short root onboarding path and a research index organized as hypothesis → protocol → implementation → evidence → limitations.
 
-- [ ] **Step 1: Rewrite the root positioning and capability table**
+- [x] **Step 1: Rewrite the root positioning and capability table**
 
 The README must state:
 
@@ -402,7 +402,7 @@ Status: real inference and benchmark verified; runtime optimization measured; re
 
 It then links to quickstart, device porting, optimization flow, architecture, operator contract, research index, evidence, and history. Keep installation plus one offline command, one preflight command, and one real benchmark command. Remove phase-by-phase result narration from the root.
 
-- [ ] **Step 2: Write the active guides around reproducibility**
+- [x] **Step 2: Write the active guides around reproducibility**
 
 Each guide has one responsibility:
 
@@ -414,7 +414,7 @@ Each guide has one responsibility:
 
 Every external command is labeled with its required host/service/checkpoint.
 
-- [ ] **Step 3: Create the research index**
+- [x] **Step 3: Create the research index**
 
 `research/README.md` contains:
 
@@ -427,7 +427,7 @@ Every external command is labeled with its required host/service/checkpoint.
 
 Do not describe engineering completeness as algorithmic novelty.
 
-- [ ] **Step 4: Update package metadata and check links**
+- [x] **Step 4: Update package metadata and check links**
 
 Set:
 
@@ -437,7 +437,7 @@ description = "Device-aware research harness for reproducible MiniMax H3 optimiz
 
 Run a local Markdown-link checker implemented as a short Python one-liner using only `pathlib` and `re`; every relative link in `README.md` and active `docs/*.md` must resolve.
 
-- [ ] **Step 5: Run documentation-facing commands and commit**
+- [x] **Step 5: Run documentation-facing commands and commit**
 
 Run:
 
@@ -464,7 +464,7 @@ Expected: both offline validation commands exit `0`; README links resolve.
 - Consumes: Completed design and implementation records.
 - Produces: No active planning clutter after implementation; all historical reasoning remains tracked.
 
-- [ ] **Step 1: Run the full verification suite before archiving the active plan**
+- [x] **Step 1: Run the full verification suite before archiving the active plan**
 
 Run:
 
@@ -477,7 +477,7 @@ Run:
 
 Expected: tests and compileall pass; help parses; fake optimization produces a valid bounded outcome (exit `0` only if its target is satisfied, otherwise its documented nonzero result is acceptable when JSON is valid).
 
-- [ ] **Step 2: Confirm moves did not mutate evidence or user M6 logic**
+- [x] **Step 2: Confirm moves did not mutate evidence or user M6 logic**
 
 Run hash comparisons against `/tmp/harness4h3-evidence-before.sha256` and inspect:
 
@@ -489,7 +489,7 @@ git diff 6f640df -- research/experiments/m6_campaign.py research/experiments/m6_
 
 Expected: both histories follow across the rename and the user's additions remain visible.
 
-- [ ] **Step 3: Move completed plans/specifications into research history**
+- [x] **Step 3: Move completed plans/specifications into research history**
 
 Run:
 
@@ -501,7 +501,7 @@ git mv docs/superpowers/specs/*.md research/history/specs/
 
 Update the research index to point at `research/history/plans/` and `research/history/specs/`.
 
-- [ ] **Step 4: Run final cleanliness checks**
+- [x] **Step 4: Run final cleanliness checks**
 
 Run:
 
@@ -513,7 +513,7 @@ git status --short
 
 Expected: no whitespace errors, no `.DS_Store`, and only intended reorganization changes are staged/unstaged.
 
-- [ ] **Step 5: Commit the completed research archive**
+- [x] **Step 5: Commit the completed research archive**
 
 Run:
 
@@ -522,7 +522,7 @@ git add docs/superpowers research/history research/README.md
 git commit -m "docs: archive completed research design history"
 ```
 
-- [ ] **Step 6: Record final evidence**
+- [x] **Step 6: Record final evidence**
 
 Run:
 

@@ -1,6 +1,6 @@
 # Harness4H3 Project Reorganization Design
 
-Status: approved direction; implementation pending.
+Status: implemented and archived.
 
 ## Problem
 
