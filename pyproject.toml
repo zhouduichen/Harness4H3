@@ -15,12 +15,16 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8,<9"]
+training = [
+  "torch>=2.2,<3",
+  "safetensors>=0.4,<1",
+]
 
 [project.scripts]
 harness4h3 = "harness4h3.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["harness4h3*", "research*"]
+include = ["harness4h3*", "h3_training*", "research*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
