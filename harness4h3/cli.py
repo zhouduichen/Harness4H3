@@ -475,7 +475,7 @@ def _json_flag(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="EvoGen-RSI Phase-I model optimization harness for MiniMax H3")
+    parser = argparse.ArgumentParser(description="Device-aware research harness for reproducible MiniMax H3 optimization")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--json", action="store_true", help="emit one machine-readable JSON object")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -504,7 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
     _json_flag(evolve)
     evolve.set_defaults(handler=cmd_evolve)
 
-    validate_target = subparsers.add_parser("validate", help="validate an EvoGen TargetProfile")
+    validate_target = subparsers.add_parser("validate", help="validate an immutable optimization TargetProfile")
     validate_target.add_argument("--target", default="configs/targets/mobile_example.yaml")
     _json_flag(validate_target)
     validate_target.set_defaults(handler=cmd_validate_target)
@@ -536,7 +536,7 @@ def build_parser() -> argparse.ArgumentParser:
     _json_flag(optimize)
     optimize.set_defaults(handler=cmd_optimize)
 
-    a0 = subparsers.add_parser("a0-evolve", help="run Autonomous Model Evolution Campaign A0")
+    a0 = subparsers.add_parser("a0-evolve", help="run the A0 model-evolution research protocol")
     a0.add_argument("--target", default="configs/targets/rtx5080_example.yaml")
     a0.add_argument("--output-root", default="var/a0-model-evolution")
     a0.add_argument("--output", help="optional copy of the complete campaign JSON")
@@ -554,7 +554,7 @@ def build_parser() -> argparse.ArgumentParser:
     _json_flag(a0)
     a0.set_defaults(handler=cmd_a0_evolve)
 
-    a1 = subparsers.add_parser("a1-evolve", help="run the first real H3 model-evolution campaign")
+    a1 = subparsers.add_parser("a1-evolve", help="run the A1 real-worker research protocol")
     a1.add_argument("--parent-checkpoint", required=True, help="local checkpoint accessible to the worker")
     a1.add_argument("--worker-command", nargs="+", required=True, help="fixed argv for h3_model_worker.py")
     a1.add_argument("--worker-config", required=True, help="trusted worker config containing trainer argv")

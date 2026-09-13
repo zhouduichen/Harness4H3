@@ -1,31 +1,85 @@
-# EvoGen-RSI Phase I Architecture
+# Architecture
 
-Harness4H3 treats the fixed controller as a planner, the Harness as a restricted execution environment, and H3/H3-derived students as the objects being optimized. The Phase-I environment is frozen as `Harness4H3-v1.0`: Controller protocol, state/schema contracts, evaluator, archive, trajectory format, acceptance policy, and TargetProfile semantics are not research variables after this point; only correctness/security bugfixes are allowed. A TargetProfile is fixed when an optimization session is created. Each controller call receives normalized ModelState, remaining BudgetState, registered operator schemas, recent experiments, failures and the current Pareto front.
+Harness4H3 separates the research policy from the execution and measurement
+mechanisms. The object being optimized is an H3 model candidate or a runtime
+configuration; the Harness itself is not an experimental variable.
 
-The controller's only executable output is ExperimentPlan. Schema, policy, declared budget, operator registration/arguments and registered cost are validated before execution. Fake operators never mutate their parent. A successful modifying operator returns a new ModelState, which is registered as an immutable child ModelCandidate. QualityEvaluator and HardwareEvaluator are composed behind a ConstraintEvaluator; the controller cannot change any of them.
+## Component boundaries
+
+| Component | Responsibility | May change during an experiment? |
+|---|---|---|
+| Controller | Proposes one structured `ExperimentPlan` from bounded context | Provider/model is fixed within a comparison |
+| Validation pipeline | Enforces schema, policy, budget, operator, and cost constraints | No |
+| Operator registry | Exposes the only executable interventions | Registration is fixed before a campaign |
+| Device worker | Runs a trusted implementation selected by fixed configuration | Implementation is not supplied by the Controller |
+| Benchmark adapter | Generates artifacts through H3/ComfyUI | No |
+| Evaluator | Measures quality, validity, and hardware constraints | No |
+| Model/System stores | Preserve immutable lineage and active pointers | Append-only candidates; pointer changes are atomic |
+| Pareto archive | Retains feasible non-dominated candidates | Updated only from evaluator results |
+| Trajectory | Records plans, execution, evidence, failures, and cost | Append-only |
+
+## Data flow
 
 ```text
-TargetProfile + ModelState + Budget + Experience + Pareto
-                         ↓
-                Fixed Controller
-                         ↓
-                 ExperimentPlan
-                         ↓
-   schema → policy → budget → operator validation
-                         ↓
-                  registered Operator
-                         ↓
-             immutable child ModelCandidate
-                         ↓
-       Quality + Hardware + Constraint evaluation
-                         ↓
-        ExperimentRecord + Pareto + next state
+TargetProfile + DeviceProfile + current Model/System state
+                              ↓
+                 capability preflight (read-only)
+                              ↓
+ ControllerContext = state + budget + operators + prior evidence + Pareto
+                              ↓
+                        Controller
+                              ↓
+                     ExperimentPlan
+                              ↓
+ SchemaValidator → PolicyValidator → BudgetValidator → OperatorValidator
+                              ↓
+                   registered Operator only
+                              ↓
+          immutable child candidate or explicit failure
+                              ↓
+             benchmark → independent EvaluationResult
+                              ↓
+       keep/drop decision + archive + trajectory + next context
 ```
 
-The loop is bounded by iterations, failures, wall time, GPU hours and controller calls. An atomic session checkpoint is written after every experiment. Structured Ollama and OpenAI Responses providers are network opt-in; default tests remain offline. H3 Inspector reads only safetensors/GGUF headers, while LocalProcessExecutor runs fixed argv with `shell=False`, isolated cwd, allowlisted environment, captured logs and timeout termination. Real prebuilt quantized variants are marked with stale metrics until an external benchmark fills them.
+The device profile answers whether a required capability is present. The
+TargetProfile defines success constraints. Keeping these separate prevents a
+machine description from silently changing the scientific objective.
 
-The active research loop is autonomous model/system optimization under this
-fixed environment. Runtime operators are bounded experiment tools; they may be
-selected or minimally wrapped without turning the Harness itself into the
-optimization target. Harness Evolution and Controller post-training consume
-accumulated trajectories only in later phases.
+## Trust boundaries
+
+The Controller emits data, never shell commands. Local execution uses fixed
+argument vectors with `shell=False`; worker/trainer commands come from trusted
+operator configuration. Credentials are read from named environment variables
+and are not placed in Controller context or trajectories.
+
+The evaluator is authoritative. A Controller cannot modify quality thresholds,
+promote a failed candidate, rewrite parent lineage, or substitute simulated
+metrics for a real experiment. A real model-changing operator must return a
+new checkpoint and authenticity evidence; copying the parent is not a valid
+child.
+
+## Frozen core and research surface
+
+`Harness4H3-v1.0` freezes Controller protocol, state and plan schemas,
+validation order, evaluator authority, archive/trajectory semantics,
+acceptance policy, and TargetProfile meaning. Only correctness or security
+fixes may change these components.
+
+Research extensions belong in:
+
+- `research/experiments/` for reproducible protocols;
+- `harness4h3/operators/` or an external worker for a concrete bounded
+  intervention;
+- `configs/devices/` for machine facts and capabilities;
+- `configs/targets/` for predeclared objectives;
+- `research/evidence/` for measured results, including failures; and
+- `research/history/` for completed design decisions.
+
+## Capability boundary
+
+The repository has a real H3 inference and benchmark path and an external
+model-worker adapter. The adapter is not a trainer. Until a memory-feasible H3
+implementation performs real forward, backward, non-zero-gradient optimizer
+updates, child save/reload, and parent/child verification, model-changing A1
+remains blocked.
