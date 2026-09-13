@@ -75,19 +75,34 @@ class TrainerEngine:
                 batch = method.prepare_batch(raw, self.generator) if hasattr(method, "prepare_batch") else raw
                 if not isinstance(batch, PreparedBatch):
                     raise TrainingFailure("invalid_training_config", "training method did not prepare a batch")
-                output = method.training_step(batch, iteration)
+                try:
+                    output = method.training_step(batch, iteration)
+                except RuntimeError as exc:
+                    if "out of memory" in str(exc).lower():
+                        raise TrainingFailure("training_oom", str(exc)) from exc
+                    raise
                 finite_total_loss(output.losses["total_loss"])
                 loss = output.losses["total_loss"]
                 if initial_loss is None:
                     initial_loss = float(loss.detach())
                 accumulated += float(loss.detach())
-                (loss / self.config.gradient_accumulation_steps).backward()
+                try:
+                    (loss / self.config.gradient_accumulation_steps).backward()
+                except RuntimeError as exc:
+                    if "out of memory" in str(exc).lower():
+                        raise TrainingFailure("training_oom", str(exc)) from exc
+                    raise
                 state.microbatches_consumed += 1
                 state.accumulation_position = accumulation_index + 1
             norm = gradient_norm(method.grad_clip_targets(iteration).values(), self.config.max_gradient_norm)
             maximum_gradient_norm = max(maximum_gradient_norm, norm)
             for name, optimizer in scheduled.items():
-                optimizer.step()
+                try:
+                    optimizer.step()
+                except RuntimeError as exc:
+                    if "out of memory" in str(exc).lower():
+                        raise TrainingFailure("training_oom", str(exc)) from exc
+                    raise
                 state.optimizer_steps[name] = state.optimizer_steps.get(name, 0) + 1
             for scheduler in method.schedulers().values():
                 scheduler.step()

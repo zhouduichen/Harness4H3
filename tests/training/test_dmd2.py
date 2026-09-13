@@ -7,6 +7,7 @@ torch = pytest.importorskip("torch")
 from h3_training.adapters.tiny import TinyH3Adapter
 from h3_training.algorithms.dmd2 import DMD2, DMD2Config
 from h3_training.data.dataset import SyntheticH3Dataset
+from h3_training.data.schema import Conditioning, ModalLatents, PreparedBatch
 from h3_training.engine.trainer import TrainerConfig, TrainerEngine
 from h3_training.tiny.model import TinyH3Model
 
@@ -47,6 +48,21 @@ def test_dmd2_loss_is_finite_and_gradients_nonzero():
     assert torch.isfinite(output.losses["total_loss"])
     assert any(p.grad is not None and torch.count_nonzero(p.grad) for p in method.student_model.parameters())
     assert any(p.grad is not None and torch.count_nonzero(p.grad) for p in method.critic_model.parameters())
+
+
+def test_dmd2_text_only_mode_needs_no_real_latent():
+    method, _ = fixture(generator_update_interval=1, data_mode="text_only")
+    config = method.student_model.config
+    generator = torch.Generator().manual_seed(88)
+    batch = PreparedBatch(
+        conditioning=Conditioning(torch.randn(1, config.condition_dim, generator=generator)),
+        noise=ModalLatents(
+            video=torch.randn(1, config.video_tokens, config.latent_dim, generator=generator),
+            audio=torch.randn(1, config.audio_tokens, config.latent_dim, generator=generator),
+        ),
+    )
+    result = TrainerEngine(TrainerConfig(seed=2, max_gradient_norm=10.0)).run(method, [batch], max_steps=1)
+    assert result.optimizer_steps == {"critic": 1, "student": 1}
 
 
 def test_dmd2_optional_real_latent_losses_are_exercised():

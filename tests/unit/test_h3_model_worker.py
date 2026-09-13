@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
+import pytest
+
 from harness4h3.archive.model_candidate import ModelCandidate
 from harness4h3.controller.schemas import CostEstimate
 from harness4h3.executor.local import LocalProcessExecutor
@@ -132,6 +134,7 @@ def test_worker_runs_through_external_operator_contract(tmp_path):
 
 
 def test_worker_preserves_tiny_trainer_authenticity_metrics(tmp_path):
+    pytest.importorskip("torch")
     from h3_training.tiny.factory import create_tiny_checkpoint, load_tiny_checkpoint
 
     parent_path = create_tiny_checkpoint(tmp_path / "M0000.pt", "M0000", sampling_nfe=4, seed=4)

@@ -45,8 +45,10 @@ class ChildEvidence:
 def capture_parent(path: Path, role: ModelRole, trainable_names) -> ParentEvidence:
     names = frozenset(trainable_names)
     tensors = {name: value.detach().cpu().clone() for name, value in role.model.state_dict().items()}
-    parameter_names = frozenset(name for name, _ in role.model.named_parameters())
-    return ParentEvidence(Path(path), sha256_file(path), tensors, names, parameter_names - names)
+    tensor_names = frozenset(tensors)
+    if not names.issubset(tensor_names):
+        raise TrainingFailure("invalid_training_config", "trainable evidence names do not match model state")
+    return ParentEvidence(Path(path), sha256_file(path), tensors, names, tensor_names - names)
 
 
 def save_verified_child(role: ModelRole, parent: ParentEvidence, path: Path) -> ChildEvidence:
@@ -88,5 +90,7 @@ def save_verified_child(role: ModelRole, parent: ParentEvidence, path: Path) -> 
     manifest["manifest_path"] = str(manifest_path)
     temporary_manifest = manifest_path.with_name(f".{manifest_path.name}.{os.getpid()}.tmp")
     temporary_manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    with temporary_manifest.open("rb") as stream:
+        os.fsync(stream.fileno())
     os.replace(temporary_manifest, manifest_path)
     return evidence
