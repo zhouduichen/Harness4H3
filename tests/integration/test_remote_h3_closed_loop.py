@@ -3,6 +3,9 @@ from types import SimpleNamespace
 
 from harness4h3.benchmark.h3 import BenchmarkSummary
 from harness4h3.config import WorkflowConfig
+from harness4h3.controller.schemas import ExperimentPlan
+from harness4h3.archive.model_candidate import ModelCandidate
+from harness4h3.h3.state import ModelState
 from harness4h3.remote.config import load_remote_campaign_config
 from harness4h3.remote.ssh import RemoteConfig
 from harness4h3.target.profile import load_target_profile
@@ -156,3 +159,42 @@ def test_campaign_imports_chain_evaluates_and_resumes_without_retraining(tmp_pat
     second = build_campaign(tmp_path, results, scores, hardware).run(resume=True, max_experiments=2)
     assert second.report["imported_duplicates"] >= 2
     assert second.current_model_id == first.current_model_id
+
+
+def test_controller_plan_is_the_only_training_plan_source(tmp_path):
+    campaign = build_campaign(tmp_path, {}, {}, {})
+
+    class Controller:
+        provider_name = "test"
+        model_name = "controller"
+
+        def __init__(self):
+            self.contexts = []
+
+        def plan(self, context):
+            self.contexts.append(context)
+            return ExperimentPlan(
+                experiment_id="exp_0001",
+                parent_model_id=context.current_model_state.model_id,
+                diagnosis="test_diagnosis",
+                objective="test_objective",
+                hypothesis="test_hypothesis",
+                operator="recovery_finetune",
+                operator_args={"training_steps": 1},
+                expected_effects={"quality_score": "preserve"},
+                risks=["quality regression"],
+                required_budget={"wall_time_s": 2.0, "gpu_hours": 1.0, "controller_calls": 0},
+                acceptance={"max_quality_drop": 0.05},
+                stop_conditions={"critical_regression": True},
+                rationale="controller test plan",
+            )
+
+    controller = Controller()
+    campaign.controller = controller
+    parent = ModelCandidate("M0000", None, 0, "fake://M0000", ModelState.fake_baseline(), None, "baseline")
+    plan = campaign._controller_plan(parent, 0)
+
+    assert plan is not None
+    assert controller.contexts[0].current_model_state.model_id == "M0000"
+    assert campaign.controller_trace[0]["status"] == "validated"
+    assert campaign.controller_trace[0]["plan"]["operator"] == "recovery_finetune"
