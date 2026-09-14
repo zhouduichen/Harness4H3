@@ -97,6 +97,11 @@ class RemotePowerSampler:
                 if math.isfinite(timestamp) and math.isfinite(power) and power >= 0:
                     with self._lock:
                         self.samples.append((timestamp, power))
+            returncode = process.wait()
+            if returncode != 0 and not self._stop.is_set():
+                stderr = process.stderr.read().strip() if process.stderr is not None else ""
+                with self._lock:
+                    self.errors.append("remote power stream exited with code %d%s" % (returncode, (": " + stderr) if stderr else ""))
         except (OSError, ValueError) as exc:
             with self._lock:
                 self.errors.append(str(exc))

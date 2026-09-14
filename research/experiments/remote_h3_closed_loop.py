@@ -272,7 +272,7 @@ class RemoteCampaign:
             evaluator,
             json.loads(self.config.workflow.template.read_text(encoding="utf-8")),
             self.config.workflow,
-            self.config.runtime.output_root,
+            self.output_root / "benchmark",
             system_sample_interval_s=self.config.sampling_interval_s,
         )
 
