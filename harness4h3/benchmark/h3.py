@@ -157,12 +157,19 @@ class H3BenchmarkRunner:
             target = self.workflow_config.mutable["steps"]
             _set_target(workflow, target.node_id, target.input_name, state.sampling_steps)
         checkpoint_name = _checkpoint_name(state.checkpoint_path)
-        model_node = workflow.get("127")
+        model_node_id = "127"
+        model_node = workflow.get(model_node_id)
+        if not isinstance(model_node, Mapping) or str(model_node.get("class_type", "")).lower() not in {"unetloader", "unetloadergguf"}:
+            model_node = None
+            for candidate_id, candidate in workflow.items():
+                if isinstance(candidate, Mapping) and str(candidate.get("class_type", "")).lower() in {"unetloader", "unetloadergguf"}:
+                    model_node_id, model_node = str(candidate_id), candidate
+                    break
         if isinstance(model_node, Mapping) and checkpoint_name.lower().endswith((".gguf", ".safetensors", ".ckpt", ".pt")):
             model_node["class_type"] = "UnetLoaderGGUF" if checkpoint_name.lower().endswith(".gguf") else "UNETLoader"
             inputs = model_node.setdefault("inputs", {})
             inputs["unet_name"] = checkpoint_name
-            workflow["127"] = model_node
+            workflow[model_node_id] = model_node
         runtime_state = state.runtime_state if isinstance(state.runtime_state, Mapping) else {}
         runtime_recipe = runtime_state.get("runtime_recipe")
         if isinstance(runtime_recipe, (list, tuple)):
@@ -202,6 +209,7 @@ class H3BenchmarkRunner:
         efficiency_thresholds: Optional[Mapping[str, float]] = None,
         black_frame_rate_threshold: float = 0.0,
         reset_backend_before_run: bool = False,
+        power_sampler: Any = None,
     ) -> BenchmarkSummary:
         if not 0.0 <= float(black_frame_rate_threshold) <= 1.0:
             raise ValueError("black_frame_rate_threshold must be between 0 and 1")
@@ -215,66 +223,72 @@ class H3BenchmarkRunner:
                 raise ValueError("reset_backend_before_run requires a backend.free() method")
             reset()
         with _SystemSampler(self.backend.base_url, self.system_sample_interval_s) as sampler:
-            for task in tasks:
-                started = time.monotonic()
-                try:
-                    if release_each_task:
-                        reset()
-                    result = self.backend.run(self._workflow(state, task), self.output_root / state.model_id / task.id)
-                    artifacts = tuple(str(path.resolve()) for path in result.artifacts)
-                    evaluation: EvaluationResult = self.evaluator.evaluate(
-                        make_request(task.id, task.expected, artifacts, result.wall_time_s, backend_success=True)
-                    )
-                    metrics = dict(evaluation.metrics)
-                    failure_type = evaluation.failure_type
-                    if failure_type == "low_luma" and metrics.get("all_black") in (1, 1.0, True):
-                        failure_type = "degenerate_output_black_frame"
-                    operator_success = bool(metrics.get("operator_execution_success", True))
-                    artifact_success = bool(metrics.get("artifact_generation_success", bool(artifacts)))
-                    semantic_valid = bool(
-                        metrics.get(
-                            "semantic_generation_valid",
-                            failure_type not in {"decode_failed", "degenerate_output_black_frame", "low_luma", "output_mismatch"},
+            if power_sampler is not None:
+                power_sampler.start()
+            try:
+                for task in tasks:
+                    started = time.monotonic()
+                    try:
+                        if release_each_task:
+                            reset()
+                        result = self.backend.run(self._workflow(state, task), self.output_root / state.model_id / task.id)
+                        artifacts = tuple(str(path.resolve()) for path in result.artifacts)
+                        evaluation: EvaluationResult = self.evaluator.evaluate(
+                            make_request(task.id, task.expected, artifacts, result.wall_time_s, backend_success=True)
                         )
-                    )
-                    metrics.setdefault("operator_execution_success", 1.0 if operator_success else 0.0)
-                    metrics.setdefault("artifact_generation_success", 1.0 if artifact_success else 0.0)
-                    metrics.setdefault("semantic_generation_valid", 1.0 if semantic_valid else 0.0)
-                    runs.append(
-                        BenchmarkTaskResult(
-                            task_id=task.id,
-                            status="success",
-                            prompt_id=result.prompt_id,
-                            artifacts=artifacts,
-                            wall_time_s=result.wall_time_s,
-                            quality_score=evaluation.score,
-                            quality_metrics=metrics,
-                            failure_type=failure_type,
-                            operator_execution_success=operator_success,
-                            artifact_generation_success=artifact_success,
-                            semantic_generation_valid=semantic_valid,
-                            critical_regression=evaluation.critical_regression,
+                        metrics = dict(evaluation.metrics)
+                        failure_type = evaluation.failure_type
+                        if failure_type == "low_luma" and metrics.get("all_black") in (1, 1.0, True):
+                            failure_type = "degenerate_output_black_frame"
+                        operator_success = bool(metrics.get("operator_execution_success", True))
+                        artifact_success = bool(metrics.get("artifact_generation_success", bool(artifacts)))
+                        semantic_valid = bool(
+                            metrics.get(
+                                "semantic_generation_valid",
+                                failure_type not in {"decode_failed", "degenerate_output_black_frame", "low_luma", "output_mismatch"},
+                            )
                         )
-                    )
-                except (BackendError, EvaluatorError, OSError, ValueError) as exc:
-                    failure_type = getattr(exc, "failure_type", "benchmark_failure")
-                    runs.append(
-                        BenchmarkTaskResult(
-                            task_id=task.id,
-                            status="failed",
-                            prompt_id=None,
-                            artifacts=(),
-                            wall_time_s=time.monotonic() - started,
-                            quality_score=None,
-                            quality_metrics={
-                                "operator_execution_success": 0.0,
-                                "artifact_generation_success": 0.0,
-                                "semantic_generation_valid": 0.0,
-                            },
-                            failure_type=failure_type,
-                            message=str(exc),
+                        metrics.setdefault("operator_execution_success", 1.0 if operator_success else 0.0)
+                        metrics.setdefault("artifact_generation_success", 1.0 if artifact_success else 0.0)
+                        metrics.setdefault("semantic_generation_valid", 1.0 if semantic_valid else 0.0)
+                        runs.append(
+                            BenchmarkTaskResult(
+                                task_id=task.id,
+                                status="success",
+                                prompt_id=result.prompt_id,
+                                artifacts=artifacts,
+                                wall_time_s=result.wall_time_s,
+                                quality_score=evaluation.score,
+                                quality_metrics=metrics,
+                                failure_type=failure_type,
+                                operator_execution_success=operator_success,
+                                artifact_generation_success=artifact_success,
+                                semantic_generation_valid=semantic_valid,
+                                critical_regression=evaluation.critical_regression,
+                            )
                         )
-                    )
+                    except (BackendError, EvaluatorError, OSError, ValueError) as exc:
+                        failure_type = getattr(exc, "failure_type", "benchmark_failure")
+                        runs.append(
+                            BenchmarkTaskResult(
+                                task_id=task.id,
+                                status="failed",
+                                prompt_id=None,
+                                artifacts=(),
+                                wall_time_s=time.monotonic() - started,
+                                quality_score=None,
+                                quality_metrics={
+                                    "operator_execution_success": 0.0,
+                                    "artifact_generation_success": 0.0,
+                                    "semantic_generation_valid": 0.0,
+                                },
+                                failure_type=failure_type,
+                                message=str(exc),
+                            )
+                        )
+            finally:
+                if power_sampler is not None:
+                    power_sampler.stop()
         successful = [run for run in runs if run.quality_score is not None]
         quality_score = mean([float(run.quality_score) for run in successful]) if successful else None
         quality_metrics = {
@@ -293,11 +307,14 @@ class H3BenchmarkRunner:
         if model_size is None and state.provenance.get("size_bytes") is not None:
             model_size = float(state.provenance["size_bytes"]) / 1_000_000_000
         peak_ram, peak_vram = _metric_values(sampler.samples)
+        power_summary = power_sampler.summary() if power_sampler is not None else {}
+        sampled_energy = power_summary.get("energy_j") if isinstance(power_summary, Mapping) else None
+        measured_energy = measured.get("energy_j")
         hardware = HardwareMetrics(
             latency_s=mean(latencies) if latencies else None,
             peak_memory_gb=peak_vram if peak_vram is not None else peak_ram,
             model_size_gb=float(model_size) if model_size is not None else None,
-            energy_j=float(measured["energy_j"]) if measured.get("energy_j") is not None else None,
+            energy_j=float(sampled_energy) if sampled_energy is not None else (float(measured_energy) if measured_energy is not None else None),
             throughput=(1.0 / mean(latencies)) if latencies and mean(latencies) > 0 else None,
             thermal=None,
         )
