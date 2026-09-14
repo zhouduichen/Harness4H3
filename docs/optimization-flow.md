@@ -49,6 +49,15 @@ experiments, and experiments-to-target.
    and Pareto state if justified, then return measured evidence to the next
    Controller call.
 
+The remote campaign follows the same ownership boundary. Imported checkpoints
+are historical evidence and may be benchmarked in lineage order, but a new
+training or runtime intervention can only be launched from a Controller
+`ExperimentPlan` that passed the fixed validation pipeline. The campaign
+records the Controller context, plan, and validation result; it does not invent
+an operator or rewrite a rejected plan. The quality evaluator (or a configured
+quality-review subagent behind that evaluator interface) reports evidence back
+to the Controller and never executes model-changing commands itself.
+
 ## Candidate types
 
 `ModelCandidate` represents a checkpoint lineage such as
@@ -87,6 +96,9 @@ promotion and Pareto update. Checkpoints are never copied during import.
 
 The Controller is fixed. Imported experiences are passed through its existing
 context as evidence; no Controller weights or prompt policy are optimized.
+Every bounded run still records the Controller's next validated plan in the
+campaign report; the `--max-experiments` limit controls whether that plan may
+be executed in the current run, not whether the Controller is bypassed.
 The current remote worker uses a deterministic cached latent sample for
 training, and the default `structural_proxy` evaluator checks media validity,
 motion, and stability rather than semantic prompt fidelity. A semantic-quality
