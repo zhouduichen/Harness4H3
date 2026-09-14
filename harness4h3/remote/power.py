@@ -112,7 +112,7 @@ class RemotePowerSampler:
         self._stop.clear()
         remote_loop = (
             "while :; do "
-            "ts=$(date +%s.%N); "
+            "ts=$(date +%%s.%%N); "
             "watts=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits | awk '{sum += $1} END {print sum+0}'); "
             "printf '%%s,%%s\\n' \"$ts\" \"$watts\"; "
             "sleep %s; "
