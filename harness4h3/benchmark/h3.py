@@ -310,6 +310,8 @@ class H3BenchmarkRunner:
         power_summary = power_sampler.summary() if power_sampler is not None else {}
         sampled_energy = power_summary.get("energy_j") if isinstance(power_summary, Mapping) else None
         measured_energy = measured.get("energy_j")
+        if power_sampler is not None:
+            quality_metrics["power_sampling"] = dict(power_summary)
         hardware = HardwareMetrics(
             latency_s=mean(latencies) if latencies else None,
             peak_memory_gb=peak_vram if peak_vram is not None else peak_ram,
