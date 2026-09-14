@@ -75,3 +75,19 @@ OpenAI Responses-compatible endpoint. To compare Controllers scientifically,
 hold the operator set, context schema, target, budget, task splits, worker,
 evaluator, and initial state fixed; report Controller calls, invalid plans,
 experiments, failures, wall time/GPU hours, and best feasible candidate.
+
+## Remote experience loop
+
+For the Linux L40×4 deployment, `harness4h3 remote-campaign` runs this fixed
+sequence: read trainer-result JSON and SHA-256 metadata over SSH; build the
+immutable lineage; evaluate the child through a localhost SSH tunnel to remote
+ComfyUI; sample system stats and `nvidia-smi` power; calculate Q/L/M/E and
+`R = αQ − βL/Lparent − γM/Mparent − δE/Eparent`; then apply gates before
+promotion and Pareto update. Checkpoints are never copied during import.
+
+The Controller is fixed. Imported experiences are passed through its existing
+context as evidence; no Controller weights or prompt policy are optimized.
+The current remote worker uses a deterministic cached latent sample for
+training, and the default `structural_proxy` evaluator checks media validity,
+motion, and stability rather than semantic prompt fidelity. A semantic-quality
+claim requires configuring an independent semantic evaluator.

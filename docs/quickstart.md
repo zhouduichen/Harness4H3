@@ -102,3 +102,41 @@ See the [research index](../research/README.md) before interpreting their
 outputs as scientific evidence. M6 is an optional runtime-memory study; it is
 not required for moving the Harness to another device or establishing a real
 H3 baseline.
+
+## Remote L40×4 H3 campaign
+
+The configured SSH alias is `Jiayu-intern`. Remote checkpoints and trainer
+results remain on `/data/models/MiniMax-H3`; only JSON metadata and generated
+benchmark videos are copied to the local output directory.
+
+First perform a read-only import:
+
+```bash
+.venv/bin/python -m harness4h3 import-experience \
+  --remote-config configs/remote-l40-h3.yaml \
+  --output var/remote-h3/experience.jsonl --json
+```
+
+Run one controlled sanity benchmark and resume it later with the same output
+root:
+
+```bash
+.venv/bin/python -m harness4h3 remote-campaign \
+  --remote-config configs/remote-l40-h3.yaml \
+  --target configs/targets/l40x4_h3_example.yaml \
+  --output-root var/remote-h3 --max-experiments 1 --split sanity --json
+```
+
+For the full configured chain:
+
+```bash
+.venv/bin/python -m harness4h3 remote-campaign \
+  --remote-config configs/remote-l40-h3.yaml \
+  --target configs/targets/l40x4_h3_example.yaml \
+  --output-root var/remote-h3 --max-experiments 4 --json
+```
+
+`training_only_unvalidated` cannot become active; `evaluated_candidate` means
+measured but not promoted; `accepted` requires training, quality, hard-gate,
+and Q/L/M/E checks. The default evaluator is `structural_proxy`, so its score
+does not support a semantic video-quality claim.
