@@ -1,0 +1,26 @@
+id: l40x4_h3_v1
+
+hardware:
+  type: gpu
+  name: l40x4
+  backend: comfyui
+
+constraints:
+  max_model_size_gb: 70
+  max_peak_memory_gb: 46
+  max_latency_s: 300
+
+quality:
+  max_quality_drop: 0.05
+
+video:
+  resolution: 352x640
+  duration_s: 0.9167
+  fps: 24
+
+priority:
+  - feasibility
+  - quality
+  - latency
+  - memory
+  - energy

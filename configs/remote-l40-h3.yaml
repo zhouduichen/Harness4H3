@@ -1,0 +1,54 @@
+schema_version: 1
+quality_scope: structural_proxy
+research_grade: false
+
+remote:
+  host: Jiayu-intern
+  harness_root: /home/intern/huangjiahao/Harness4H3
+  model_root: /data/models/MiniMax-H3
+  comfyui_root: /home/intern/huangjiahao/ComfyUI
+  comfyui_port: 8188
+  python: /home/intern/miniconda3/envs/comfy/bin/python
+  training_python: /home/intern/miniconda3/envs/comfy/bin/python
+  results_root: /data/models/MiniMax-H3/harness4h3
+  deployment_dir: /home/intern/huangjiahao/ComfyUI/models/diffusion_models
+  campaign_root: /home/intern/huangjiahao/Harness4H3/work/remote-h3
+
+workflow:
+  template: ../examples/remote_linux_h3_workflow_api.json
+  prompt_target: {node_id: "139", input: prompt}
+  seed_target: {node_id: "137", input: noise_seed}
+  mutable:
+    steps: {node_id: "132", input: steps}
+    cfg: {node_id: "138", input: cfg}
+
+runtime:
+  experience_path: ../var/remote-h3/experience.jsonl
+  output_root: ../var/remote-h3/benchmark
+  tasks_path: ../examples/tasks.yaml
+
+reward:
+  alpha: 1.0
+  beta: 0.2
+  gamma: 0.2
+  delta: 0.2
+
+benchmark:
+  splits: [sanity, dev, heldout]
+  sampling_interval_s: 1.0
+  evaluator_command: []
+  evaluator_timeout_s: 120
+  reset_backend_before_run: true
+  black_frame_rate_threshold: 0.0
+  efficiency_thresholds:
+    latency_s: 0.10
+    peak_memory_gb: 0.05
+    energy_j: 0.10
+
+worker:
+  enabled: true
+  entrypoint: /home/intern/huangjiahao/Harness4H3/h3_training/tools/h3_real_train_worker.py
+  config_template: /home/intern/huangjiahao/Harness4H3/configs/a1-worker.l40x4-distill4.json
+  python: /home/intern/miniconda3/envs/comfy/bin/python
+  allowed_operators: [recovery_finetune, step_distill]
+  max_steps: 32
