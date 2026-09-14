@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -421,6 +421,43 @@ class RemoteCampaign:
             )
         )
 
+    def _persist_evaluation_state(self, candidate: ModelCandidate, summary: Mapping[str, Any]) -> ModelCandidate:
+        """Make the latest measured evidence available to the next plan."""
+
+        hardware = _hardware(summary.get("hardware", {}))
+        measured = dict(candidate.state.measured_metrics)
+        if isinstance(summary.get("quality_score"), (int, float)):
+            measured["quality_score"] = float(summary["quality_score"])
+        for key in ("latency_s", "peak_memory_gb", "model_size_gb", "energy_j", "throughput"):
+            if isinstance(hardware.get(key), (int, float)):
+                measured[key] = float(hardware[key])
+        state = replace(
+            candidate.state,
+            measured_metrics=measured,
+            runtime_state={
+                **dict(candidate.state.runtime_state),
+                "last_evaluation_signature": summary.get("evaluation_signature"),
+                "quality_scope": self.config.quality_scope,
+            },
+        )
+        updated = replace(candidate, state=state)
+        self.models.update(updated)
+        return updated
+
+    @staticmethod
+    def _worker_operator_args(operator: str, args: Mapping[str, Any], parent: ModelCandidate) -> Dict[str, Any]:
+        """Adapt a fixed plan to the real worker's step-distill contract."""
+
+        normalized = dict(args)
+        if operator == "step_distill":
+            source_steps = int(parent.state.sampling_steps or 32)
+            target_steps = int(normalized.get("target_steps", 0))
+            if source_steps <= 1 or source_steps % 2:
+                raise ValueError("step_distill requires an even positive parent sampling_steps")
+            if source_steps != 2 * target_steps:
+                normalized["target_steps"] = source_steps // 2
+        return normalized
+
     def _controller_context(self, current: ModelCandidate, training_calls: int) -> ControllerContext:
         recent = [item.to_dict() for item in list(self.experience.read())[-16:]]
         failures = [item for item in recent if item.get("status") in {"failed", "rejected"}]
@@ -449,6 +486,10 @@ class RemoteCampaign:
             self.registry.validate(plan.operator, parent.state, plan.operator_args, self.target)
         except Exception:
             return None
+        try:
+            operator_args = self._worker_operator_args(plan.operator, plan.operator_args, parent)
+        except ValueError:
+            return None
         child_id = self.models.next_id()
         request_path = str(Path(self.config.remote.resolved_campaign_root) / (plan.experiment_id + "-request.json"))
         result_path = str(Path(self.config.remote.resolved_campaign_root) / ("trainer_result_%s.json" % child_id.lower()))
@@ -457,7 +498,7 @@ class RemoteCampaign:
         dynamic = dict(template)
         dynamic.update({"model_checkpoint": parent.checkpoint_path, "output_dir": output_dir, "source_steps": parent.state.sampling_steps or 32})
         if plan.operator == "step_distill":
-            dynamic["target_steps"] = int(plan.operator_args["target_steps"])
+            dynamic["target_steps"] = int(operator_args["target_steps"])
         if plan.operator == "recovery_finetune":
             dynamic["max_steps"] = min(int(plan.operator_args.get("training_steps", dynamic.get("max_steps", 1))), self.config.worker.max_steps)
         self.ssh.write_json(str(Path(self.config.remote.resolved_campaign_root) / (plan.experiment_id + "-config.json")), dynamic)
@@ -465,7 +506,7 @@ class RemoteCampaign:
             "experiment_id": plan.experiment_id,
             "child_model_id": child_id,
             "operator": plan.operator,
-            "operator_args": dict(plan.operator_args),
+            "operator_args": operator_args,
             "parent": {"model_id": parent.id, "checkpoint_path": parent.checkpoint_path},
             "artifacts_dir": output_dir,
         }
@@ -515,9 +556,13 @@ class RemoteCampaign:
                 parent_summary = self._evaluate(parent, None, split)
                 evaluations[parent.id] = parent_summary
                 self._save_evaluations(evaluations)
+            parent = self._persist_evaluation_state(parent, parent_summary)
+            candidates[parent.id] = parent
             summary = self._evaluate(candidate, parent_summary, split)
             evaluations[child_id] = summary
             self._save_evaluations(evaluations)
+            candidate = self._persist_evaluation_state(candidate, summary)
+            candidates[child_id] = candidate
             training = dict(record.training)
             decision = decide(AcceptanceInput(training, summary, parent_summary, self.target, self.config.efficiency_thresholds, self.config.reward, self.config.research_grade))
             latest_records[child_id] = self._append_evaluated_experience(record, summary, decision)

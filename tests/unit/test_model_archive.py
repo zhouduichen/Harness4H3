@@ -39,6 +39,24 @@ def test_model_store_is_immutable_and_supports_branching(tmp_path):
     assert store.next_id() == "M0003"
 
 
+def test_model_store_can_enrich_evidence_without_changing_lineage(tmp_path):
+    store = ModelStore(tmp_path)
+    root = candidate("M0000")
+    store.initialize(root)
+    enriched = ModelCandidate(
+        root.id,
+        root.parent_id,
+        root.generation,
+        root.checkpoint_path,
+        ModelState.from_dict({**root.state.to_dict(), "measured_metrics": {"latency_s": 12.0}}),
+        root.created_by_experiment_id,
+        root.status,
+        root.metadata,
+    )
+    store.update(enriched)
+    assert store.get("M0000").state.measured_metrics["latency_s"] == 12.0
+
+
 def test_pareto_archive_keeps_quality_and_latency_branches(tmp_path):
     high_quality = evaluation(0.90, 50, 8)
     low_latency = evaluation(0.85, 25, 8)

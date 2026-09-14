@@ -60,6 +60,34 @@ class ModelStore:
             raise ModelCandidateExists("model candidate %s already exists" % candidate.id)
         return candidate
 
+    def update(self, candidate: ModelCandidate) -> ModelCandidate:
+        """Persist mutable evidence for an existing candidate.
+
+        Candidate identity and lineage remain immutable; evaluation metrics and
+        runtime provenance may be enriched after a benchmark completes.
+        """
+
+        existing = self.get(candidate.id)
+        if (
+            existing.parent_id != candidate.parent_id
+            or existing.generation != candidate.generation
+            or existing.checkpoint_path != candidate.checkpoint_path
+        ):
+            raise ModelStoreError("candidate identity is immutable: %s" % candidate.id)
+        path = self.candidates_dir / (candidate.id + ".json")
+        fd, temporary = tempfile.mkstemp(prefix=path.name + ".tmp-", dir=str(self.candidates_dir))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(candidate.to_dict(), handle, ensure_ascii=False, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return candidate
+
     def get(self, candidate_id: str) -> ModelCandidate:
         if not MODEL_ID_PATTERN.fullmatch(candidate_id):
             raise ModelStoreError("invalid model candidate id %r" % candidate_id)
