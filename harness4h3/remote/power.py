@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import subprocess
 import threading
 import time
 from typing import Any, List, Optional, Sequence, Tuple
@@ -39,6 +40,7 @@ class RemotePowerSampler:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
+        self._process: Optional[subprocess.Popen] = None
 
     @staticmethod
     def _parse(stdout: Any) -> Optional[float]:
@@ -76,19 +78,73 @@ class RemotePowerSampler:
         while not self._stop.wait(self.interval_s):
             self._sample()
 
+    def _run_stream(self) -> None:
+        process = self._process
+        if process is None or process.stdout is None:
+            return
+        try:
+            for line in iter(process.stdout.readline, ""):
+                if self._stop.is_set():
+                    break
+                raw = str(line).strip()
+                if not raw or "," not in raw:
+                    continue
+                timestamp_raw, power_raw = raw.split(",", 1)
+                try:
+                    timestamp, power = float(timestamp_raw), float(power_raw)
+                except ValueError:
+                    continue
+                if math.isfinite(timestamp) and math.isfinite(power) and power >= 0:
+                    with self._lock:
+                        self.samples.append((timestamp, power))
+        except (OSError, ValueError) as exc:
+            with self._lock:
+                self.errors.append(str(exc))
+
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             raise RuntimeError("power sampler is already running")
         self._stop.clear()
-        self._sample()
-        self._thread = threading.Thread(target=self._run, name="harness4h3-remote-power", daemon=True)
+        remote_loop = (
+            "while :; do "
+            "ts=$(date +%s.%N); "
+            "watts=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits | awk '{sum += $1} END {print sum+0}'); "
+            "printf '%s,%s\\n' \"$ts\" \"$watts\"; "
+            "sleep %s; "
+            "done"
+        ) % self.interval_s
+        try:
+            self._process = subprocess.Popen(
+                ["ssh", "-T", self.client.config.host, remote_loop],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self._thread = threading.Thread(target=self._run_stream, name="harness4h3-remote-power", daemon=True)
+        except OSError as exc:
+            with self._lock:
+                self.errors.append(str(exc))
+            self._process = None
+            self._sample()
+            self._thread = threading.Thread(target=self._run, name="harness4h3-remote-power", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
+        process, self._process = self._process, None
+        if process is not None and process.poll() is None:
+            process.terminate()
         if self._thread is not None:
             self._thread.join(timeout=max(1.0, self.interval_s + 1.0))
-        self._sample()
+        if process is not None:
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2.0)
+        else:
+            self._sample()
 
     def summary(self):
         with self._lock:
