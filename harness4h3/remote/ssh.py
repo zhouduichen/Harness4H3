@@ -266,6 +266,12 @@ class ComfyUITunnel:
         argv = [
             "ssh",
             "-N",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "ServerAliveInterval=30",
+            "-o",
+            "ServerAliveCountMax=10",
             "-L",
             "%d:127.0.0.1:%d" % (self.local_port, int(self.client.config.comfyui_port)),
             self.client.config.host,
@@ -274,7 +280,13 @@ class ComfyUITunnel:
         deadline = time.monotonic() + self.connect_timeout_s
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
-                raise RemoteError("ComfyUI tunnel exited with code %s" % self.process.returncode)
+                stderr = ""
+                if self.process.stderr is not None:
+                    try:
+                        stderr = self.process.stderr.read().decode("utf-8", errors="replace").strip()
+                    except (AttributeError, OSError):
+                        stderr = ""
+                raise RemoteError("ComfyUI tunnel exited with code %s%s" % (self.process.returncode, (": " + stderr) if stderr else ""))
             probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             probe.settimeout(0.2)
             try:
