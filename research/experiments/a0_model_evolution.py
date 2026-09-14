@@ -137,6 +137,237 @@ def _evaluation_dict(result: Optional[EvaluationResult]) -> Mapping[str, Any]:
     return result.to_dict() if result is not None else {}
 
 
+_RETENTION_POLICY = "v1"
+_RETENTION_CHECKPOINT_SUFFIXES = frozenset({".bin", ".ckpt", ".gguf", ".pt", ".pth", ".safetensors"})
+_RETENTION_STATE_SUFFIXES = frozenset({".bin", ".data", ".opt", ".optimizer", ".pth", ".pt", ".state"})
+
+
+def _retention_record(
+    checkpoint_path: Optional[Any],
+    retained: bool,
+    reason: str,
+    deleted: bool,
+    delete_error: Optional[str],
+    deleted_paths: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Dict[str, Any]:
+    record: Dict[str, Any] = {
+        "policy": _RETENTION_POLICY,
+        "checkpoint_path": str(checkpoint_path) if checkpoint_path is not None else None,
+        "retained": bool(retained),
+        "reason": str(reason),
+        "deleted": bool(deleted),
+        "delete_error": delete_error,
+    }
+    if deleted_paths is not None:
+        record["deleted_paths"] = [dict(item) for item in deleted_paths]
+    return record
+
+
+def _resolve_retention_path(value: Any) -> Tuple[Optional[Path], Optional[str]]:
+    if value is None:
+        return None, "path_missing"
+    raw = str(value)
+    if not raw:
+        return None, "path_missing"
+    if "://" in raw:
+        return None, "non_local_path_refused"
+    try:
+        return Path(raw).resolve(strict=False), None
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return None, "path_resolve_failed: %s" % exc
+
+
+def _is_within_retention_root(root: Path, target: Path) -> bool:
+    if target == root:
+        return False
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _protected_retention_reason(target: Path, model_id: Optional[str], parent: Optional[Path]) -> Optional[str]:
+    if str(model_id or "") == "M0000" or "m0000" in target.name.lower():
+        return "m0000_protected"
+    if parent is not None and target == parent:
+        return "immutable_parent_protected"
+    if any(marker in target.name.lower() for marker in ("baseline", "parent")):
+        return "immutable_parent_protected"
+    return None
+
+
+def _delete_retention_file(
+    output_root: Path,
+    value: Any,
+    model_id: Optional[str],
+    parent_checkpoint_path: Optional[Any],
+) -> Tuple[bool, bool, Optional[str]]:
+    """Return ``(deleted, retained, error)`` for one safe, non-recursive target."""
+
+    target, resolve_error = _resolve_retention_path(value)
+    if target is None:
+        if resolve_error == "path_missing":
+            return False, False, resolve_error
+        return False, True, resolve_error
+
+    if not _is_within_retention_root(output_root, target):
+        return False, True, "path_outside_output_root"
+
+    parent, _ = _resolve_retention_path(parent_checkpoint_path)
+    protected = _protected_retention_reason(target, model_id, parent)
+    if protected:
+        return False, True, protected
+
+    # Resolve first for containment, then refuse a symlink rather than unlinking
+    # through an alias. This also covers dangling symlinks before ``exists``.
+    lexical = Path(str(value))
+    try:
+        if lexical.is_symlink() or target.is_symlink():
+            return False, True, "symlink_target_refused"
+        if not target.exists():
+            return True, False, None
+        if not target.is_file():
+            return False, True, "non_file_target_refused"
+        target.unlink()
+    except OSError as exc:
+        return False, True, "%s: %s" % (type(exc).__name__, exc)
+    return True, False, None
+
+
+def _is_failed_cleanup_file(value: Any) -> bool:
+    name = Path(str(value)).name.lower()
+    if name.endswith(".evidence.json") or name.endswith(".json") or name.endswith(".log"):
+        return False
+    suffix = Path(name).suffix
+    if suffix in _RETENTION_CHECKPOINT_SUFFIXES:
+        return True
+    return suffix in _RETENTION_STATE_SUFFIXES and any(
+        marker in name for marker in ("checkpoint", "optim", "trainer", "training", "state")
+    )
+
+
+def _failed_retention_targets(
+    output_root: Path,
+    checkpoint_path: Optional[Any],
+    experiment_dir: Optional[Any],
+    cleanup_paths: Sequence[Any],
+) -> List[Any]:
+    targets: List[Any] = []
+    seen: Set[str] = set()
+
+    def add(value: Any) -> None:
+        key = str(value)
+        if key not in seen:
+            seen.add(key)
+            targets.append(value)
+
+    if checkpoint_path is not None:
+        add(checkpoint_path)
+    for value in cleanup_paths:
+        if _is_failed_cleanup_file(value):
+            add(value)
+
+    if experiment_dir is not None:
+        experiment_path, error = _resolve_retention_path(experiment_dir)
+        if experiment_path is not None and error is None and _is_within_retention_root(output_root, experiment_path):
+            try:
+                if experiment_path.is_dir():
+                    for value in experiment_path.rglob("*"):
+                        if value.is_file() and _is_failed_cleanup_file(value):
+                            add(value)
+            except (OSError, RuntimeError):
+                # The safe primary target/explicit paths still get recorded;
+                # directory discovery failure must not abort the campaign.
+                pass
+    return targets
+
+
+def apply_checkpoint_retention(
+    output_root: Path,
+    outcome: str,
+    checkpoint_path: Optional[Any],
+    parent_checkpoint_path: Optional[Any],
+    model_id: Optional[str],
+    experiment_dir: Optional[Path] = None,
+    cleanup_paths: Sequence[Any] = (),
+) -> Dict[str, Any]:
+    """Apply retention V1 without allowing deletion outside ``output_root``.
+
+    This helper is deliberately independent of model selection and evaluation.
+    It records refusal/error state instead of allowing cleanup problems to
+    change the historical experiment outcome.
+    """
+
+    try:
+        resolved_root = Path(output_root).resolve(strict=False)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return _retention_record(
+            checkpoint_path,
+            retained=True,
+            reason=outcome,
+            deleted=False,
+            delete_error="output_root_resolve_failed: %s" % exc,
+        )
+
+    if outcome == "accepted_candidate":
+        return _retention_record(checkpoint_path, True, outcome, False, None)
+
+    if outcome == "rejected_candidate":
+        if checkpoint_path is None:
+            return _retention_record(checkpoint_path, False, outcome, False, "checkpoint_path_missing")
+        deleted, retained, error = _delete_retention_file(
+            resolved_root,
+            checkpoint_path,
+            model_id,
+            parent_checkpoint_path,
+        )
+        return _retention_record(checkpoint_path, retained, outcome, deleted, error)
+
+    if outcome == "failed_experiment":
+        try:
+            targets = _failed_retention_targets(
+                resolved_root,
+                checkpoint_path,
+                experiment_dir,
+                cleanup_paths or (),
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return _retention_record(
+                checkpoint_path,
+                retained=True,
+                reason=outcome,
+                deleted=False,
+                delete_error="target_discovery_failed: %s" % exc,
+            )
+        target_records: List[Mapping[str, Any]] = []
+        errors: List[str] = []
+        retained_any = False
+        deleted_all = bool(targets)
+        for target in targets:
+            deleted, retained, error = _delete_retention_file(
+                resolved_root,
+                target,
+                model_id,
+                parent_checkpoint_path,
+            )
+            target_records.append({"path": str(target), "deleted": deleted, "delete_error": error})
+            retained_any = retained_any or retained
+            deleted_all = deleted_all and deleted
+            if error:
+                errors.append("%s: %s" % (target, error))
+        return _retention_record(
+            checkpoint_path,
+            retained_any,
+            outcome,
+            deleted_all,
+            "; ".join(errors) if errors else None,
+            target_records,
+        )
+
+    return _retention_record(checkpoint_path, True, outcome, False, "unknown_outcome_refused")
+
+
 class A0RuleBasedController:
     """Deterministic controller used by offline A0 preflight and CI."""
 
@@ -470,6 +701,18 @@ class A0Campaign:
             keep = outcome == "accepted_candidate"
             final_accept = bool(keep and self.stop_on_target and target_satisfied)
             decision_status = "final_accept" if final_accept else "search_keep" if keep else "reject"
+            output_state = operator_result.output_state if operator_result is not None else None
+            checkpoint_path = child.checkpoint_path if child is not None else (output_state.checkpoint_path if output_state is not None else None)
+            checkpoint_model_id = child.id if child is not None else (output_state.model_id if output_state is not None else None)
+            retention = apply_checkpoint_retention(
+                self.output_root,
+                outcome,
+                checkpoint_path,
+                state_before.checkpoint_path,
+                checkpoint_model_id,
+                experiment_dir=self.output_root / "runs" / experiment_id,
+                cleanup_paths=operator_result.artifacts if operator_result is not None else (),
+            )
             active_after = model_store.active()
             record: Dict[str, Any] = {
                 "iteration": budget.used_experiments - 1,
@@ -501,6 +744,7 @@ class A0Campaign:
                 "operator_executed": operator_result is not None,
                 "state_after": operator_result.output_state.to_dict() if operator_result and operator_result.output_state else state_before.to_dict(),
                 "active_state_after": active_after.state.to_dict(),
+                "checkpoint_retention": retention,
                 "next_decision_context": {
                     "active_parent_id": active_after.id,
                     "active_parent_state_digest": _state_digest(active_after.state),
@@ -547,6 +791,7 @@ class A0Campaign:
                         {"action": "model_operator", "operator_result": record["execution_result"]},
                         {"action": "fidelity_evaluation", "results": tier_results},
                         {"action": "campaign_decision", "outcome": outcome, "reason": reason},
+                        {"action": "checkpoint_retention", "retention": retention},
                     ],
                     final_result={"model_child_id": child.id if child else None, "outcome": outcome},
                     score=evaluation.quality_score if evaluation else None,
