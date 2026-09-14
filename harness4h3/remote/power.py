@@ -114,7 +114,7 @@ class RemotePowerSampler:
             "while :; do "
             "ts=$(date +%s.%N); "
             "watts=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits | awk '{sum += $1} END {print sum+0}'); "
-            "printf '%s,%s\\n' \"$ts\" \"$watts\"; "
+            "printf '%%s,%%s\\n' \"$ts\" \"$watts\"; "
             "sleep %s; "
             "done"
         ) % self.interval_s
