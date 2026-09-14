@@ -176,6 +176,18 @@ class RemoteCampaign:
     def _save_evaluations(self, values: Mapping[str, Mapping[str, Any]]) -> None:
         _atomic_json(self.evaluations_path, values)
 
+    def _evaluation_signature(self, split: Optional[str]) -> str:
+        payload = {
+            "target": self.target.to_dict(),
+            "split": split or "all",
+            "workflow": str(self.config.workflow.template),
+            "quality_scope": self.config.quality_scope,
+        }
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _evaluation_is_current(self, summary: Mapping[str, Any], split: Optional[str]) -> bool:
+        return summary.get("evaluation_signature") == self._evaluation_signature(split)
+
     def _load_campaign_state(self) -> Dict[str, Any]:
         if not self.campaign_state_path.exists():
             return {"evaluated_ids": [], "training_calls": 0, "current_model_id": "M0000"}
@@ -298,7 +310,9 @@ class RemoteCampaign:
                 hard_gates = summary.get("hard_gates") or {}
                 if name == "sanity" and not all(hard_gates.get(key) is True for key in ("generation_valid", "decode_success", "no_critical_temporal_collapse")):
                     break
-        return self._aggregate_summaries(candidate.id, summaries)
+        aggregated = self._aggregate_summaries(candidate.id, summaries)
+        aggregated["evaluation_signature"] = self._evaluation_signature(split)
+        return aggregated
 
     @staticmethod
     def _aggregate_summaries(model_id: str, summaries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -490,14 +504,14 @@ class RemoteCampaign:
         tunnel_work = False
         for record in ordered:
             child_id = str(record.child_model_id)
-            if child_id in evaluations or evaluated_count >= max_experiments:
+            if self._evaluation_is_current(evaluations.get(child_id, {}), split) or evaluated_count >= max_experiments:
                 continue
             candidate = candidates[child_id]
             parent = candidates.get(record.parent_model_id or "M0000")
             if parent is None:
                 continue
             parent_summary = evaluations.get(parent.id)
-            if parent_summary is None:
+            if parent_summary is None or not self._evaluation_is_current(parent_summary, split):
                 parent_summary = self._evaluate(parent, None, split)
                 evaluations[parent.id] = parent_summary
                 self._save_evaluations(evaluations)
