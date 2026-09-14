@@ -23,7 +23,7 @@ from harness4h3.backends.comfyui import MiniMaxH3Adapter
 from harness4h3.benchmark.h3 import BenchmarkSummary, H3BenchmarkRunner
 from harness4h3.config import Target, WorkflowConfig
 from harness4h3.controller.context import ControllerContext
-from harness4h3.controller.policy import PlanValidationError, ValidationPipeline
+from harness4h3.controller.policy import ValidationPipeline
 from harness4h3.controller.provider import ControllerProvider, RuleBasedMockController
 from harness4h3.controller.schemas import BudgetState, EvaluationResult, HardwareMetrics
 from harness4h3.evaluator.evaluator import SubprocessEvaluator
@@ -139,6 +139,7 @@ class RemoteCampaign:
         self.tunnel_factory = tunnel_factory or (lambda client: ComfyUITunnel(client))
         self.validation = ValidationPipeline()
         self.registry = build_model_evolution_registry()
+        self.controller_trace: List[Dict[str, Any]] = []
 
     @classmethod
     def from_config_path(cls, path: Path, **kwargs: Any) -> "RemoteCampaign":
@@ -470,21 +471,52 @@ class RemoteCampaign:
         visible = tuple(item for item in self.registry.visible() if item["name"] in set(self.config.worker.allowed_operators))
         return ControllerContext(self.target, current.state, budget, visible, recent, failures, [entry.to_dict() for entry in self.pareto.front()])
 
-    def _train_one(self, parent: ModelCandidate, training_calls: int) -> Optional[ExperienceRecord]:
-        if not self.config.worker.enabled:
-            return None
+    def _controller_plan(self, parent: ModelCandidate, training_calls: int) -> Optional[Any]:
+        """Ask the Controller for the next plan and retain an auditable trace."""
+
         context = self._controller_context(parent, training_calls)
-        raw_plan = self.controller.plan(context)
+        trace: Dict[str, Any] = {
+            "parent_model_id": parent.id,
+            "training_calls": training_calls,
+            "input_metrics": dict(parent.state.measured_metrics),
+            "context_experience_ids": [
+                str(item.get("experience_id"))
+                for item in context.recent_experiments
+                if item.get("experience_id")
+            ],
+        }
         try:
+            raw_plan = self.controller.plan(context)
+            trace["raw_plan"] = raw_plan.to_dict() if hasattr(raw_plan, "to_dict") else raw_plan
             plan = self.validation.schema.validate(raw_plan)
             self.validation.policy.validate(plan, parent.state, context.budget_state)
-        except PlanValidationError:
+        except Exception as exc:
+            trace["status"] = "rejected"
+            trace["error"] = str(exc)
+            self.controller_trace.append(trace)
             return None
         if plan.operator not in set(self.config.worker.allowed_operators):
+            trace["status"] = "rejected"
+            trace["error"] = "operator_not_allowed"
+            self.controller_trace.append(trace)
             return None
         try:
             self.registry.validate(plan.operator, parent.state, plan.operator_args, self.target)
-        except Exception:
+        except Exception as exc:
+            trace["status"] = "rejected"
+            trace["error"] = str(exc)
+            self.controller_trace.append(trace)
+            return None
+        trace["status"] = "validated"
+        trace["plan"] = plan.to_dict()
+        self.controller_trace.append(trace)
+        return plan
+
+    def _train_one(self, parent: ModelCandidate, training_calls: int) -> Optional[ExperienceRecord]:
+        if not self.config.worker.enabled:
+            return None
+        plan = self._controller_plan(parent, training_calls)
+        if plan is None:
             return None
         try:
             operator_args = self._worker_operator_args(plan.operator, plan.operator_args, parent)
@@ -534,6 +566,7 @@ class RemoteCampaign:
     def run(self, resume: bool = True, max_experiments: int = 1, split: Optional[str] = None) -> CampaignResult:
         if max_experiments <= 0:
             raise ValueError("max_experiments must be positive")
+        self.controller_trace = []
         imported = self._import()
         all_records = list(self.experience.read())
         candidates = self._register_candidates(all_records)
@@ -577,6 +610,10 @@ class RemoteCampaign:
             if trained is not None:
                 state["training_calls"] = int(state.get("training_calls", 0)) + 1
                 self._save_campaign_state(state)
+        elif self.config.worker.enabled:
+            # A bounded run still lets the Controller inspect the newly
+            # measured evidence; execution waits for the next budget window.
+            self._controller_plan(self.models.active(), int(state.get("training_calls", 0)))
         report_metrics = {}
         for child_id, summary in evaluations.items():
             if child_id == "M0000":
@@ -597,6 +634,7 @@ class RemoteCampaign:
             "metrics": report_metrics,
             "quality_scope": self.config.quality_scope,
             "research_grade": self.config.research_grade,
+            "controller": {"calls": len(self.controller_trace), "trace": list(self.controller_trace)},
             "pareto_front": [entry.to_dict() for entry in self.pareto.front()],
             "claim_boundary": "structural_proxy is not semantic video quality",
         }
