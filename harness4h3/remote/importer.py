@@ -97,6 +97,8 @@ def normalize_trainer_result(
     checkpoint = output_state.get("checkpoint_path") or result.get("checkpoint_path")
     provenance = dict(_mapping(result.get("provenance")))
     provenance.update({"source_uri": source_uri, "source_sha256": source_sha256})
+    if output_state:
+        provenance.setdefault("output_state", dict(output_state))
     if checkpoint:
         provenance.setdefault("remote_checkpoint_path", str(checkpoint))
     if evidence.get("path"):
@@ -175,6 +177,21 @@ class RemoteResultImporter:
     def discover_remote(self, root: Optional[str] = None) -> ImportSummary:
         if self.client is None:
             raise RemoteError("discover_remote requires an SSH client")
+        if hasattr(self.client, "result_bundle"):
+            files = []
+            for item in self.client.result_bundle(root=root):
+                path = str(item.get("path", ""))
+                result = _mapping(item.get("result"))
+                if not path or not result:
+                    continue
+                files.append(
+                    {
+                        "source_uri": "ssh://%s%s" % (self.client.config.host, path),
+                        "source_sha256": str(item.get("sha256", "")),
+                        "result": result,
+                    }
+                )
+            return self.import_results(files)
         files: List[Mapping[str, Any]] = []
         for path in self.client.find("trainer_result_*.json", root=root):
             result = self.client.read_json(path)
@@ -197,4 +214,3 @@ class RemoteResultImporter:
                 }
             )
         return self.import_results(files)
-

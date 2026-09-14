@@ -26,6 +26,7 @@ runtime:
   experience_path: ../var/remote-h3/experience.jsonl
   output_root: ../var/remote-h3/benchmark
   tasks_path: ../examples/tasks.yaml
+  target_path: targets/l40x4_h3_example.yaml
 
 reward:
   alpha: 1.0
@@ -47,8 +48,8 @@ benchmark:
 
 worker:
   enabled: true
-  entrypoint: /home/intern/huangjiahao/Harness4H3/h3_training/tools/h3_real_train_worker.py
+  entrypoint: /home/intern/huangjiahao/Harness4H3/tools/h3_real_train_worker.py
   config_template: /home/intern/huangjiahao/Harness4H3/configs/a1-worker.l40x4-distill4.json
-  python: /home/intern/miniconda3/envs/comfy/bin/python
+  python: /home/intern/miniconda3/envs/comfy/bin/torchrun
   allowed_operators: [recovery_finetune, step_distill]
   max_steps: 32

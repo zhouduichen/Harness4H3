@@ -17,11 +17,13 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
+from .. import Harness4H3Error
+
 
 _MAX_METADATA_BYTES = 8 * 1024 * 1024
 
 
-class RemoteError(RuntimeError):
+class RemoteError(Harness4H3Error):
     """Base class for expected remote transport failures."""
 
 
@@ -191,6 +193,28 @@ class SSHClient:
         result = self.run(("find", base, "-type", "f", "-name", pattern, "-print"))
         return [line.strip() for line in str(getattr(result, "stdout", "")).splitlines() if line.strip()]
 
+    def result_bundle(self, root: Optional[str] = None) -> List[Mapping[str, Any]]:
+        """Read result JSON and its digest in one SSH round trip."""
+
+        base = self._path(root or self.config.results_root or self.config.harness_root)
+        script = (
+            "import glob,hashlib,json,pathlib,sys\n"
+            "root=sys.argv[1]\n"
+            "paths=glob.glob(root+'/**/trainer_result_*.json',recursive=True)\n"
+            "for p in paths:\n"
+            "    path=pathlib.Path(p)\n"
+            "    digest=hashlib.sha256(path.read_bytes()).hexdigest()\n"
+            "    print(json.dumps({'path':p,'sha256':digest,'result':json.loads(path.read_text())},ensure_ascii=False,separators=(',',':')))\n"
+        )
+        result = self.run((self.config.python, "-c", script, base))
+        bundle: List[Mapping[str, Any]] = []
+        for line in str(getattr(result, "stdout", "")).splitlines():
+            if line.strip():
+                value = json.loads(line)
+                if isinstance(value, Mapping):
+                    bundle.append(value)
+        return bundle
+
     def sha256(self, path: str) -> str:
         checked = self._path(path)
         result = self.run(("sha256sum", "--", checked))
@@ -273,4 +297,3 @@ class ComfyUITunnel:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2.0)
-

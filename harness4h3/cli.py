@@ -29,6 +29,9 @@ from .h3.inspector import H3Inspector
 from .memory.experiment_store import ExperimentStore
 from .memory.trajectory import TrajectoryStore
 from .model.minimax_h3 import MiniMaxH3Adapter
+from .remote.config import load_remote_campaign_config
+from .remote.importer import RemoteResultImporter
+from .remote.ssh import RemoteError, SSHClient
 from .operators.fake import FakeOperatorBackend, build_fake_registry
 from .self_improve.evolve import EvolutionController
 from research.experiments.a0_model_evolution import (
@@ -41,6 +44,7 @@ from research.experiments.a1_real_evolution import run_a1
 from .operators.model_evolution import build_external_model_evolution_registry, build_model_evolution_registry
 from .executor.local import LocalProcessExecutor
 from .target.profile import load_target_profile
+from research.experiments.remote_h3_closed_loop import RemoteCampaign
 
 
 def _emit(value: Any, json_mode: bool) -> None:
@@ -433,6 +437,39 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     return 0 if summary.feasible is not False else 1
 
 
+class _NoWriteExperienceStore:
+    def append(self, record):
+        return True
+
+
+def cmd_import_experience(args: argparse.Namespace) -> int:
+    config = load_remote_campaign_config(Path(args.remote_config))
+    output = Path(args.output).resolve()
+    store = _NoWriteExperienceStore()
+    if not args.dry_run:
+        from .memory.experience import ExperienceStore
+
+        store = ExperienceStore(output)
+    summary = RemoteResultImporter(store, SSHClient(config.remote)).discover_remote(root=config.remote.results_root)
+    payload = summary.to_dict()
+    payload.update({"output": str(output), "dry_run": bool(args.dry_run)})
+    _emit(payload, args.json)
+    return 0
+
+
+def cmd_remote_campaign(args: argparse.Namespace) -> int:
+    config = load_remote_campaign_config(Path(args.remote_config))
+    target = load_target_profile(Path(args.target).resolve()) if args.target else None
+    campaign = RemoteCampaign(
+        config,
+        target=target,
+        output_root=Path(args.output_root).resolve() if args.output_root else None,
+    )
+    result = campaign.run(resume=args.resume, max_experiments=args.max_experiments, split=args.split)
+    _emit(result.to_dict(), args.json)
+    return 0 if result.status in {"accepted", "completed"} else 1
+
+
 def cmd_model_lineage(args: argparse.Namespace) -> int:
     store = ModelStore(_session_root(args) / "models")
     items = store.lineage()
@@ -604,6 +641,23 @@ def build_parser() -> argparse.ArgumentParser:
     _json_flag(benchmark)
     benchmark.set_defaults(handler=cmd_benchmark)
 
+    import_experience = subparsers.add_parser("import-experience", help="read remote H3 trainer results into local experience memory")
+    import_experience.add_argument("--remote-config", required=True)
+    import_experience.add_argument("--output", required=True)
+    import_experience.add_argument("--dry-run", action="store_true", help="read and normalize without writing the JSONL store")
+    _json_flag(import_experience)
+    import_experience.set_defaults(handler=cmd_import_experience)
+
+    remote_campaign = subparsers.add_parser("remote-campaign", help="run the SSH-backed H3 import/evaluate/train/promotion loop")
+    remote_campaign.add_argument("--remote-config", required=True)
+    remote_campaign.add_argument("--target")
+    remote_campaign.add_argument("--output-root")
+    remote_campaign.add_argument("--max-experiments", type=int, default=1)
+    remote_campaign.add_argument("--split", choices=("sanity", "dev", "heldout", "all"), default=None)
+    remote_campaign.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    _json_flag(remote_campaign)
+    remote_campaign.set_defaults(handler=cmd_remote_campaign)
+
     lineage = subparsers.add_parser("lineage", help="show immutable model-candidate lineage")
     lineage.add_argument("--session-dir", default="var/evogen")
     _json_flag(lineage)
@@ -630,7 +684,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return int(args.handler(args))
-    except (Harness4H3Error, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+    except (Harness4H3Error, RemoteError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         if getattr(args, "json", False):
             print(json.dumps({"error": str(exc), "type": exc.__class__.__name__}, ensure_ascii=False))
         else:

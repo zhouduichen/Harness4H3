@@ -59,7 +59,10 @@ class RemotePowerSampler:
 
     def _sample(self) -> None:
         try:
-            result = self.client.run(self.QUERY, timeout_s=max(10.0, self.interval_s * 4.0))
+            # The configured SSH host may spend several seconds on its login
+            # path. Keep the command timeout independent of the sampling
+            # interval so a slow handshake does not silently erase energy.
+            result = self.client.run(self.QUERY, timeout_s=max(30.0, self.interval_s * 4.0))
             power = self._parse(getattr(result, "stdout", ""))
             if power is None:
                 raise ValueError("nvidia-smi returned no valid power values")
@@ -97,4 +100,3 @@ class RemotePowerSampler:
             "power_w_peak": max(item[1] for item in samples),
             "samples": len(samples),
         }
-

@@ -54,6 +54,7 @@ class RemoteRuntimeConfig:
     experience_path: Path
     output_root: Path
     tasks_path: Path
+    target_path: Path
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ def load_remote_campaign_config(path: Path) -> RemoteCampaignConfig:
         experience_path=_path(path.parent, runtime_raw.get("experience_path", "../var/remote-h3/experience.jsonl"), "runtime.experience_path"),
         output_root=_path(path.parent, runtime_raw.get("output_root", "../var/remote-h3/benchmark"), "runtime.output_root"),
         tasks_path=_path(path.parent, runtime_raw.get("tasks_path", "../examples/tasks.yaml"), "runtime.tasks_path"),
+        target_path=_path(path.parent, runtime_raw.get("target_path", "targets/l40x4_h3_example.yaml"), "runtime.target_path"),
     )
     weights = RewardWeights(
         _positive(reward_raw.get("alpha", 1.0), "reward.alpha", allow_zero=True),
@@ -175,4 +177,3 @@ def load_remote_campaign_config(path: Path) -> RemoteCampaignConfig:
         research_grade=bool(root.get("research_grade", False)),
         worker=worker,
     )
-
