@@ -22,7 +22,7 @@ student:
     provider: vllm
     model: qwen3.5-controller
     base_url: http://127.0.0.1:8000/v1
-    timeout_s: 180
+    timeout_s: 600
   # This must be a trusted, fixed evaluator entrypoint on the remote host.
   evaluation_command:
     - /home/intern/miniconda3/envs/comfy/bin/python

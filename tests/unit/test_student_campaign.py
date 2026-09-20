@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 
 from harness4h3.student.campaign import OpenAICompatibleStudentProposalProvider, StudentCampaign, student_proposal_json_schema
 from harness4h3.student.compiler import StudentCompiler
@@ -70,3 +71,32 @@ def test_openai_compatible_provider_parses_vllm_choices(monkeypatch):
     result = provider.propose({"round": 1})
     assert result["proposal_id"] == "student_0001"
     assert provider.endpoint.endswith("/v1/chat/completions")
+
+
+def test_openai_compatible_provider_waits_through_server_restart(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps(valid_payload(depth=36))}}]}).encode("utf-8")
+
+    calls = {"count": 0}
+
+    def urlopen(request, timeout):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise urllib.error.URLError("connection refused")
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("harness4h3.student.campaign.time.sleep", lambda _: None)
+    provider = OpenAICompatibleStudentProposalProvider(
+        "qwen3.5-controller", StudentTarget(), base_url="http://127.0.0.1:8000/v1", timeout_s=5
+    )
+    result = provider.propose({"round": 2})
+    assert result["proposal_id"] == "student_0001"
+    assert calls["count"] == 2

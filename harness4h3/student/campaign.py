@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import tempfile
 import urllib.error
 import urllib.request
@@ -144,6 +145,30 @@ def _parse_student_response(raw: Mapping[str, Any], *, source: str) -> Mapping[s
     return dict(parsed)
 
 
+def _request_json_with_retry(request: urllib.request.Request, timeout_s: float) -> Mapping[str, Any]:
+    """Wait through a server-local LLM handoff/restart without losing a round."""
+
+    deadline = time.monotonic() + max(1.0, float(timeout_s))
+    last_error: Optional[BaseException] = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if last_error is not None:
+                raise last_error
+            raise urllib.error.URLError("proposal request timeout")
+        try:
+            with urllib.request.urlopen(request, timeout=min(30.0, max(1.0, remaining))) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+            if not isinstance(raw, Mapping):
+                raise ValueError("proposal response must be a JSON object")
+            return dict(raw)
+        except urllib.error.HTTPError:
+            raise
+        except (OSError, urllib.error.URLError) as exc:
+            last_error = exc
+            time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+
+
 class OllamaStudentProposalProvider:
     provider_name = "ollama"
 
@@ -171,8 +196,7 @@ class OllamaStudentProposalProvider:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
-                raw = json.loads(response.read().decode("utf-8"))
+            raw = _request_json_with_retry(request, self.timeout_s)
             parsed = _parse_student_response(raw, source="Ollama")
         except (OSError, urllib.error.URLError, urllib.error.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("proposal_invalid: Ollama proposal request failed: %s" % exc) from exc
@@ -213,8 +237,7 @@ class OpenAICompatibleStudentProposalProvider:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
-                raw = json.loads(response.read().decode("utf-8"))
+            raw = _request_json_with_retry(request, self.timeout_s)
             return dict(_parse_student_response(raw, source="OpenAI-compatible"))
         except urllib.error.HTTPError as exc:
             try:
