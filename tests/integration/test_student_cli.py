@@ -4,8 +4,12 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
+
+from harness4h3.student.config import load_student_campaign_config
+from harness4h3.student.remote import RemoteStudentSupervisor
 
 from tests.unit.test_student_proposal import valid_payload
 
@@ -75,14 +79,22 @@ def test_validate_and_compile_cli_are_offline(tmp_path):
     assert json.loads(compile_result.stdout)["graph_status"] == "compiled"
 
 
-def test_detach_is_not_claimed_before_supervisor_exists(tmp_path):
+def test_detach_builds_a_remote_supervisor_launch(tmp_path):
     config = write_config(tmp_path)
-    result = subprocess.run(
-        [sys.executable, "-m", "harness4h3", "student-campaign", "--student-config", str(config), "run", "--detach", "--json"],
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 2
-    assert "remote supervisor" in json.loads(result.stdout)["error"]
+    loaded = load_student_campaign_config(config)
+
+    class FakeClient:
+        def __init__(self):
+            self.commands = []
+
+        def run(self, argv, **kwargs):
+            self.commands.append(tuple(argv))
+            return SimpleNamespace(stdout="started:1234\n", returncode=0)
+
+    client = FakeClient()
+    payload = RemoteStudentSupervisor(loaded, client).start(2)
+    assert payload["status"] == "started"
+    assert payload["pid"] == 1234
+    command = " ".join(client.commands[0])
+    assert "nohup" in command
+    assert "student_campaign_supervisor.py" in command

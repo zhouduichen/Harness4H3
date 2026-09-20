@@ -7,6 +7,8 @@ student:
   worker_entrypoint: /home/intern/huangjiahao/Harness4H3/tools/student_train_worker.py
   worker_python: /home/intern/miniconda3/envs/comfy/bin/python
   remote_campaign_root: /home/intern/huangjiahao/Harness4H3/work/student-campaign
+  remote_config_path: /home/intern/huangjiahao/Harness4H3/configs/student-campaign.yaml
+  vae_name: minimax_h3_video_vae_fp16.safetensors
   local_output_root: var/student-campaign
   experience_path: var/student-campaign/experience.jsonl
   max_rounds: 4
@@ -27,8 +29,8 @@ student:
     max_peak_memory_gb: 72.0
     latent_channels: 24
     latent_frames: 5
-    latent_height: 32
-    latent_width: 32
+    latent_height: 16
+    latent_width: 16
     condition_dim: 5120
 
 remote:

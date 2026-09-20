@@ -10,10 +10,12 @@ from pathlib import Path
 
 try:
     from harness4h3.student.compiler import CompileManifest
+    from harness4h3.student.proposal import StudentTarget
     from harness4h3.student.worker import RealH3TeacherBackend, StudentTrainWorker, TrainingResult
 except ModuleNotFoundError:  # direct invocation from the repository root
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from harness4h3.student.compiler import CompileManifest
+    from harness4h3.student.proposal import StudentTarget
     from harness4h3.student.worker import RealH3TeacherBackend, StudentTrainWorker, TrainingResult
 
 
@@ -38,7 +40,8 @@ def main(argv=None) -> int:
     try:
         manifest = CompileManifest.from_path(manifest_path)
         backend = RealH3TeacherBackend(Path(args.comfyui_root), Path(args.cache_dir))
-        result = StudentTrainWorker(backend).run(
+        target = StudentTarget(**manifest.target)
+        result = StudentTrainWorker(backend, target=target).run(
             manifest,
             Path(args.teacher),
             Path(args.output),

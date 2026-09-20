@@ -66,7 +66,7 @@ The proposal has these top-level fields:
   "teacher": {"checkpoint": "...", "adapter": "minimax_h3"},
   "architecture": {
     "family": "video_latent_dit",
-    "latent_channels": 16,
+    "latent_channels": 24,
     "hidden_size": 4096,
     "depth": 28,
     "num_heads": 32,

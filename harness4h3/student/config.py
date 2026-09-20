@@ -69,6 +69,8 @@ class StudentCampaignConfig:
     worker_entrypoint: str
     worker_python: str
     remote_campaign_root: str
+    remote_config_path: str
+    vae_name: str
     local_output_root: Path
     experience_path: Path
     controller: StudentControllerConfig
@@ -145,15 +147,22 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         student.get("remote_campaign_root") or remote.resolved_campaign_root,
         "student.remote_campaign_root",
     )
+    remote_config_path = _absolute_remote(
+        student.get("remote_config_path") or str(PurePosixPath(remote.harness_root) / "configs" / path.name),
+        "student.remote_config_path",
+    )
     for name, value in (
         ("student.teacher_checkpoint", teacher_checkpoint),
         ("student.h3_cache_dir", h3_cache_dir),
         ("student.worker_entrypoint", worker_entrypoint),
         ("student.remote_campaign_root", remote_campaign_root),
+        ("student.remote_config_path", remote_config_path),
     ):
         _under(remote, value, name)
     if not remote._under_root(remote_campaign_root, remote.harness_root):
         raise StudentConfigError("student.remote_campaign_root must be under remote.harness_root")
+    if not remote._under_root(remote_config_path, remote.harness_root):
+        raise StudentConfigError("student.remote_config_path must be under remote.harness_root")
     worker_python = str(student.get("worker_python") or remote.training_python or remote.python).strip()
     if not worker_python:
         raise StudentConfigError("student.worker_python must not be empty")
@@ -169,6 +178,9 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
     if controller.timeout_s <= 0:
         raise StudentConfigError("student.controller.timeout_s must be positive")
     evaluation_command = _command(student.get("evaluation_command"), "student.evaluation_command")
+    vae_name = str(student.get("vae_name", "minimax_h3_video_vae_fp16.safetensors")).strip()
+    if not vae_name or "/" in vae_name or "\\" in vae_name:
+        raise StudentConfigError("student.vae_name must be a model filename")
     try:
         max_rounds = int(student.get("max_rounds", 4))
         max_failures = int(student.get("max_failures", 4))
@@ -188,6 +200,8 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         worker_entrypoint=worker_entrypoint,
         worker_python=worker_python,
         remote_campaign_root=remote_campaign_root,
+        remote_config_path=remote_config_path,
+        vae_name=vae_name,
         local_output_root=local_output_root,
         experience_path=experience_path,
         controller=controller,

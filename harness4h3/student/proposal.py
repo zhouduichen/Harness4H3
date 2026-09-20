@@ -377,6 +377,8 @@ class StudentProposal:
             errors.append("architecture.norm is unsupported")
         if architecture.activation not in {"silu", "gelu"}:
             errors.append("architecture.activation is unsupported")
+        if self.deployment.quantization == "int4":
+            errors.append("deployment.quantization=int4 is not supported by this worker; choose int8 or none")
         estimated = estimate_parameter_count(architecture, target.condition_dim)
         if not target.min_params <= estimated <= target.max_params:
             errors.append(

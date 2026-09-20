@@ -57,7 +57,7 @@ from .student.campaign import OllamaStudentProposalProvider, StudentCampaign
 from .student.compiler import StudentCompiler
 from .student.config import StudentConfigError, load_student_campaign_config
 from .student.proposal import StudentProposal
-from .student.remote import RemoteStudentEvaluator, RemoteStudentWorker
+from .student.remote import RemoteStudentEvaluator, RemoteStudentRetention, RemoteStudentSupervisor, RemoteStudentWorker
 
 
 def _emit(value: Any, json_mode: bool) -> None:
@@ -551,15 +551,17 @@ def cmd_student_compile(args: argparse.Namespace) -> int:
 
 def cmd_student_run(args: argparse.Namespace) -> int:
     config = _student_config(args)
+    client = LocalCommandClient(config.remote) if args.local_resources else SSHClient(config.remote)
     if args.detach:
-        raise StudentConfigError("--detach is reserved until the remote supervisor is deployed; use the persistent SSH session for now")
+        payload = RemoteStudentSupervisor(config, client).start(args.max_rounds or config.max_rounds)
+        _emit(payload, args.json)
+        return 0
     provider = OllamaStudentProposalProvider(
         config.controller.model,
         config.target,
         base_url=config.controller.base_url,
         timeout_s=config.controller.timeout_s,
     )
-    client = LocalCommandClient(config.remote) if args.local_resources else SSHClient(config.remote)
     campaign = StudentCampaign(
         provider,
         StudentCompiler(config.target),
@@ -570,10 +572,18 @@ def cmd_student_run(args: argparse.Namespace) -> int:
         output_root=config.local_output_root,
         experience_path=config.experience_path,
         max_failures=config.max_failures,
+        retention_handler=RemoteStudentRetention(config, client).retain,
     )
     result = campaign.run(max_rounds=args.max_rounds or config.max_rounds)
     _emit(result.to_dict(), args.json)
     return 0 if result.status == "success" else 1
+
+
+def cmd_student_status(args: argparse.Namespace) -> int:
+    config = _student_config(args)
+    client = LocalCommandClient(config.remote) if args.local_resources else SSHClient(config.remote)
+    _emit(RemoteStudentSupervisor(config, client).status(), args.json)
+    return 0
 
 
 def cmd_controller_status(args: argparse.Namespace) -> int:
@@ -854,10 +864,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     student_run = student_subparsers.add_parser("run", help="run the autonomous Student campaign through SSH")
     student_run.add_argument("--max-rounds", type=int)
-    student_run.add_argument("--detach", action="store_true", help="reserved for the remote supervisor launcher")
+    student_run.add_argument("--detach", action="store_true", help="start the remote campaign and return immediately")
     student_run.add_argument("--local-resources", action="store_true", help="execute trusted worker commands on this host")
     _json_flag(student_run)
     student_run.set_defaults(handler=cmd_student_run)
+
+    student_status = student_subparsers.add_parser("status", help="read one remote detached Student supervisor snapshot")
+    student_status.add_argument("--local-resources", action="store_true")
+    _json_flag(student_status)
+    student_status.set_defaults(handler=cmd_student_status)
 
     controller_status = subparsers.add_parser("controller-status", help="show or follow the Controller event stream")
     controller_status.add_argument("--output-root", default="var/remote-h3")

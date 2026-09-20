@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Optional, Protocol, Sequence
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from .compiler import CompileError, CompileManifest, StudentCompiler
 from .evaluator import StudentEvaluation, append_experience, make_experience_record
@@ -97,7 +97,7 @@ def student_proposal_json_schema(target: StudentTarget = StudentTarget()) -> Map
                 "additionalProperties": False,
                 "properties": {
                     "precision": {"type": "string", "enum": ["bf16", "fp16"]},
-                    "quantization": {"type": "string", "enum": ["none", "int8", "int4"]},
+                    "quantization": {"type": "string", "enum": ["none", "int8"]},
                 },
                 "required": ["precision", "quantization"],
             },
@@ -222,6 +222,7 @@ class StudentCampaign:
         output_root: Path,
         experience_path: Optional[Path] = None,
         max_failures: int = 4,
+        retention_handler: Optional[Callable[[TrainingResult, StudentEvaluation, str, str], None]] = None,
     ):
         self.provider = provider
         self.compiler = compiler
@@ -232,6 +233,7 @@ class StudentCampaign:
         self.output_root = Path(output_root).resolve()
         self.experience_path = Path(experience_path or self.output_root / "experience.jsonl").resolve()
         self.max_failures = int(max_failures)
+        self.retention_handler = retention_handler
         if self.max_failures < 0:
             raise ValueError("max_failures must be non-negative")
         self.events_path = self.output_root / "campaign-events.jsonl"
@@ -319,30 +321,32 @@ class StudentCampaign:
                             failure_code = evaluation.failure_code
                             message = evaluation.message
                             outcome = "accepted" if evaluation.promotable else "rejected"
-                            decision = retain_after_evaluation(
-                                Path(training.child_checkpoint),
-                                "student_%04d" % round_index,
+                            training_dict = training.to_dict()
+                            experience = make_experience_record(
+                                experience_id="student-exp-%04d" % round_index,
+                                proposal_digest=proposal.digest,
+                                compiler_digest=compile_manifest.manifest_digest,
+                                teacher_sha256=training.parent_sha256 or ("0" * 64),
+                                parent_checkpoint=None,
+                                child_checkpoint=training.child_checkpoint,
+                                training=training_dict,
+                                evaluation=evaluation,
                                 outcome=outcome,
-                                protected=(),
+                                diagnosis=message,
+                                next_round_hints=(failure_code or "evaluation_failed",),
                             )
-                            if outcome != "accepted":
-                                training_dict = training.to_dict()
-                                evaluation_dict = evaluation.to_dict()
-                                experience = make_experience_record(
-                                    experience_id="student-exp-%04d" % round_index,
-                                    proposal_digest=proposal.digest,
-                                    compiler_digest=compile_manifest.manifest_digest,
-                                    teacher_sha256=training.parent_sha256 or ("0" * 64),
-                                    parent_checkpoint=None,
-                                    child_checkpoint=training.child_checkpoint,
-                                    training=training_dict,
-                                    evaluation=evaluation,
+                            append_experience(self.experience_path, experience)
+                            if self.retention_handler is not None:
+                                self.retention_handler(training, evaluation, "student_%04d" % round_index, outcome)
+                            else:
+                                decision = retain_after_evaluation(
+                                    Path(training.child_checkpoint),
+                                    "student_%04d" % round_index,
                                     outcome=outcome,
-                                    diagnosis=message,
-                                    next_round_hints=(failure_code or "evaluation_failed",),
+                                    protected=(),
                                 )
-                                append_experience(self.experience_path, experience)
-                                apply_retention(decision)
+                                if outcome != "accepted":
+                                    apply_retention(decision)
                             if evaluation.promotable:
                                 rounds.append(CampaignRound(round_index, proposal, compile_manifest, training, evaluation, None, message))
                                 self._append_event({"round": round_index, "status": "success", "failure_code": None, "proposal_digest": proposal.digest, "llm_context": context})

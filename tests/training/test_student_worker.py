@@ -62,6 +62,9 @@ def test_worker_writes_changed_child_and_training_evidence(tmp_path):
     assert result.optimizer_steps >= 1
     assert result.offline_simulation is True
     assert result.changed_parameter_count > 0
+    assert result.quantization == "int8"
+    assert Path(result.full_precision_checkpoint).is_file()
+    assert Path(result.quantized_checkpoint).is_file()
 
 
 def test_worker_refuses_manifest_digest_mismatch(tmp_path):

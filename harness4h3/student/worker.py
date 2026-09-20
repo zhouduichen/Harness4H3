@@ -19,6 +19,7 @@ from torch.nn import functional as F
 from .compiler import CompileManifest
 from .model import build_smoke_student, build_student
 from .proposal import StudentProposal, StudentTarget
+from .quantization import quantize_checkpoint
 
 
 class StudentTrainingError(RuntimeError):
@@ -56,6 +57,10 @@ class TrainingResult:
     offline_simulation: bool
     failure_code: Optional[str] = None
     message: str = ""
+    full_precision_checkpoint: Optional[str] = None
+    quantized_checkpoint: Optional[str] = None
+    quantization: str = "none"
+    model_size_bytes: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -148,6 +153,7 @@ class StudentTrainWorker:
             offline_simulation=offline_simulation,
             failure_code=code,
             message=message,
+            quantization="none",
         )
 
     def run(
@@ -233,7 +239,21 @@ class StudentTrainWorker:
                 "offline_simulation": str(bool(self.backend.offline_simulation)).lower(),
             }
             self.backend.save_student(student, child_path, metadata)
-            child_sha256 = sha256_file(child_path)
+            full_precision_path = child_path
+            quantized_path = None
+            child_for_evaluation = child_path
+            if proposal.deployment.quantization == "int8":
+                quantized_path = output_dir / "student-int8.safetensors"
+                quantize_checkpoint(
+                    child_path,
+                    quantized_path,
+                    bits=8,
+                    metadata={**metadata, "full_precision_sha256": sha256_file(child_path)},
+                )
+                child_for_evaluation = quantized_path
+            elif proposal.deployment.quantization == "int4":
+                return self._failure(manifest, started, "quantization_unsupported", "int4 Student quantization is not supported", parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation)
+            child_sha256 = sha256_file(child_for_evaluation)
             if child_sha256 == parent_sha256:
                 return self._failure(manifest, started, "unchanged_child", "child file hash equals teacher hash", parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation)
             peak = torch.cuda.max_memory_allocated(selected_device) / float(1024**3) if selected_device.type == "cuda" else 0.0
@@ -243,7 +263,7 @@ class StudentTrainWorker:
                 compiler_digest=manifest.manifest_digest,
                 parent_sha256=parent_sha256,
                 child_sha256=child_sha256,
-                child_checkpoint=str(child_path),
+                child_checkpoint=str(child_for_evaluation),
                 optimizer_steps=optimizer_steps,
                 initial_loss=initial_loss,
                 final_loss=final_loss,
@@ -252,6 +272,10 @@ class StudentTrainWorker:
                 peak_memory_gb=float(peak),
                 changed_parameter_count=changed,
                 offline_simulation=bool(self.backend.offline_simulation),
+                full_precision_checkpoint=str(full_precision_path),
+                quantized_checkpoint=str(quantized_path) if quantized_path else None,
+                quantization=proposal.deployment.quantization,
+                model_size_bytes=child_for_evaluation.stat().st_size,
             )
         except StudentTrainingError as exc:
             return self._failure(manifest, started, exc.code, exc.message, offline_simulation=self.backend.offline_simulation)
