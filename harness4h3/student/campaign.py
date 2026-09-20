@@ -157,7 +157,7 @@ def _request_json_with_retry(request: urllib.request.Request, timeout_s: float) 
                 raise last_error
             raise urllib.error.URLError("proposal request timeout")
         try:
-            with urllib.request.urlopen(request, timeout=min(30.0, max(1.0, remaining))) as response:
+            with urllib.request.urlopen(request, timeout=min(180.0, max(1.0, remaining))) as response:
                 raw = json.loads(response.read().decode("utf-8"))
             if not isinstance(raw, Mapping):
                 raise ValueError("proposal response must be a JSON object")
