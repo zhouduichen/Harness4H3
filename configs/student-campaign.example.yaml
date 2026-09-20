@@ -16,7 +16,7 @@ student:
   local_output_root: var/student-campaign
   experience_path: var/student-campaign/experience.jsonl
   max_rounds: 4
-  max_failures: 4
+  max_failures: 8
   max_steps: 32
   controller:
     provider: vllm
