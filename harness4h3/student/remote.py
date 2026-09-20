@@ -29,6 +29,8 @@ class RemoteStudentWorker:
         remote_dir = self._remote_round_dir(round_dir)
         remote_manifest = remote_dir + "/compile_manifest.json"
         remote_result = remote_dir + "/training-result.json"
+        # Never let a killed worker's previous result satisfy a new launch.
+        self.client.remove_file(remote_result)
         self.client.write_json(remote_manifest, manifest.to_dict())
         command = (
             self.config.worker_python,

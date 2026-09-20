@@ -332,12 +332,13 @@ class RealH3TeacherBackend:
             noisy = self.adapter.add_noise(prepared.latents, prepared.noise, prepared.timesteps)
             if noisy.video is None or prepared.timesteps.video is None:
                 raise StudentTrainingError("invalid_h3_batch", "H3 batch lacks video tensors")
-            teacher_prediction = self.adapter.predict(
-                teacher,
-                noisy,
-                prepared.timesteps,
-                prepared.conditioning,
-            )
+            with torch.no_grad():
+                teacher_prediction = self.adapter.predict(
+                    teacher,
+                    noisy,
+                    prepared.timesteps,
+                    prepared.conditioning,
+                )
             if teacher_prediction.video is None:
                 raise StudentTrainingError("invalid_h3_batch", "H3 teacher returned no video prediction")
             yield StudentBatch(
