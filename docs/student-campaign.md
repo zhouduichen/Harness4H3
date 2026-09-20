@@ -18,6 +18,8 @@ Before starting, deploy the current `harness4h3/student`, `harness4h3/remote`, `
 
 All campaign components run on the server. The example points at the server-local vLLM OpenAI-compatible `/v1/chat/completions` endpoint (`qwen3.5-controller`); Ollama remains supported as an alternative server-local provider. If the configured LLM is unavailable, the supervisor records `proposal_invalid`/`campaign_error` and stops; it does not substitute a rule-based architecture. The H3 example uses the real cache geometry `5×16×16`, and the target dimensions in the YAML must match the cache used by the teacher adapter.
 
+The remote training worker and video evaluator use `worker_device: auto`: they select a GPU with the configured free-memory budget and wait on the server when other jobs (including the controller LLM) occupy the cards. This avoids hard-coding a GPU index or treating temporary resource contention as an architecture failure.
+
 The Student worker performs meta-compiled topology validation, real H3 teacher distillation, full-precision checkpoint writing, and int8 quantization. The evaluator loads the quantized checkpoint, samples the Student latent, decodes it through the configured H3 video VAE, writes an MP4, and records decode validity, a clearly labelled structural quality proxy, latency, checkpoint size, and CUDA peak memory. A decode failure is never promoted.
 
 Offline tests prove the contracts only. Real acceptance requires remote evidence containing a changed Student checkpoint, a decodable Student-generated video, hardware/quality evidence, and at least two durable proposal→train→evaluate rounds. Those conditions must not be inferred from CPU tests or a successful SSH launch alone.
