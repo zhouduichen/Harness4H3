@@ -68,6 +68,9 @@ class StudentCampaignConfig:
     h3_cache_dir: str
     worker_entrypoint: str
     worker_python: str
+    worker_device: str
+    worker_gpu_wait_s: int
+    worker_min_free_memory_gb: float
     remote_campaign_root: str
     remote_config_path: str
     vae_name: str
@@ -166,6 +169,22 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
     worker_python = str(student.get("worker_python") or remote.training_python or remote.python).strip()
     if not worker_python:
         raise StudentConfigError("student.worker_python must not be empty")
+    worker_device = str(student.get("worker_device", "auto")).strip()
+    if not worker_device or (worker_device != "auto" and not worker_device.startswith("cuda:")):
+        raise StudentConfigError("student.worker_device must be auto or cuda:N")
+    if worker_device != "auto":
+        try:
+            if int(worker_device.split(":", 1)[1]) < 0:
+                raise ValueError
+        except (IndexError, TypeError, ValueError) as exc:
+            raise StudentConfigError("student.worker_device must be auto or cuda:N") from exc
+    try:
+        worker_gpu_wait_s = int(student.get("worker_gpu_wait_s", 1800))
+        worker_min_free_memory_gb = float(student.get("worker_min_free_memory_gb", 43.0))
+    except (TypeError, ValueError) as exc:
+        raise StudentConfigError("student GPU scheduling limits are invalid") from exc
+    if worker_gpu_wait_s < 0 or worker_min_free_memory_gb <= 0:
+        raise StudentConfigError("student GPU scheduling limits are invalid")
     controller_raw = _mapping(student.get("controller", {}), "student.controller")
     controller = StudentControllerConfig(
         provider=str(controller_raw.get("provider", "ollama")).strip().lower(),
@@ -199,6 +218,9 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         h3_cache_dir=h3_cache_dir,
         worker_entrypoint=worker_entrypoint,
         worker_python=worker_python,
+        worker_device=worker_device,
+        worker_gpu_wait_s=worker_gpu_wait_s,
+        worker_min_free_memory_gb=worker_min_free_memory_gb,
         remote_campaign_root=remote_campaign_root,
         remote_config_path=remote_config_path,
         vae_name=vae_name,

@@ -38,6 +38,8 @@ def _write_config(tmp_path: Path, **student_overrides):
 def test_student_campaign_config_requires_fixed_worker_and_real_evaluator(tmp_path):
     config = load_student_campaign_config(_write_config(tmp_path))
     assert config.worker_entrypoint.endswith("student_train_worker.py")
+    assert config.worker_device == "auto"
+    assert config.worker_gpu_wait_s == 1800
     assert config.target.min_params == 1_000_000_000
     with pytest.raises(StudentConfigError, match="worker_entrypoint"):
         load_student_campaign_config(_write_config(tmp_path, worker_entrypoint="relative.py"))
@@ -46,3 +48,8 @@ def test_student_campaign_config_requires_fixed_worker_and_real_evaluator(tmp_pa
 def test_remote_paths_cannot_escape_configured_roots(tmp_path):
     with pytest.raises(StudentConfigError, match="escapes"):
         load_student_campaign_config(_write_config(tmp_path, teacher_checkpoint="/tmp/teacher.safetensors"))
+
+
+def test_worker_device_must_be_a_cuda_index_or_auto(tmp_path):
+    with pytest.raises(StudentConfigError, match="worker_device"):
+        load_student_campaign_config(_write_config(tmp_path, worker_device="cuda:bad"))
