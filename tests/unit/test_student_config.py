@@ -40,6 +40,8 @@ def test_student_campaign_config_requires_fixed_worker_and_real_evaluator(tmp_pa
     assert config.worker_entrypoint.endswith("student_train_worker.py")
     assert config.worker_device == "auto"
     assert config.worker_gpu_wait_s == 1800
+    assert config.worker_min_free_memory_gb == 44.3
+    assert config.worker_student_min_free_memory_gb == 20.0
     assert config.target.min_params == 1_000_000_000
     with pytest.raises(StudentConfigError, match="worker_entrypoint"):
         load_student_campaign_config(_write_config(tmp_path, worker_entrypoint="relative.py"))

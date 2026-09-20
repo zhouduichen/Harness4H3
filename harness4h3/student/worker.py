@@ -164,6 +164,8 @@ class StudentTrainWorker:
         *,
         max_steps: Optional[int] = None,
         device: Optional[str] = None,
+        teacher_device: Optional[str] = None,
+        student_device: Optional[str] = None,
     ) -> TrainingResult:
         started = time.perf_counter()
         teacher_checkpoint = Path(teacher_checkpoint).resolve()
@@ -175,11 +177,12 @@ class StudentTrainWorker:
             if not teacher_checkpoint.is_file():
                 return self._failure(manifest, started, "teacher_checkpoint_missing", str(teacher_checkpoint), offline_simulation=self.backend.offline_simulation)
             parent_sha256 = sha256_file(teacher_checkpoint)
-            selected_device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-            if selected_device.type == "cuda" and not torch.cuda.is_available():
+            selected_student_device = torch.device(student_device or device or ("cuda" if torch.cuda.is_available() else "cpu"))
+            selected_teacher_device = torch.device(teacher_device or selected_student_device)
+            if (selected_student_device.type == "cuda" or selected_teacher_device.type == "cuda") and not torch.cuda.is_available():
                 return self._failure(manifest, started, "device_unavailable", "CUDA is not available", parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation)
-            teacher = self.backend.load_teacher(teacher_checkpoint, selected_device)
-            student = self.backend.build_student(proposal, self.target, selected_device)
+            teacher = self.backend.load_teacher(teacher_checkpoint, selected_teacher_device)
+            student = self.backend.build_student(proposal, self.target, selected_student_device)
             student.train(True)
             initial_state = {
                 name: value.detach().to(device="cpu").clone()
@@ -199,9 +202,9 @@ class StudentTrainWorker:
             final_loss = None
             maximum_gradient_norm = 0.0
             optimizer_steps = 0
-            if selected_device.type == "cuda":
-                torch.cuda.reset_peak_memory_stats(selected_device)
-            for batch in self.backend.batches(teacher, proposal, self.target, steps, selected_device):
+            if selected_student_device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(selected_student_device)
+            for batch in self.backend.batches(teacher, proposal, self.target, steps, selected_student_device):
                 optimizer.zero_grad(set_to_none=True)
                 predicted = student(batch.latent, batch.conditioning, batch.timestep)
                 target = batch.target.to(device=predicted.device, dtype=predicted.dtype)
@@ -256,7 +259,7 @@ class StudentTrainWorker:
             child_sha256 = sha256_file(child_for_evaluation)
             if child_sha256 == parent_sha256:
                 return self._failure(manifest, started, "unchanged_child", "child file hash equals teacher hash", parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation)
-            peak = torch.cuda.max_memory_allocated(selected_device) / float(1024**3) if selected_device.type == "cuda" else 0.0
+            peak = torch.cuda.max_memory_allocated(selected_student_device) / float(1024**3) if selected_student_device.type == "cuda" else 0.0
             return TrainingResult(
                 status="success",
                 proposal_digest=proposal.digest,

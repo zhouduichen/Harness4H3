@@ -10,13 +10,13 @@ from pathlib import Path
 
 try:
     from harness4h3.student.compiler import CompileManifest
-    from harness4h3.student.gpu import GPUResourceUnavailable, select_free_cuda_device
+    from harness4h3.student.gpu import GPUResourceUnavailable, select_free_cuda_devices
     from harness4h3.student.proposal import StudentTarget
     from harness4h3.student.worker import RealH3TeacherBackend, StudentTrainWorker, TrainingResult
 except ModuleNotFoundError:  # direct invocation from the repository root
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from harness4h3.student.compiler import CompileManifest
-    from harness4h3.student.gpu import GPUResourceUnavailable, select_free_cuda_device
+    from harness4h3.student.gpu import GPUResourceUnavailable, select_free_cuda_devices
     from harness4h3.student.proposal import StudentTarget
     from harness4h3.student.worker import RealH3TeacherBackend, StudentTrainWorker, TrainingResult
 
@@ -36,7 +36,8 @@ def main(argv=None) -> int:
     parser.add_argument("--cache-dir", required=True, help="trusted H3 latent cache directory")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--wait-for-gpu-s", type=int, default=1800)
-    parser.add_argument("--min-free-memory-gb", type=float, default=43.0)
+    parser.add_argument("--min-free-memory-gb", type=float, default=44.3, help="minimum free memory for the H3 teacher GPU")
+    parser.add_argument("--student-min-free-memory-gb", type=float, default=20.0, help="minimum free memory for the Student GPU")
     parser.add_argument("--max-steps", type=int, default=None)
     args = parser.parse_args(argv)
     manifest_path = Path(args.manifest).resolve()
@@ -45,17 +46,21 @@ def main(argv=None) -> int:
         manifest = CompileManifest.from_path(manifest_path)
         backend = RealH3TeacherBackend(Path(args.comfyui_root), Path(args.cache_dir))
         target = StudentTarget(**manifest.target)
-        selected_device = (
-            select_free_cuda_device(args.min_free_memory_gb, args.wait_for_gpu_s)
-            if args.device == "auto"
-            else args.device
-        )
+        if args.device == "auto":
+            selected_teacher_device, selected_student_device = select_free_cuda_devices(
+                (args.min_free_memory_gb, args.student_min_free_memory_gb), args.wait_for_gpu_s
+            )
+        else:
+            selected_teacher_device = args.device
+            selected_student_device = args.device
         result = StudentTrainWorker(backend, target=target).run(
             manifest,
             Path(args.teacher),
             Path(args.output),
             max_steps=args.max_steps,
-            device=selected_device,
+            device=selected_student_device,
+            teacher_device=selected_teacher_device,
+            student_device=selected_student_device,
         )
     except GPUResourceUnavailable as exc:
         result = TrainingResult(

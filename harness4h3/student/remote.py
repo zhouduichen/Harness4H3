@@ -51,6 +51,8 @@ class RemoteStudentWorker:
             str(self.config.worker_gpu_wait_s),
             "--min-free-memory-gb",
             str(self.config.worker_min_free_memory_gb),
+            "--student-min-free-memory-gb",
+            str(self.config.worker_student_min_free_memory_gb),
             "--max-steps",
             str(self.config.max_steps),
         )

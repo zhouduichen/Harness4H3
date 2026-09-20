@@ -8,7 +8,8 @@ student:
   worker_python: /home/intern/miniconda3/envs/comfy/bin/python
   worker_device: auto
   worker_gpu_wait_s: 1800
-  worker_min_free_memory_gb: 43.0
+  worker_min_free_memory_gb: 44.3
+  worker_student_min_free_memory_gb: 20.0
   remote_campaign_root: /home/intern/huangjiahao/Harness4H3/work/student-campaign
   remote_config_path: /home/intern/huangjiahao/Harness4H3/configs/student-campaign.yaml
   vae_name: minimax_h3_video_vae_fp16.safetensors

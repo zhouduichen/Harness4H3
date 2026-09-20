@@ -71,6 +71,7 @@ class StudentCampaignConfig:
     worker_device: str
     worker_gpu_wait_s: int
     worker_min_free_memory_gb: float
+    worker_student_min_free_memory_gb: float
     remote_campaign_root: str
     remote_config_path: str
     vae_name: str
@@ -180,10 +181,11 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
             raise StudentConfigError("student.worker_device must be auto or cuda:N") from exc
     try:
         worker_gpu_wait_s = int(student.get("worker_gpu_wait_s", 1800))
-        worker_min_free_memory_gb = float(student.get("worker_min_free_memory_gb", 43.0))
+        worker_min_free_memory_gb = float(student.get("worker_min_free_memory_gb", 44.3))
+        worker_student_min_free_memory_gb = float(student.get("worker_student_min_free_memory_gb", 20.0))
     except (TypeError, ValueError) as exc:
         raise StudentConfigError("student GPU scheduling limits are invalid") from exc
-    if worker_gpu_wait_s < 0 or worker_min_free_memory_gb <= 0:
+    if worker_gpu_wait_s < 0 or worker_min_free_memory_gb <= 0 or worker_student_min_free_memory_gb <= 0:
         raise StudentConfigError("student GPU scheduling limits are invalid")
     controller_raw = _mapping(student.get("controller", {}), "student.controller")
     controller = StudentControllerConfig(
@@ -221,6 +223,7 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         worker_device=worker_device,
         worker_gpu_wait_s=worker_gpu_wait_s,
         worker_min_free_memory_gb=worker_min_free_memory_gb,
+        worker_student_min_free_memory_gb=worker_student_min_free_memory_gb,
         remote_campaign_root=remote_campaign_root,
         remote_config_path=remote_config_path,
         vae_name=vae_name,
