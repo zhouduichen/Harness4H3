@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 try:
     from harness4h3.student.evaluator import StudentEvaluation, StudentEvaluator
+    from harness4h3.student.gpu import GPUResourceUnavailable, select_free_cuda_device
     from harness4h3.student.inference import StudentGenerationError, generate_video
     from harness4h3.student.proposal import StudentProposal, StudentTarget
 except ModuleNotFoundError:  # direct invocation from the repository root
@@ -18,6 +19,7 @@ except ModuleNotFoundError:  # direct invocation from the repository root
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from harness4h3.student.evaluator import StudentEvaluation, StudentEvaluator
+    from harness4h3.student.gpu import GPUResourceUnavailable, select_free_cuda_device
     from harness4h3.student.inference import StudentGenerationError, generate_video
     from harness4h3.student.proposal import StudentProposal, StudentTarget
 
@@ -49,6 +51,8 @@ def main(argv=None) -> int:
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--vae-name", required=True)
     parser.add_argument("--device", default=None)
+    parser.add_argument("--wait-for-gpu-s", type=int, default=600)
+    parser.add_argument("--min-free-memory-gb", type=float, default=8.0)
     parser.add_argument("--seed", type=int, default=20260920)
     parser.add_argument("--black-frame-ratio-threshold", type=float, default=0.0)
     args = parser.parse_args(argv)
@@ -60,6 +64,11 @@ def main(argv=None) -> int:
         manifest = json.loads((output_dir / "compile_manifest.json").read_text(encoding="utf-8"))
         proposal = StudentProposal.from_dict(manifest["proposal"])
         target = StudentTarget(**dict(manifest["target"]))
+        selected_device = (
+            select_free_cuda_device(args.min_free_memory_gb, args.wait_for_gpu_s)
+            if args.device == "auto"
+            else args.device
+        )
         generation = generate_video(
             proposal,
             Path(args.checkpoint),
@@ -68,7 +77,7 @@ def main(argv=None) -> int:
             Path(args.cache_dir),
             args.vae_name,
             video_path,
-            device=args.device,
+            device=selected_device,
             seed=args.seed,
         )
         training = {}
@@ -98,6 +107,8 @@ def main(argv=None) -> int:
             "black_frame_ratio": black_ratio,
         }
         evaluation = evaluator.evaluate(video_path, quality=quality, hardware=hardware)
+    except GPUResourceUnavailable as exc:
+        evaluation = _failure(video_path, "resource_unavailable", str(exc))
     except StudentGenerationError as exc:
         evaluation = _failure(video_path, exc.code, exc.message)
     except (OSError, KeyError, TypeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:

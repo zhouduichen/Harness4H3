@@ -94,6 +94,12 @@ class RemoteStudentEvaluator:
             self.config.h3_cache_dir,
             "--vae-name",
             self.config.vae_name,
+            "--device",
+            self.config.worker_device,
+            "--wait-for-gpu-s",
+            "600",
+            "--min-free-memory-gb",
+            "8.0",
         )
         self.client.run(command, timeout_s=max(3600.0, self.config.controller.timeout_s * 20), check=False)
         raw = self.client.read_json(remote_result)
