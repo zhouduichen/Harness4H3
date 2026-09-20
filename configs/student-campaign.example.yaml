@@ -1,0 +1,44 @@
+schema_version: 1
+
+student:
+  goal: "Based on the real MiniMax H3 teacher, autonomously design, distill, quantize, and iterate a runnable 1B-2B edge video generator."
+  teacher_checkpoint: /data/models/MiniMax-H3/diffusion_models/minimax_h3_fl2va_bf16.safetensors
+  h3_cache_dir: /data/models/MiniMax-H3/harness4h3/cache
+  worker_entrypoint: /home/intern/huangjiahao/Harness4H3/tools/student_train_worker.py
+  worker_python: /home/intern/miniconda3/envs/comfy/bin/python
+  remote_campaign_root: /home/intern/huangjiahao/Harness4H3/work/student-campaign
+  local_output_root: var/student-campaign
+  experience_path: var/student-campaign/experience.jsonl
+  max_rounds: 4
+  max_failures: 4
+  max_steps: 32
+  controller:
+    provider: ollama
+    model: qwen3.5:4b
+    base_url: http://127.0.0.1:11434
+    timeout_s: 180
+  # This must be a trusted, fixed evaluator entrypoint on the remote host.
+  evaluation_command:
+    - /home/intern/miniconda3/envs/comfy/bin/python
+    - /home/intern/huangjiahao/Harness4H3/tools/student_evaluate_worker.py
+  target:
+    min_params: 1000000000
+    max_params: 2000000000
+    max_peak_memory_gb: 72.0
+    latent_channels: 24
+    latent_frames: 5
+    latent_height: 32
+    latent_width: 32
+    condition_dim: 5120
+
+remote:
+  host: Jiayu-intern
+  ssh_port: 30902
+  harness_root: /home/intern/huangjiahao/Harness4H3
+  model_root: /data/models/MiniMax-H3
+  comfyui_root: /home/intern/huangjiahao/ComfyUI
+  comfyui_port: 8188
+  python: /home/intern/miniconda3/envs/comfy/bin/python
+  training_python: /home/intern/miniconda3/envs/comfy/bin/python
+  results_root: /data/models/MiniMax-H3/harness4h3
+  campaign_root: /home/intern/huangjiahao/Harness4H3/work/student-campaign

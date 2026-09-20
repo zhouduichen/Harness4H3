@@ -168,6 +168,26 @@ class CampaignResult:
     failure_code: Optional[str] = None
     message: str = ""
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "rounds_completed": self.rounds_completed,
+            "failure_code": self.failure_code,
+            "message": self.message,
+            "rounds": [
+                {
+                    "round_index": item.round_index,
+                    "proposal": item.proposal.to_dict() if item.proposal else None,
+                    "compile": item.compile.to_dict() if item.compile else None,
+                    "training": item.training.to_dict() if item.training else None,
+                    "evaluation": item.evaluation.to_dict() if item.evaluation else None,
+                    "failure_code": item.failure_code,
+                    "message": item.message,
+                }
+                for item in self.rounds
+            ],
+        }
+
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

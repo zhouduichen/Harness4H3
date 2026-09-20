@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -15,7 +16,13 @@ from .archive.pareto import ParetoArchive
 from .benchmark.h3 import H3BenchmarkRunner
 from .config import AppConfig, ConfigError, load_config
 from .controller.loop import OptimizationLoop
-from .controller.provider import OllamaStructuredController, OpenAIResponsesController, RuleBasedMockController
+from .controller.provider import (
+    OllamaStructuredController,
+    OpenAIResponsesController,
+    RuleBasedMockController,
+    build_controller_from_config,
+)
+from .controller.directive import submit_directive
 from .controller.schemas import BudgetState, HardwareMetrics
 from .evaluator.composite import CompositeEvaluator
 from .evaluator.constraints import ConstraintEvaluator
@@ -27,11 +34,12 @@ from .harness.state import Task, load_tasks
 from .h3.fake import FakeH3Model
 from .h3.inspector import H3Inspector
 from .memory.experiment_store import ExperimentStore
+from .memory.observation import ControllerEventStore, ObservationStore
 from .memory.trajectory import TrajectoryStore
 from .model.minimax_h3 import MiniMaxH3Adapter
 from .remote.config import load_remote_campaign_config
 from .remote.importer import RemoteResultImporter
-from .remote.ssh import RemoteError, SSHClient
+from .remote.ssh import LocalCommandClient, RemoteError, SSHClient
 from .operators.fake import FakeOperatorBackend, build_fake_registry
 from .self_improve.evolve import EvolutionController
 from research.experiments.a0_model_evolution import (
@@ -40,11 +48,16 @@ from research.experiments.a0_model_evolution import (
     default_validated_nvfp4_candidate,
     run_campaign,
 )
-from research.experiments.a1_real_evolution import run_a1
+from research.experiments.a1_real_evolution import run_a1_active
 from .operators.model_evolution import build_external_model_evolution_registry, build_model_evolution_registry
 from .executor.local import LocalProcessExecutor
 from .target.profile import load_target_profile
 from research.experiments.remote_h3_closed_loop import RemoteCampaign
+from .student.campaign import OllamaStudentProposalProvider, StudentCampaign
+from .student.compiler import StudentCompiler
+from .student.config import StudentConfigError, load_student_campaign_config
+from .student.proposal import StudentProposal
+from .student.remote import RemoteStudentEvaluator, RemoteStudentWorker
 
 
 def _emit(value: Any, json_mode: bool) -> None:
@@ -264,6 +277,7 @@ def cmd_optimize(args: argparse.Namespace) -> int:
         "session_id": args.session_id,
         "status": result.status,
         "current_model_id": result.current_model_id,
+        "current_system_id": result.current_system_id,
         "budget": result.budget.to_dict(),
         "search_metrics": {
             "experiments_to_target": result.budget.used_iterations if result.status == "target_satisfied" else None,
@@ -273,6 +287,7 @@ def cmd_optimize(args: argparse.Namespace) -> int:
             "human_intervention_count": 0,
         },
         "lineage": [candidate.to_dict() for candidate in loop.models.lineage()],
+        "system_lineage": [candidate.to_dict() for candidate in loop.systems.lineage()],
         "pareto_front": [entry.to_dict() for entry in loop.pareto.front()],
     }
     _emit(payload, args.json)
@@ -342,7 +357,7 @@ def cmd_a1_evolve(args: argparse.Namespace) -> int:
         controller = A0RuleBasedController()
     else:
         controller = OllamaStructuredController(args.controller_model, args.controller_url, args.controller_timeout_s)
-    result = run_a1(
+    result = run_a1_active(
         parent_checkpoint=Path(args.parent_checkpoint),
         worker_command=tuple(args.worker_command) + ("--config", str(Path(args.worker_config).resolve())),
         config_path=Path(args.config).resolve(),
@@ -457,17 +472,140 @@ def cmd_import_experience(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_directive(args: argparse.Namespace) -> int:
+    """Append a human objective for the next Controller planning boundary."""
+
+    output_root = Path(args.output_root).resolve()
+    directive, written = submit_directive(
+        ObservationStore(output_root / "observations.jsonl"),
+        args.text,
+        directive_id=args.directive_id,
+    )
+    _emit(
+        {
+            "status": "submitted" if written else "already_present",
+            "output_root": str(output_root),
+            "observation_id": "obs-%s" % directive.directive_id,
+            **directive.to_dict(),
+        },
+        args.json,
+    )
+    return 0
+
+
 def cmd_remote_campaign(args: argparse.Namespace) -> int:
     config = load_remote_campaign_config(Path(args.remote_config))
     target = load_target_profile(Path(args.target).resolve()) if args.target else None
+    controller = build_controller_from_config(
+        Path(args.controller_config),
+        provider_name=args.controller_provider,
+        model_name=args.controller_model,
+        remote_port=args.controller_remote_port,
+        timeout_s=args.controller_timeout_s,
+    )
+    ssh = LocalCommandClient(config.remote) if args.local_resources else None
     campaign = RemoteCampaign(
         config,
+        controller=controller,
+        ssh=ssh,
         target=target,
         output_root=Path(args.output_root).resolve() if args.output_root else None,
     )
-    result = campaign.run(resume=args.resume, max_experiments=args.max_experiments, split=args.split)
+    result = campaign.run_loop(
+        resume=args.resume,
+        max_iterations=args.max_experiments,
+        split=args.split,
+        resource_poll_interval_s=args.resource_poll_interval_s,
+    )
     _emit(result.to_dict(), args.json)
-    return 0 if result.status in {"accepted", "completed"} else 1
+    return 0 if result.status in {"accepted", "completed", "target_satisfied"} else 1
+
+
+def _student_config(args: argparse.Namespace):
+    return load_student_campaign_config(Path(args.student_config).resolve())
+
+
+def cmd_student_validate(args: argparse.Namespace) -> int:
+    config = _student_config(args)
+    _emit(
+        {
+            "valid": True,
+            "goal": config.goal,
+            "target": config.to_dict()["target"],
+            "remote_host": config.remote.host,
+            "worker_entrypoint": config.worker_entrypoint,
+            "evaluation_command": list(config.evaluation_command),
+        },
+        args.json,
+    )
+    return 0
+
+
+def cmd_student_compile(args: argparse.Namespace) -> int:
+    config = _student_config(args)
+    proposal = StudentProposal.from_dict(json.loads(Path(args.proposal).read_text(encoding="utf-8")))
+    manifest = StudentCompiler(config.target).compile(proposal, Path(args.output))
+    _emit(manifest.to_dict(), args.json)
+    return 0
+
+
+def cmd_student_run(args: argparse.Namespace) -> int:
+    config = _student_config(args)
+    if args.detach:
+        raise StudentConfigError("--detach is reserved until the remote supervisor is deployed; use the persistent SSH session for now")
+    provider = OllamaStudentProposalProvider(
+        config.controller.model,
+        config.target,
+        base_url=config.controller.base_url,
+        timeout_s=config.controller.timeout_s,
+    )
+    client = LocalCommandClient(config.remote) if args.local_resources else SSHClient(config.remote)
+    campaign = StudentCampaign(
+        provider,
+        StudentCompiler(config.target),
+        RemoteStudentWorker(config, client),
+        RemoteStudentEvaluator(config, client),
+        goal=config.goal,
+        target=config.target,
+        output_root=config.local_output_root,
+        experience_path=config.experience_path,
+        max_failures=config.max_failures,
+    )
+    result = campaign.run(max_rounds=args.max_rounds or config.max_rounds)
+    _emit(result.to_dict(), args.json)
+    return 0 if result.status == "success" else 1
+
+
+def cmd_controller_status(args: argparse.Namespace) -> int:
+    """Read or follow the append-only Controller lifecycle stream."""
+    path = Path(args.output_root).resolve() / "controller-events.jsonl"
+    if not args.follow:
+        events = list(ControllerEventStore(path).read())
+        _emit(
+            {
+                "output_root": str(path.parent),
+                "events_path": str(path),
+                "event_count": len(events),
+                "latest": events[-1] if events else None,
+                "events": events,
+            },
+            args.json,
+        )
+        return 0
+
+    offset = 0
+    try:
+        while True:
+            if path.exists():
+                with path.open("r", encoding="utf-8") as handle:
+                    handle.seek(offset)
+                    for line in handle:
+                        if line.strip():
+                            _emit(json.loads(line), args.json)
+                    offset = handle.tell()
+            time.sleep(args.poll_interval_s)
+    except KeyboardInterrupt:
+        return 0
 
 
 def cmd_model_lineage(args: argparse.Namespace) -> int:
@@ -648,15 +786,85 @@ def build_parser() -> argparse.ArgumentParser:
     _json_flag(import_experience)
     import_experience.set_defaults(handler=cmd_import_experience)
 
-    remote_campaign = subparsers.add_parser("remote-campaign", help="run the SSH-backed H3 import/evaluate/train/promotion loop")
+    directive = subparsers.add_parser(
+        "directive",
+        help="submit a bounded human objective for the next Controller plan",
+    )
+    directive.add_argument("--output-root", required=True, help="campaign output root containing observations.jsonl")
+    directive.add_argument("--text", required=True, help="next-round optimization objective")
+    directive.add_argument("--directive-id", help="stable ID for retries or intentionally repeated objectives")
+    _json_flag(directive)
+    directive.set_defaults(handler=cmd_directive)
+
+    remote_campaign = subparsers.add_parser("remote-campaign", help="run repeated Controller-driven SSH H3 optimization loops")
     remote_campaign.add_argument("--remote-config", required=True)
+    remote_campaign.add_argument("--controller-config", default="configs/controller.yaml")
     remote_campaign.add_argument("--target")
     remote_campaign.add_argument("--output-root")
-    remote_campaign.add_argument("--max-experiments", type=int, default=1)
+    remote_campaign.add_argument(
+        "--max-iterations",
+        "--max-experiments",
+        dest="max_experiments",
+        type=int,
+        default=1,
+        help="maximum Controller -> operator -> evaluation loop iterations",
+    )
     remote_campaign.add_argument("--split", choices=("sanity", "dev", "heldout", "all"), default=None)
+    remote_campaign.add_argument(
+        "--controller-provider",
+        choices=("vllm", "rulebased"),
+        default="vllm",
+        help="Controller backend; vllm is the default and never falls back when unavailable",
+    )
+    remote_campaign.add_argument("--controller-model", default=None)
+    remote_campaign.add_argument("--controller-remote-port", type=int, default=None)
+    remote_campaign.add_argument("--controller-timeout-s", type=float, default=None)
+    remote_campaign.add_argument(
+        "--resource-poll-interval-s",
+        type=float,
+        default=5.0,
+        help="seconds between retries of a Controller plan waiting for GPUs",
+    )
     remote_campaign.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    remote_campaign.add_argument(
+        "--local-resources",
+        "--on-server",
+        action="store_true",
+        help="run trusted commands and loopback services directly on this server (no nested SSH)",
+    )
     _json_flag(remote_campaign)
     remote_campaign.set_defaults(handler=cmd_remote_campaign)
+
+    student_campaign = subparsers.add_parser(
+        "student-campaign",
+        help="autonomously propose, compile, train, evaluate, and revise a 1B-2B Student",
+    )
+    student_campaign.add_argument("--student-config", default="configs/student-campaign.example.yaml")
+    student_subparsers = student_campaign.add_subparsers(dest="student_command", required=True)
+
+    student_validate = student_subparsers.add_parser("validate", help="validate Student campaign and SSH trust boundaries")
+    _json_flag(student_validate)
+    student_validate.set_defaults(handler=cmd_student_validate)
+
+    student_compile = student_subparsers.add_parser("compile", help="compile one JSON Student proposal on meta tensors")
+    student_compile.add_argument("--proposal", required=True)
+    student_compile.add_argument("--output", required=True)
+    _json_flag(student_compile)
+    student_compile.set_defaults(handler=cmd_student_compile)
+
+    student_run = student_subparsers.add_parser("run", help="run the autonomous Student campaign through SSH")
+    student_run.add_argument("--max-rounds", type=int)
+    student_run.add_argument("--detach", action="store_true", help="reserved for the remote supervisor launcher")
+    student_run.add_argument("--local-resources", action="store_true", help="execute trusted worker commands on this host")
+    _json_flag(student_run)
+    student_run.set_defaults(handler=cmd_student_run)
+
+    controller_status = subparsers.add_parser("controller-status", help="show or follow the Controller event stream")
+    controller_status.add_argument("--output-root", default="var/remote-h3")
+    controller_status.add_argument("--follow", action="store_true", help="follow new Controller events until interrupted")
+    controller_status.add_argument("--poll-interval-s", type=float, default=1.0)
+    _json_flag(controller_status)
+    controller_status.set_defaults(handler=cmd_controller_status)
 
     lineage = subparsers.add_parser("lineage", help="show immutable model-candidate lineage")
     lineage.add_argument("--session-dir", default="var/evogen")
