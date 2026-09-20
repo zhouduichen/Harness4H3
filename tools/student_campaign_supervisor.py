@@ -7,7 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
-from harness4h3.student.campaign import OllamaStudentProposalProvider, StudentCampaign
+from harness4h3.student.campaign import StudentCampaign, build_student_proposal_provider
 from harness4h3.student.compiler import StudentCompiler
 from harness4h3.student.config import load_student_campaign_config
 from harness4h3.student.remote import (
@@ -25,7 +25,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     config = load_student_campaign_config(Path(args.config))
     client = LocalCommandClient(config.remote)
-    provider = OllamaStudentProposalProvider(
+    provider = build_student_proposal_provider(
+        config.controller.provider,
         config.controller.model,
         config.target,
         base_url=config.controller.base_url,

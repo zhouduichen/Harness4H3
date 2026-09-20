@@ -201,15 +201,24 @@ class TrainingSpec:
         target_steps = _integer(raw["target_steps"], "training.target_steps", minimum=1)
         if target_steps > source_steps:
             raise ProposalValidationError("training.target_steps must not exceed source_steps")
+        if source_steps > 256:
+            raise ProposalValidationError("training.source_steps must not exceed 256")
+        if target_steps > 64:
+            raise ProposalValidationError("training.target_steps must not exceed 64")
+        max_steps = _integer(raw["max_steps"], "training.max_steps", minimum=1)
+        if max_steps > 100_000:
+            raise ProposalValidationError("training.max_steps must not exceed 100000")
+        learning_rate = _number(raw["learning_rate"], "training.learning_rate", minimum=0.0)
+        critic_learning_rate = _number(raw["critic_learning_rate"], "training.critic_learning_rate", minimum=0.0)
+        if learning_rate > 0.01 or critic_learning_rate > 0.01:
+            raise ProposalValidationError("training learning rates must not exceed 0.01")
         return cls(
             method=method,
             source_steps=source_steps,
             target_steps=target_steps,
-            max_steps=_integer(raw["max_steps"], "training.max_steps", minimum=1),
-            learning_rate=_number(raw["learning_rate"], "training.learning_rate", minimum=0.0),
-            critic_learning_rate=_number(
-                raw["critic_learning_rate"], "training.critic_learning_rate", minimum=0.0
-            ),
+            max_steps=max_steps,
+            learning_rate=learning_rate,
+            critic_learning_rate=critic_learning_rate,
             batch_size=_integer(raw.get("batch_size", 1), "training.batch_size", minimum=1),
         )
 

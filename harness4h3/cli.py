@@ -53,7 +53,7 @@ from .operators.model_evolution import build_external_model_evolution_registry, 
 from .executor.local import LocalProcessExecutor
 from .target.profile import load_target_profile
 from research.experiments.remote_h3_closed_loop import RemoteCampaign
-from .student.campaign import OllamaStudentProposalProvider, StudentCampaign
+from .student.campaign import StudentCampaign, build_student_proposal_provider
 from .student.compiler import StudentCompiler
 from .student.config import StudentConfigError, load_student_campaign_config
 from .student.proposal import StudentProposal
@@ -556,7 +556,8 @@ def cmd_student_run(args: argparse.Namespace) -> int:
         payload = RemoteStudentSupervisor(config, client).start(args.max_rounds or config.max_rounds)
         _emit(payload, args.json)
         return 0
-    provider = OllamaStudentProposalProvider(
+    provider = build_student_proposal_provider(
+        config.controller.provider,
         config.controller.model,
         config.target,
         base_url=config.controller.base_url,

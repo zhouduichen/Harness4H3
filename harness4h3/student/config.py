@@ -173,8 +173,8 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         base_url=str(controller_raw.get("base_url", "http://127.0.0.1:11434")).strip().rstrip("/"),
         timeout_s=float(controller_raw.get("timeout_s", 180.0)),
     )
-    if controller.provider != "ollama" or not controller.model:
-        raise StudentConfigError("student.controller currently requires provider=ollama and a model")
+    if controller.provider not in {"ollama", "vllm", "openai_compatible", "openai-compatible"} or not controller.model:
+        raise StudentConfigError("student.controller requires provider=ollama or vllm and a model")
     if controller.timeout_s <= 0:
         raise StudentConfigError("student.controller.timeout_s must be positive")
     evaluation_command = _command(student.get("evaluation_command"), "student.evaluation_command")

@@ -15,9 +15,9 @@ student:
   max_failures: 4
   max_steps: 32
   controller:
-    provider: ollama
-    model: qwen3.5:4b
-    base_url: http://127.0.0.1:11434
+    provider: vllm
+    model: qwen3.5-controller
+    base_url: http://127.0.0.1:8000/v1
     timeout_s: 180
   # This must be a trusted, fixed evaluator entrypoint on the remote host.
   evaluation_command:

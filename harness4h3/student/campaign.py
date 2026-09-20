@@ -53,7 +53,7 @@ def student_proposal_json_schema(target: StudentTarget = StudentTarget()) -> Map
             "mlp_ratio": {"type": "number", "minimum": 1, "maximum": 8},
             "spatial_patch": {"type": "integer", "enum": [1, 2, 4]},
             "temporal_patch": {"type": "integer", "enum": [1, 5]},
-            "temporal_layers": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+            "temporal_layers": {"type": "array", "items": {"type": "integer", "minimum": 0}, "uniqueItems": True},
             "conditioning": {"type": "string", "enum": ["ada_norm_zero"]},
             "norm": {"type": "string", "enum": ["rmsnorm", "layernorm"]},
             "activation": {"type": "string", "enum": ["silu", "gelu"]},
@@ -68,11 +68,11 @@ def student_proposal_json_schema(target: StudentTarget = StudentTarget()) -> Map
         "additionalProperties": False,
         "properties": {
             "method": {"type": "string", "enum": ["velocity_distill", "dmd2"]},
-            "source_steps": integer,
-            "target_steps": integer,
-            "max_steps": integer,
-            "learning_rate": positive_number,
-            "critic_learning_rate": positive_number,
+            "source_steps": {**integer, "maximum": 256},
+            "target_steps": {**integer, "maximum": 64},
+            "max_steps": {**integer, "maximum": 100000},
+            "learning_rate": {**positive_number, "maximum": 0.01},
+            "critic_learning_rate": {**positive_number, "maximum": 0.01},
             "batch_size": integer,
         },
         "required": ["method", "source_steps", "target_steps", "max_steps", "learning_rate", "critic_learning_rate", "batch_size"],
@@ -106,6 +106,36 @@ def student_proposal_json_schema(target: StudentTarget = StudentTarget()) -> Map
     }
 
 
+def _student_architect_prompt(context: Mapping[str, Any]) -> str:
+    return (
+        "You are the autonomous Student architect. Return exactly one JSON StudentProposal. "
+        "Do not emit code, shell commands, markdown, or explanations outside JSON. "
+        "The Harness will reject invalid shapes, memory, or 1B-2B parameter counts. "
+        "Choose a legal 1B-2B design rather than a tiny 12-layer model. "
+        "For this registered graph, hidden_size=2048 and depth=24 is a legal reference scale, "
+        "but you may choose another width/depth/head/patch combination. "
+        "temporal_layers must be unique layer indices within depth. "
+        "Keep source_steps<=256, target_steps<=64, and learning rates<=0.01. CONTEXT="
+        + json.dumps(dict(context), ensure_ascii=False, sort_keys=True)
+    )
+
+
+def _parse_student_response(raw: Mapping[str, Any], *, source: str) -> Mapping[str, Any]:
+    try:
+        if isinstance(raw.get("choices"), list) and raw["choices"]:
+            message = raw["choices"][0]["message"]
+            content = message["content"]
+        else:
+            message = raw["message"]
+            content = message["content"] if isinstance(message, Mapping) else None
+        parsed = json.loads(content) if isinstance(content, str) else content
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("proposal_invalid: %s response was not valid StudentProposal JSON: %s" % (source, exc)) from exc
+    if not isinstance(parsed, Mapping):
+        raise ValueError("proposal_invalid: %s response was not a JSON object" % source)
+    return dict(parsed)
+
+
 class OllamaStudentProposalProvider:
     provider_name = "ollama"
 
@@ -117,12 +147,7 @@ class OllamaStudentProposalProvider:
 
     def propose(self, context: Mapping[str, Any]) -> Mapping[str, Any]:
         schema = student_proposal_json_schema(self.target)
-        prompt = (
-            "You are the autonomous Student architect. Return exactly one JSON StudentProposal. "
-            "Do not emit code, shell commands, markdown, or explanations outside JSON. "
-            "The Harness will reject invalid shapes, memory, or 1B-2B parameter counts. CONTEXT="
-            + json.dumps(dict(context), ensure_ascii=False, sort_keys=True)
-        )
+        prompt = _student_architect_prompt(context)
         payload = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": prompt}],
@@ -140,13 +165,67 @@ class OllamaStudentProposalProvider:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
                 raw = json.loads(response.read().decode("utf-8"))
-            content = raw["message"]["content"]
-            parsed = json.loads(content) if isinstance(content, str) else content
+            parsed = _parse_student_response(raw, source="Ollama")
         except (OSError, urllib.error.URLError, urllib.error.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("proposal_invalid: Ollama proposal request failed: %s" % exc) from exc
-        if not isinstance(parsed, Mapping):
-            raise ValueError("proposal_invalid: Ollama response was not a JSON object")
         return dict(parsed)
+
+
+class OpenAICompatibleStudentProposalProvider:
+    """Use a local vLLM/OpenAI-compatible server for structured proposals."""
+
+    provider_name = "openai_compatible"
+
+    def __init__(self, model_name: str, target: StudentTarget, *, base_url: str, timeout_s: float = 180.0):
+        self.model_name = str(model_name)
+        self.target = target
+        self.base_url = str(base_url).rstrip("/")
+        self.timeout_s = float(timeout_s)
+
+    @property
+    def endpoint(self) -> str:
+        return self.base_url + ("/chat/completions" if self.base_url.endswith("/v1") else "/v1/chat/completions")
+
+    def propose(self, context: Mapping[str, Any]) -> Mapping[str, Any]:
+        schema = student_proposal_json_schema(self.target)
+        payload = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": _student_architect_prompt(context)}],
+            "temperature": 0,
+            "stream": False,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "student_proposal", "strict": True, "schema": schema},
+            },
+        }
+        request = urllib.request.Request(
+            self.endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+            return dict(_parse_student_response(raw, source="OpenAI-compatible"))
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("proposal_invalid: OpenAI-compatible proposal request failed: %s" % exc) from exc
+
+
+def build_student_proposal_provider(
+    provider: str,
+    model_name: str,
+    target: StudentTarget,
+    *,
+    base_url: str,
+    timeout_s: float,
+) -> StudentProposalProvider:
+    normalized = str(provider).strip().lower()
+    if normalized == "ollama":
+        return OllamaStudentProposalProvider(model_name, target, base_url=base_url, timeout_s=timeout_s)
+    if normalized in {"vllm", "openai_compatible", "openai-compatible"}:
+        return OpenAICompatibleStudentProposalProvider(model_name, target, base_url=base_url, timeout_s=timeout_s)
+    raise ValueError("unsupported Student proposal provider: %s" % provider)
 
 
 @dataclass(frozen=True)
@@ -264,6 +343,23 @@ class StudentCampaign:
             {"next_round": next_round, "status": status, "failures": list(failures[-16:]), "seen_proposal_digests": list(seen[-16:])},
         )
 
+    def _load_resume(self) -> tuple[int, list[Mapping[str, Any]], list[str]]:
+        if not self.resume_path.is_file():
+            return 1, [], []
+        try:
+            raw = json.loads(self.resume_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return 1, [], []
+        if not isinstance(raw, Mapping) or raw.get("status") not in {"running", "worker_running"}:
+            return 1, [], []
+        try:
+            next_round = max(1, int(raw.get("next_round", 1)))
+        except (TypeError, ValueError):
+            next_round = 1
+        failures = raw.get("failures") if isinstance(raw.get("failures"), list) else []
+        seen = raw.get("seen_proposal_digests") if isinstance(raw.get("seen_proposal_digests"), list) else []
+        return next_round, [dict(item) for item in failures if isinstance(item, Mapping)], [str(item) for item in seen]
+
     @staticmethod
     def _round_failure(
         round_index: int,
@@ -280,12 +376,13 @@ class StudentCampaign:
         if int(max_rounds) <= 0:
             raise ValueError("max_rounds must be positive")
         self.output_root.mkdir(parents=True, exist_ok=True)
-        failures: list[Mapping[str, Any]] = []
-        seen: list[str] = []
+        start_round, persisted_failures, persisted_seen = self._load_resume()
+        failures: list[Mapping[str, Any]] = persisted_failures
+        seen: list[str] = persisted_seen
         rounds: list[CampaignRound] = []
         failure_count = 0
         last_failure: Optional[str] = None
-        for round_index in range(1, int(max_rounds) + 1):
+        for round_index in range(start_round, int(max_rounds) + 1):
             context = self._context(round_index, failures, seen)
             self._persist_resume(round_index, "running", failures, seen)
             proposal = None
@@ -374,7 +471,9 @@ class StudentCampaign:
 __all__ = [
     "CampaignResult",
     "CampaignRound",
+    "OpenAICompatibleStudentProposalProvider",
     "OllamaStudentProposalProvider",
+    "build_student_proposal_provider",
     "StudentCampaign",
     "StudentProposalProvider",
     "StudentRoundEvaluator",
