@@ -53,7 +53,9 @@ def student_proposal_json_schema(target: StudentTarget = StudentTarget()) -> Map
             "mlp_ratio": {"type": "number", "minimum": 1, "maximum": 8},
             "spatial_patch": {"type": "integer", "enum": [1, 2, 4]},
             "temporal_patch": {"type": "integer", "enum": [1, 5]},
-            "temporal_layers": {"type": "array", "items": {"type": "integer", "minimum": 0}, "uniqueItems": True},
+            # vLLM's guided-json grammar does not implement uniqueItems; the
+            # trusted Harness validator enforces uniqueness after decoding.
+            "temporal_layers": {"type": "array", "items": {"type": "integer", "minimum": 0}},
             "conditioning": {"type": "string", "enum": ["ada_norm_zero"]},
             "norm": {"type": "string", "enum": ["rmsnorm", "layernorm"]},
             "activation": {"type": "string", "enum": ["silu", "gelu"]},
@@ -208,7 +210,13 @@ class OpenAICompatibleStudentProposalProvider:
             with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
                 raw = json.loads(response.read().decode("utf-8"))
             return dict(_parse_student_response(raw, source="OpenAI-compatible"))
-        except (OSError, urllib.error.URLError, urllib.error.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:2000]
+            except OSError:
+                detail = str(exc)
+            raise ValueError("proposal_invalid: OpenAI-compatible proposal request failed: HTTP %s: %s" % (exc.code, detail)) from exc
+        except (OSError, urllib.error.URLError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("proposal_invalid: OpenAI-compatible proposal request failed: %s" % exc) from exc
 
 
@@ -358,6 +366,22 @@ class StudentCampaign:
             next_round = 1
         failures = raw.get("failures") if isinstance(raw.get("failures"), list) else []
         seen = raw.get("seen_proposal_digests") if isinstance(raw.get("seen_proposal_digests"), list) else []
+        # A worker-running checkpoint from an older supervisor may contain
+        # only its manifest. Reconstruct the bounded context from the durable
+        # event stream so a restart does not erase the LLM's failure feedback.
+        if not failures or not seen:
+            try:
+                for line in self.events_path.read_text(encoding="utf-8").splitlines()[-16:]:
+                    event = json.loads(line)
+                    if not isinstance(event, Mapping):
+                        continue
+                    if event.get("status") == "failed":
+                        failures.append({"round": event.get("round"), "failure_code": event.get("failure_code"), "message": event.get("message", "")})
+                    digest = event.get("proposal_digest")
+                    if digest:
+                        seen.append(str(digest))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                pass
         return next_round, [dict(item) for item in failures if isinstance(item, Mapping)], [str(item) for item in seen]
 
     @staticmethod
@@ -371,6 +395,20 @@ class StudentCampaign:
         message: str,
     ) -> CampaignRound:
         return CampaignRound(round_index, proposal, compile_manifest, training, evaluation, code, message)
+
+    def _compile_round(self, proposal: StudentProposal, round_dir: Path) -> CompileManifest:
+        compile_dir = round_dir / "compile"
+        manifest_path = compile_dir / "compile_manifest.json"
+        if manifest_path.is_file():
+            try:
+                existing = CompileManifest.from_path(manifest_path)
+            except CompileError:
+                existing = None
+            if existing is None or existing.proposal_digest != proposal.digest:
+                # A previous crashed/restarted attempt may have used the same
+                # numeric round for another proposal. Never overwrite it.
+                compile_dir = round_dir / ("compile-" + proposal.digest[:12])
+        return self.compiler.compile(proposal, compile_dir)
 
     def run(self, *, max_rounds: int) -> CampaignResult:
         if int(max_rounds) <= 0:
@@ -403,8 +441,17 @@ class StudentCampaign:
                     message = "proposal digest already appeared in this campaign"
                 else:
                     seen.append(proposal.digest)
-                    compile_manifest = self.compiler.compile(proposal, round_dir / "compile")
-                    _atomic_json(self.resume_path, {"next_round": round_index, "status": "worker_running", "manifest": compile_manifest.to_dict()})
+                    compile_manifest = self._compile_round(proposal, round_dir)
+                    _atomic_json(
+                        self.resume_path,
+                        {
+                            "next_round": round_index,
+                            "status": "worker_running",
+                            "manifest": compile_manifest.to_dict(),
+                            "failures": list(failures[-16:]),
+                            "seen_proposal_digests": list(seen[-16:]),
+                        },
+                    )
                     training = self.worker.run(compile_manifest, round_dir)
                     if training.status != "success":
                         failure_code = training.failure_code or "training_failed"
