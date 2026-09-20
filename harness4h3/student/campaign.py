@@ -117,7 +117,13 @@ def _student_architect_prompt(context: Mapping[str, Any]) -> str:
         "For this registered graph, hidden_size=2048 and depth=24 is a legal reference scale, "
         "but you may choose another width/depth/head/patch combination. "
         "temporal_layers must be unique layer indices within depth. "
-        "Keep source_steps<=256, target_steps<=64, and learning rates<=0.01. CONTEXT="
+        "Keep source_steps<=256, target_steps<=64, and learning rates<=0.01. "
+        "For mlp_ratio=4.0 on this registered graph, hidden=1536/depth=24 "
+        "is 727394400 parameters and invalid; hidden=1792/depth=24 is "
+        "980747360 and still invalid. Legal reference points include "
+        "hidden=1920/depth=24 (1121579616), hidden=1536/depth=36 "
+        "(1067335776), or hidden=2048/depth=24 (1271849056). "
+        "Estimate parameters before returning and never repeat a below-1B design. CONTEXT="
         + json.dumps(dict(context), ensure_ascii=False, sort_keys=True)
     )
 
@@ -156,7 +162,7 @@ class OllamaStudentProposalProvider:
             "stream": False,
             "think": False,
             "format": schema,
-            "options": {"temperature": 0},
+            "options": {"temperature": 0.2},
         }
         request = urllib.request.Request(
             self.base_url + "/api/chat",
@@ -193,7 +199,7 @@ class OpenAICompatibleStudentProposalProvider:
         payload = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": _student_architect_prompt(context)}],
-            "temperature": 0,
+            "temperature": 0.2,
             "stream": False,
             "response_format": {
                 "type": "json_schema",
@@ -358,11 +364,15 @@ class StudentCampaign:
             raw = json.loads(self.resume_path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             return 1, [], []
-        if not isinstance(raw, Mapping) or raw.get("status") not in {"running", "worker_running"}:
+        if not isinstance(raw, Mapping) or raw.get("status") not in {"running", "worker_running", "failed"}:
             return 1, [], []
         try:
             next_round = max(1, int(raw.get("next_round", 1)))
         except (TypeError, ValueError):
+            next_round = 1
+        if raw.get("status") == "failed":
+            # A new run after failure starts at round one but keeps the
+            # durable failure context for the next LLM proposal.
             next_round = 1
         failures = raw.get("failures") if isinstance(raw.get("failures"), list) else []
         seen = raw.get("seen_proposal_digests") if isinstance(raw.get("seen_proposal_digests"), list) else []
