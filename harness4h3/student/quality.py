@@ -106,6 +106,27 @@ class ClipTemporalQualityBackend:
         deltas = [float(np.mean(np.abs(current - previous))) for previous, current in zip(arrays, arrays[1:])]
         return _bounded(sum(deltas) / max(1, len(deltas)) * 4.0)
 
+    @staticmethod
+    def _feature_tensor(output: Any, torch_module: Any) -> Any:
+        """Normalize the transformers 4.x tensor and 5.x model-output APIs."""
+
+        if torch_module.is_tensor(output):
+            return output
+        for name in ("pooler_output", "image_embeds", "text_embeds", "last_hidden_state"):
+            value = getattr(output, name, None)
+            if value is not None and torch_module.is_tensor(value):
+                if name == "last_hidden_state" and value.ndim == 3:
+                    return value[:, 0]
+                return value
+        if isinstance(output, dict):
+            for name in ("pooler_output", "image_embeds", "text_embeds", "last_hidden_state"):
+                value = output.get(name)
+                if value is not None and torch_module.is_tensor(value):
+                    if name == "last_hidden_state" and value.ndim == 3:
+                        return value[:, 0]
+                    return value
+        raise TypeError("CLIP feature output has no tensor representation")
+
     def evaluate(self, video_path: Path | str, caption: str) -> QualityEvidence:
         caption = str(caption).strip()
         if not caption:
@@ -121,8 +142,8 @@ class ClipTemporalQualityBackend:
             image_inputs = {key: value.to(device) for key, value in image_inputs.items()}
             text_inputs = {key: value.to(device) for key, value in text_inputs.items()}
             with torch.inference_mode():
-                image_features = F.normalize(model.get_image_features(**image_inputs), dim=-1)
-                text_features = F.normalize(model.get_text_features(**text_inputs), dim=-1)
+                image_features = F.normalize(self._feature_tensor(model.get_image_features(**image_inputs), torch), dim=-1)
+                text_features = F.normalize(self._feature_tensor(model.get_text_features(**text_inputs), torch), dim=-1)
                 semantic_values = ((image_features @ text_features[0].unsqueeze(-1)).squeeze(-1) + 1.0) / 2.0
                 temporal_values = (F.cosine_similarity(image_features[:-1], image_features[1:], dim=-1) + 1.0) / 2.0
             semantic = _bounded(float(semantic_values.mean().item()))
