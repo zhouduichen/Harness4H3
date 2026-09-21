@@ -9,7 +9,11 @@ optimization experiments. It studies one bounded question:
 
 The repository provides the experiment protocol, constrained operator
 execution, model/system lineage, independent evaluation, Pareto archive, and
-append-only trajectory. It includes a real PyTorch TinyH3 reference trainer
+append-only trajectory. It also includes a shared immutable-base campaign
+control plane with bounded multi-candidate review, fail-closed capability
+snapshots, hard/soft gates, structured failure attribution, and an auditable
+decision trace. See the [campaign control-plane guide](docs/campaign-control-plane.md).
+It includes a real PyTorch TinyH3 reference trainer
 for validating contracts and a fail-closed Real MiniMax-H3 adapter/worker
 path. The real path still requires the declared GPU host, ComfyUI service, and
 an authentic A1-T0 run before any MiniMax-H3 optimization claim is made.
@@ -77,11 +81,11 @@ DeviceProfile + TargetProfile + Model/System state + Budget
                          ↓
               fixed/manual Controller
                          ↓
-                  ExperimentPlan
+                  ExperimentPlan / CandidateBatch
                          ↓
- schema → policy → budget → registered-operator validation
+ immutable base → schema → review → deterministic validation
                          ↓
-            ModelCandidate or SystemCandidate
+            ModelCandidate or StudentCandidate
                          ↓
       benchmark + canonical EvaluationRecord
                          ↓
@@ -102,6 +106,7 @@ python -m venv .venv
 .venv/bin/python -m pip install -e '.[test]'
 .venv/bin/python -m harness4h3 --config configs/default.yaml validate-config --json
 .venv/bin/python -m pytest -q
+.venv/bin/python -m pytest -q tests/unit/test_campaign_*.py tests/unit/test_campaign_adapters.py tests/integration/test_campaign_control_plane.py
 ```
 
 Windows uses `.venv\Scripts\python.exe` in place of `.venv/bin/python`.
