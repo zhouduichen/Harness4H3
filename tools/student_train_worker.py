@@ -19,7 +19,7 @@ try:
         acquire_controller_handoff,
         publish_worker_gpu_lease,
         release_controller_handoff,
-        select_free_cuda_devices,
+        select_role_gpu_allocation,
     )
     from harness4h3.student.proposal import StudentTarget
     from harness4h3.student.worker import RealH3TeacherBackend, StudentTrainWorker, TrainingResult
@@ -31,7 +31,7 @@ except ModuleNotFoundError:  # direct invocation from the repository root
         acquire_controller_handoff,
         publish_worker_gpu_lease,
         release_controller_handoff,
-        select_free_cuda_devices,
+        select_role_gpu_allocation,
     )
     from harness4h3.student.proposal import StudentTarget
     from harness4h3.student.worker import RealH3TeacherBackend, StudentTrainWorker, TrainingResult
@@ -167,16 +167,19 @@ def main(argv=None) -> int:
                 args.controller_worker_lease_file or None,
             )
             handoff_acquired = True
-            selected_devices = select_free_cuda_devices(
-                (args.teacher_rank_min_free_memory_gb,) * args.teacher_world_size,
+            allocation = select_role_gpu_allocation(
+                args.teacher_world_size,
+                args.teacher_rank_min_free_memory_gb,
+                args.student_min_free_memory_gb,
                 args.wait_for_gpu_s,
+                worker_min_free_memory_gb=args.min_free_memory_gb,
             )
-            teacher_devices = selected_devices[: args.teacher_world_size]
+            teacher_devices = allocation.teacher_devices
             selected_teacher_device = teacher_devices[0]
-            selected_student_device = selected_devices[-1]
+            selected_student_device = allocation.student_device
             publish_worker_gpu_lease(
                 args.controller_worker_lease_file or None,
-                selected_devices,
+                allocation.all_devices,
             )
             # The Student algorithm receives the loaded H3 teacher role and
             # invokes its forward pass for the current noisy sample/timestep.
@@ -200,6 +203,8 @@ def main(argv=None) -> int:
             device=selected_student_device,
             teacher_device=selected_teacher_device,
             student_device=selected_student_device,
+            teacher_devices=teacher_devices,
+            teacher_world_size=args.teacher_world_size,
             parent_checkpoint=Path(args.parent_checkpoint) if args.parent_checkpoint else None,
             parent_candidate_id=args.parent_candidate_id or None,
             fidelity=args.fidelity,

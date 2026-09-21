@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from harness4h3.student.gpu import GPUResourceUnavailable, select_free_cuda_devices
+from harness4h3.student.gpu import GPUResourceUnavailable, select_free_cuda_devices, select_role_gpu_allocation
 
 
 def test_gpu_lease_assigns_distinct_devices_by_memory(monkeypatch):
@@ -22,3 +22,30 @@ def test_gpu_lease_reports_contention_without_wait(monkeypatch):
     )
     with pytest.raises(GPUResourceUnavailable, match="fewer than 2 GPUs"):
         select_free_cuda_devices((44.0, 20.0), wait_s=0)
+
+
+def test_role_allocation_assigns_distinct_student_device(monkeypatch):
+    monkeypatch.setattr(
+        "harness4h3.student.gpu.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="0,60000\n1,55000\n2,25000\n"),
+    )
+    allocation = select_role_gpu_allocation(
+        2,
+        20.0,
+        20.0,
+        wait_s=0,
+        worker_min_free_memory_gb=80.0,
+    )
+    assert allocation.teacher_devices == ("cuda:0", "cuda:1")
+    assert allocation.student_device == "cuda:2"
+    assert set(allocation.teacher_devices).isdisjoint({allocation.student_device})
+    assert sum(allocation.free_memory_gb.values()) >= 80.0
+
+
+def test_role_allocation_enforces_aggregate_worker_floor(monkeypatch):
+    monkeypatch.setattr(
+        "harness4h3.student.gpu.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="0,30000\n1,25000\n2,22000\n"),
+    )
+    with pytest.raises(GPUResourceUnavailable, match="aggregate minimum"):
+        select_role_gpu_allocation(2, 20.0, 20.0, wait_s=0, worker_min_free_memory_gb=100.0)

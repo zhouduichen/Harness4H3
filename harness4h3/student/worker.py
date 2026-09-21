@@ -9,9 +9,10 @@ import os
 import tempfile
 import time
 import copy
+import inspect
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Protocol
+from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 
 import torch
 from torch import Tensor, nn
@@ -41,6 +42,7 @@ from .compiler import CompileManifest
 from .model import build_smoke_student, build_student
 from .proposal import StudentProposal, StudentTarget
 from .quantization import quantize_checkpoint
+from .teacher_service import TeacherService, TeacherServiceHandle
 
 
 class StudentTrainingError(RuntimeError):
@@ -104,6 +106,12 @@ class TrainingResult:
     total_parameter_count: int = 0
     inheritance_ratio: float = 0.0
     initialization_mode: str = "fresh_init"
+    teacher_world_size: int = 1
+    teacher_devices: tuple[str, ...] = ()
+    student_device: str = ""
+    teacher_ranks_used: tuple[int, ...] = ()
+    online_forward: bool = False
+    stage_lineage: tuple[Mapping[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -114,7 +122,14 @@ class TeacherStudentBackend(Protocol):
 
     offline_simulation: bool
 
-    def load_teacher(self, checkpoint: Path, device: torch.device) -> Any:
+    def load_teacher(
+        self,
+        checkpoint: Path,
+        device: torch.device,
+        *,
+        teacher_devices: Sequence[str] = (),
+        teacher_world_size: int = 1,
+    ) -> Any:
         ...
 
     def build_student(
@@ -173,9 +188,16 @@ class StudentAlgorithmAdapter(DenoisingModelAdapter):
     backends, whose TrainingResult is marked ``offline_simulation``.
     """
 
-    def __init__(self, *, teacher_adapter: Optional[DenoisingModelAdapter] = None, teacher_role: Any = None):
+    def __init__(
+        self,
+        *,
+        teacher_adapter: Optional[DenoisingModelAdapter] = None,
+        teacher_role: Any = None,
+        teacher_predictor: Optional[TeacherServiceHandle] = None,
+    ):
         self.teacher_adapter = teacher_adapter
         self.teacher_role = teacher_role
+        self.teacher_predictor = teacher_predictor
         self._teacher_target: Optional[torch.Tensor] = None
         self._teacher_audio_clean: Optional[torch.Tensor] = None
         self._teacher_audio_noise: Optional[torch.Tensor] = None
@@ -227,6 +249,14 @@ class StudentAlgorithmAdapter(DenoisingModelAdapter):
         if noisy.video is None or timestep.video is None:
             raise TrainingFailure("invalid_training_config", "Student algorithms require a video prediction")
         if getattr(role, "name", "") == "teacher":
+            if self.teacher_predictor is not None:
+                prediction = self.teacher_predictor.predict(noisy, timestep, conditioning)
+                return ModalPrediction(
+                    video=prediction.video.to(device=noisy.video.device, dtype=noisy.video.dtype)
+                    if prediction.video is not None else None,
+                    audio=prediction.audio.to(device=noisy.video.device, dtype=noisy.video.dtype)
+                    if prediction.audio is not None else None,
+                )
             if self.teacher_adapter is not None and self.teacher_role is not None:
                 full_noisy = noisy
                 if full_noisy.audio is None and self._teacher_audio_clean is not None:
@@ -468,6 +498,8 @@ class StudentTrainWorker:
         device: Optional[str] = None,
         teacher_device: Optional[str] = None,
         student_device: Optional[str] = None,
+        teacher_devices: Sequence[str] = (),
+        teacher_world_size: int = 1,
         train_steps: Optional[int] = None,
         parent_checkpoint: Optional[Path] = None,
         parent_candidate_id: Optional[str] = None,
@@ -480,6 +512,7 @@ class StudentTrainWorker:
         inherited_parameter_count = 0
         total_parameter_count = 0
         parent_kind = "teacher_seed"
+        inherit_parent = False
         algorithm_name: Optional[str] = None
         algorithm_path: Optional[str] = None
         dispatch = "not_started"
@@ -495,7 +528,14 @@ class StudentTrainWorker:
             selected_teacher_device = torch.device(teacher_device or selected_student_device)
             if (selected_student_device.type == "cuda" or selected_teacher_device.type == "cuda") and not torch.cuda.is_available():
                 return self._failure(manifest, started, "device_unavailable", "CUDA is not available", parent_sha256=teacher_sha256, offline_simulation=self.backend.offline_simulation, algorithm_name=algorithm_name, fidelity=fidelity)
-            teacher = self.backend.load_teacher(teacher_checkpoint, selected_teacher_device)
+            load_teacher = self.backend.load_teacher
+            load_parameters = inspect.signature(load_teacher).parameters
+            load_kwargs = {}
+            if "teacher_devices" in load_parameters:
+                load_kwargs["teacher_devices"] = tuple(str(item) for item in teacher_devices)
+            if "teacher_world_size" in load_parameters:
+                load_kwargs["teacher_world_size"] = int(teacher_world_size)
+            teacher = load_teacher(teacher_checkpoint, selected_teacher_device, **load_kwargs)
             student = self.backend.build_student(proposal, self.target, selected_student_device)
             student.train(True)
             # M0000 is the immutable teacher seed. Later fidelity stages and
@@ -520,6 +560,7 @@ class StudentTrainWorker:
             adapter = StudentAlgorithmAdapter(
                 teacher_adapter=getattr(self.backend, "adapter", None),
                 teacher_role=teacher,
+                teacher_predictor=teacher if isinstance(teacher, TeacherServiceHandle) else None,
             )
             methods, algorithm_path = self._algorithm_runs(proposal, student, teacher, adapter)
             algorithm_name = proposal.training.method
@@ -560,6 +601,13 @@ class StudentTrainWorker:
                 return self._failure(manifest, started, "empty_training_stream", "algorithm produced no optimizer steps", parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation, parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None, parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count, algorithm_name=algorithm_name, algorithm_path=algorithm_path, algorithm_dispatch=dispatch, fidelity=fidelity)
             if changed <= 0:
                 return self._failure(manifest, started, "unchanged_child", "no Student tensor changed after algorithm dispatch", parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation, parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None, parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count, algorithm_name=algorithm_name, algorithm_path=algorithm_path, algorithm_dispatch=dispatch, fidelity=fidelity)
+            teacher_service = teacher if isinstance(teacher, TeacherServiceHandle) else None
+            teacher_world = int(getattr(teacher, "world_size", teacher_world_size))
+            teacher_device_names = tuple(getattr(teacher, "devices", tuple(str(item) for item in teacher_devices)))
+            teacher_rank_usage = tuple(sorted(teacher_service.ranks_used)) if teacher_service is not None else ()
+            online_teacher_forward = teacher_service is not None
+            if teacher_service is not None:
+                teacher_service.close()
             output_dir.mkdir(parents=True, exist_ok=True)
             child_path = output_dir / "student.safetensors"
             metadata = {
@@ -574,6 +622,11 @@ class StudentTrainWorker:
                 "fidelity": str(fidelity),
                 "architecture_family": proposal.architecture.family,
                 "offline_simulation": str(bool(self.backend.offline_simulation)).lower(),
+                "teacher_world_size": str(teacher_world),
+                "teacher_devices": ",".join(teacher_device_names),
+                "teacher_ranks_used": ",".join(str(item) for item in teacher_rank_usage),
+                "student_device": str(selected_student_device),
+                "online_forward": str(online_teacher_forward).lower(),
             }
             self.backend.save_student(student, child_path, metadata)
             full_precision_path = child_path
@@ -612,6 +665,11 @@ class StudentTrainWorker:
                 total_parameter_count=total_parameter_count,
                 inheritance_ratio=(float(inherited_parameter_count) / float(total_parameter_count)) if total_parameter_count else 0.0,
                 initialization_mode=("full_resume" if inherited_parameter_count == total_parameter_count and total_parameter_count else "partial_transfer" if inherited_parameter_count else "fresh_init"),
+                teacher_world_size=teacher_world,
+                teacher_devices=teacher_device_names,
+                student_device=str(selected_student_device),
+                teacher_ranks_used=teacher_rank_usage,
+                online_forward=online_teacher_forward,
             )
         except StudentTrainingError as exc:
             return self._failure(manifest, started, exc.code, exc.message, parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation, parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None, parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count, algorithm_name=algorithm_name, algorithm_path=algorithm_path, algorithm_dispatch=dispatch, fidelity=fidelity)
@@ -637,21 +695,41 @@ class RealH3TeacherBackend:
         *,
         dtype: torch.dtype = torch.bfloat16,
         teacher_targets_dir: Optional[Path] = None,
+        teacher_devices: Sequence[str] = (),
+        teacher_world_size: int = 1,
     ):
         self.comfyui_root = Path(comfyui_root).resolve()
         self.cache_dir = Path(cache_dir).resolve()
         self.dtype = dtype
         self.teacher_targets_dir = Path(teacher_targets_dir).resolve() if teacher_targets_dir else None
+        self.teacher_devices = tuple(str(item) for item in teacher_devices)
+        self.teacher_world_size = int(teacher_world_size)
         self.adapter = None
         if self.teacher_targets_dir is not None:
             raise ValueError(
                 "precomputed teacher targets are proxy_training and cannot be used by the real Student capability"
             )
 
-    def load_teacher(self, checkpoint: Path, device: torch.device) -> Any:
+    def load_teacher(
+        self,
+        checkpoint: Path,
+        device: torch.device,
+        *,
+        teacher_devices: Sequence[str] = (),
+        teacher_world_size: int = 1,
+    ) -> Any:
         from h3_training.adapters.real_h3 import RealMiniMaxH3Adapter
 
         self.adapter = RealMiniMaxH3Adapter(self.comfyui_root, device=str(device), dtype=self.dtype)
+        devices = tuple(str(item) for item in teacher_devices) or self.teacher_devices
+        world_size = int(teacher_world_size or self.teacher_world_size or len(devices) or 1)
+        if devices and len(devices) > 1:
+            if len(devices) != world_size:
+                raise StudentTrainingError(
+                    "teacher_world_size_mismatch",
+                    "Teacher device count does not match world size",
+                )
+            return TeacherService(checkpoint, self.comfyui_root, devices, dtype=self.dtype).start()
         return self.adapter.load_role(Path(checkpoint), trainable=False)
 
     def build_student(self, proposal: StudentProposal, target: StudentTarget, device: torch.device) -> nn.Module:
