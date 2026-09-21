@@ -18,6 +18,7 @@ from harness4h3.student.remote import (
     RemoteStudentEvaluator,
     RemoteStudentRetention,
     RemoteStudentWorker,
+    RemoteTargetDeviceEvaluator,
 )
 from harness4h3.remote.ssh import LocalCommandClient
 
@@ -57,6 +58,8 @@ def main(argv=None) -> int:
             min_rounds_before_success=config.min_rounds_before_success,
             retention_handler=RemoteStudentRetention(config, client).retain,
         )
+        if config.target_device_command and config.target_device_id:
+            campaign_kwargs["target_device_evaluator"] = RemoteTargetDeviceEvaluator(config, client)
         if config.quality_backend == "clip_temporal":
             teacher_baseline = RemoteStudentBaseline(config, client).run()
             campaign_kwargs.update(
@@ -82,11 +85,19 @@ def main(argv=None) -> int:
         )
         campaign = StudentCampaign(*campaign_args, **campaign_kwargs)
         result = campaign.run(max_rounds=args.max_rounds or config.max_rounds)
-        exit_code = 0 if result.status == "TARGET_SATISFIED" else 1
+        exit_code = int(result.exit_code)
         payload = result.to_dict()
     except Exception as exc:
         exit_code = 1
-        payload = {"status": "supervisor_failed", "failure_code": "supervisor_failed", "message": str(exc), "rounds": []}
+        payload = {
+            "status": "INFRA_FAILURE",
+            "optimization_status": "INFRA_FAILURE",
+            "execution_status": "INFRA_FAILURE",
+            "exit_code": 1,
+            "failure_code": "supervisor_failed",
+            "message": str(exc),
+            "rounds": [],
+        }
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return exit_code

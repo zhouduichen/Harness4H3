@@ -171,6 +171,35 @@ def sample_h3_latent(
         raise StudentGenerationError("invalid_sampling_steps", "sampling_steps must be positive")
     adapter = RealMiniMaxH3Adapter(comfyui_root, device=str(device), dtype=dtype)
     role = adapter.load_role(Path(checkpoint), trainable=False)
+    return sample_h3_latent_with_role(
+        adapter,
+        role,
+        prompt,
+        video_shape,
+        audio_shape,
+        device,
+        sampling_steps=sampling_steps,
+        seed=seed,
+        dtype=dtype,
+    )
+
+
+def sample_h3_latent_with_role(
+    adapter: RealMiniMaxH3Adapter,
+    role: Any,
+    prompt: torch.Tensor,
+    video_shape: tuple[int, ...],
+    audio_shape: tuple[int, ...],
+    device: torch.device,
+    *,
+    sampling_steps: int,
+    seed: int,
+    dtype: torch.dtype = torch.bfloat16,
+) -> tuple[torch.Tensor, float]:
+    """Sample with an already-loaded H3 role so a manifest reuses one model."""
+
+    if int(sampling_steps) <= 0:
+        raise StudentGenerationError("invalid_sampling_steps", "sampling_steps must be positive")
     generator = torch.Generator(device="cpu").manual_seed(int(seed))
     video = torch.randn(video_shape, generator=generator, device="cpu", dtype=torch.float32).to(device=device, dtype=dtype)
     audio = torch.randn(audio_shape, generator=generator, device="cpu", dtype=torch.float32).to(device=device, dtype=dtype)
@@ -330,5 +359,6 @@ __all__ = [
     "load_student_model",
     "sample_student_latent",
     "sample_h3_latent",
+    "sample_h3_latent_with_role",
     "write_video",
 ]

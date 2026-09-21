@@ -194,10 +194,12 @@ class StudentAlgorithmAdapter(DenoisingModelAdapter):
         teacher_adapter: Optional[DenoisingModelAdapter] = None,
         teacher_role: Any = None,
         teacher_predictor: Optional[TeacherServiceHandle] = None,
+        use_role_model_for_teacher: bool = False,
     ):
         self.teacher_adapter = teacher_adapter
         self.teacher_role = teacher_role
         self.teacher_predictor = teacher_predictor
+        self.use_role_model_for_teacher = bool(use_role_model_for_teacher)
         self._teacher_target: Optional[torch.Tensor] = None
         self._teacher_audio_clean: Optional[torch.Tensor] = None
         self._teacher_audio_noise: Optional[torch.Tensor] = None
@@ -249,6 +251,14 @@ class StudentAlgorithmAdapter(DenoisingModelAdapter):
         if noisy.video is None or timestep.video is None:
             raise TrainingFailure("invalid_training_config", "Student algorithms require a video prediction")
         if getattr(role, "name", "") == "teacher":
+            if self.use_role_model_for_teacher:
+                teacher_model = getattr(role, "model", None)
+                if teacher_model is None or not callable(teacher_model):
+                    raise TrainingFailure("teacher_predictor_missing", "promoted Student teacher has no callable model")
+                output = teacher_model(noisy.video, conditioning.text, timestep.video)
+                if not isinstance(output, torch.Tensor) or tuple(output.shape) != tuple(noisy.video.shape):
+                    raise TrainingFailure("teacher_prediction_shape_mismatch", "promoted Student teacher output does not match latent shape")
+                return ModalPrediction(video=output)
             if self.teacher_predictor is not None:
                 prediction = self.teacher_predictor.predict(noisy, timestep, conditioning)
                 return ModalPrediction(
@@ -516,6 +526,7 @@ class StudentTrainWorker:
         algorithm_name: Optional[str] = None
         algorithm_path: Optional[str] = None
         dispatch = "not_started"
+        teacher_service: Optional[TeacherServiceHandle] = None
         try:
             proposal = StudentProposal.from_dict(manifest.proposal)
             algorithm_name = proposal.training.method
@@ -536,6 +547,7 @@ class StudentTrainWorker:
             if "teacher_world_size" in load_parameters:
                 load_kwargs["teacher_world_size"] = int(teacher_world_size)
             teacher = load_teacher(teacher_checkpoint, selected_teacher_device, **load_kwargs)
+            teacher_service = teacher if isinstance(teacher, TeacherServiceHandle) else None
             student = self.backend.build_student(proposal, self.target, selected_student_device)
             student.train(True)
             # M0000 is the immutable teacher seed. Later fidelity stages and
@@ -562,7 +574,6 @@ class StudentTrainWorker:
                 teacher_role=teacher,
                 teacher_predictor=teacher if isinstance(teacher, TeacherServiceHandle) else None,
             )
-            methods, algorithm_path = self._algorithm_runs(proposal, student, teacher, adapter)
             algorithm_name = proposal.training.method
             initial_state = {
                 name: value.detach().to(device="cpu").clone()
@@ -573,35 +584,113 @@ class StudentTrainWorker:
             initial_loss = None
             final_loss = None
             maximum_gradient_norm = 0.0
+            stage_lineage: list[Mapping[str, Any]] = []
+            output_dir.mkdir(parents=True, exist_ok=True)
             if selected_student_device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(selected_student_device)
-            for method in methods:
-                result = TrainerEngine(
-                    TrainerConfig(
-                        seed=20260920,
-                        parent_sha256=parent_sha256 or "",
-                        device=str(selected_student_device),
+            if proposal.training.method == "progressive_distillation":
+                algorithm_path = "h3_training.algorithms.progressive_distillation.ProgressiveDistillation"
+                stages = plan_binary_stages(proposal.training.source_steps, proposal.training.target_steps)
+                active_teacher = teacher
+                active_adapter = adapter
+                active_teacher_checkpoint = teacher_checkpoint
+                for stage_index, stage in enumerate(stages):
+                    stage_method = ProgressiveDistillation(
+                        student,
+                        getattr(active_teacher, "model", active_teacher),
+                        active_adapter,
+                        ProgressiveDistillationConfig(
+                            stage=stage,
+                            learning_rate=proposal.training.learning_rate,
+                            audio_weight=0.0,
+                        ),
                     )
-                ).run(
-                    method,
-                    self.backend.batches(teacher, proposal, self.target, steps, selected_student_device),
-                    max_steps=steps,
-                )
-                dispatch = "executed"
-                total_steps += sum(int(value) for value in result.optimizer_steps.values())
-                initial_loss = result.initial_loss if initial_loss is None else initial_loss
-                final_loss = result.final_loss
-                maximum_gradient_norm = max(maximum_gradient_norm, result.max_gradient_norm)
+                    result = TrainerEngine(
+                        TrainerConfig(
+                            seed=20260920 + stage_index,
+                            parent_sha256=parent_sha256 or "",
+                            device=str(selected_student_device),
+                        )
+                    ).run(
+                        stage_method,
+                        self.backend.batches(active_teacher, proposal, self.target, steps, selected_student_device),
+                        max_steps=steps,
+                    )
+                    dispatch = "executed"
+                    total_steps += sum(int(value) for value in result.optimizer_steps.values())
+                    initial_loss = result.initial_loss if initial_loss is None else initial_loss
+                    final_loss = result.final_loss
+                    maximum_gradient_norm = max(maximum_gradient_norm, result.max_gradient_norm)
+                    stage_path = output_dir / ("student-stage-%02d.safetensors" % (stage_index + 1))
+                    self.backend.save_student(
+                        student,
+                        stage_path,
+                        {
+                            "proposal_digest": proposal.digest,
+                            "compiler_digest": manifest.manifest_digest,
+                            "algorithm_name": proposal.training.method,
+                            "stage_index": str(stage_index),
+                            "teacher_nfe": str(stage.teacher_nfe),
+                            "student_nfe": str(stage.student_nfe),
+                            "teacher_checkpoint": str(active_teacher_checkpoint),
+                            "promoted_teacher": "true",
+                        },
+                    )
+                    stage_sha256 = sha256_file(stage_path)
+                    stage_teacher_sha256 = sha256_file(Path(active_teacher_checkpoint))
+                    stage_lineage.append(
+                        {
+                            "stage_index": stage_index,
+                            "stage_parent_checkpoint": str(active_teacher_checkpoint),
+                            "teacher_checkpoint": str(active_teacher_checkpoint),
+                            "stage_teacher_sha256": stage_teacher_sha256,
+                            "teacher_nfe": stage.teacher_nfe,
+                            "student_checkpoint": str(stage_path),
+                            "stage_child_sha256": stage_sha256,
+                            "student_sha256": stage_sha256,
+                            "student_nfe": stage.student_nfe,
+                            "promoted_as_next_teacher": stage_index < len(stages) - 1,
+                        }
+                    )
+                    if stage_index < len(stages) - 1:
+                        promoted_teacher = copy.deepcopy(student).eval()
+                        for parameter in promoted_teacher.parameters():
+                            parameter.requires_grad_(False)
+                        active_teacher = promoted_teacher
+                        active_teacher_checkpoint = stage_path
+                        active_adapter = StudentAlgorithmAdapter(use_role_model_for_teacher=True)
+            else:
+                methods, algorithm_path = self._algorithm_runs(proposal, student, teacher, adapter)
+                for method in methods:
+                    result = TrainerEngine(
+                        TrainerConfig(
+                            seed=20260920,
+                            parent_sha256=parent_sha256 or "",
+                            device=str(selected_student_device),
+                        )
+                    ).run(
+                        method,
+                        self.backend.batches(teacher, proposal, self.target, steps, selected_student_device),
+                        max_steps=steps,
+                    )
+                    dispatch = "executed"
+                    total_steps += sum(int(value) for value in result.optimizer_steps.values())
+                    initial_loss = result.initial_loss if initial_loss is None else initial_loss
+                    final_loss = result.final_loss
+                    maximum_gradient_norm = max(maximum_gradient_norm, result.max_gradient_norm)
             changed = sum(
                 1
                 for name, value in student.state_dict().items()
                 if name in initial_state and not torch.equal(initial_state[name], value.detach().to(device="cpu"))
             )
             if total_steps <= 0 or initial_loss is None or final_loss is None:
+                if teacher_service is not None:
+                    teacher_service.close()
                 return self._failure(manifest, started, "empty_training_stream", "algorithm produced no optimizer steps", parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation, parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None, parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count, algorithm_name=algorithm_name, algorithm_path=algorithm_path, algorithm_dispatch=dispatch, fidelity=fidelity)
             if changed <= 0:
+                if teacher_service is not None:
+                    teacher_service.close()
                 return self._failure(manifest, started, "unchanged_child", "no Student tensor changed after algorithm dispatch", parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation, parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None, parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count, algorithm_name=algorithm_name, algorithm_path=algorithm_path, algorithm_dispatch=dispatch, fidelity=fidelity)
-            teacher_service = teacher if isinstance(teacher, TeacherServiceHandle) else None
             teacher_world = int(getattr(teacher, "world_size", teacher_world_size))
             teacher_device_names = tuple(getattr(teacher, "devices", tuple(str(item) for item in teacher_devices)))
             teacher_rank_usage = tuple(sorted(teacher_service.ranks_used)) if teacher_service is not None else ()
@@ -627,6 +716,7 @@ class StudentTrainWorker:
                 "teacher_ranks_used": ",".join(str(item) for item in teacher_rank_usage),
                 "student_device": str(selected_student_device),
                 "online_forward": str(online_teacher_forward).lower(),
+                "stage_lineage": json.dumps(list(stage_lineage), sort_keys=True),
             }
             self.backend.save_student(student, child_path, metadata)
             full_precision_path = child_path
@@ -637,9 +727,13 @@ class StudentTrainWorker:
                 quantize_checkpoint(child_path, quantized_path, bits=8, metadata={**metadata, "full_precision_sha256": sha256_file(child_path)})
                 child_for_evaluation = quantized_path
             elif proposal.deployment.quantization == "int4":
+                if teacher_service is not None:
+                    teacher_service.close()
                 return self._failure(manifest, started, "quantization_unsupported", "int4 Student quantization is not supported", parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation, parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None, parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count, algorithm_name=algorithm_name, algorithm_path=algorithm_path, algorithm_dispatch=dispatch, fidelity=fidelity)
             child_sha256 = sha256_file(child_for_evaluation)
             if child_sha256 == parent_sha256:
+                if teacher_service is not None:
+                    teacher_service.close()
                 return self._failure(manifest, started, "unchanged_child", "child file hash equals parent hash", parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation, parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None, parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count, algorithm_name=algorithm_name, algorithm_path=algorithm_path, algorithm_dispatch=dispatch, fidelity=fidelity)
             peak = torch.cuda.max_memory_allocated(selected_student_device) / float(1024**3) if selected_student_device.type == "cuda" else 0.0
             return TrainingResult(
@@ -670,16 +764,25 @@ class StudentTrainWorker:
                 student_device=str(selected_student_device),
                 teacher_ranks_used=teacher_rank_usage,
                 online_forward=online_teacher_forward,
+                stage_lineage=tuple(stage_lineage),
             )
         except StudentTrainingError as exc:
+            if teacher_service is not None:
+                teacher_service.close()
             return self._failure(manifest, started, exc.code, exc.message, parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation, parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None, parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count, algorithm_name=algorithm_name, algorithm_path=algorithm_path, algorithm_dispatch=dispatch, fidelity=fidelity)
         except TrainingFailure as exc:
+            if teacher_service is not None:
+                teacher_service.close()
             return self._failure(manifest, started, exc.code, str(exc), parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation, parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None, parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count, algorithm_name=algorithm_name, algorithm_path=algorithm_path, algorithm_dispatch=dispatch, fidelity=fidelity)
         except RuntimeError as exc:
+            if teacher_service is not None:
+                teacher_service.close()
             lowered = str(exc).lower()
             code = "training_oom" if "out of memory" in lowered else "training_runtime"
             return self._failure(manifest, started, code, str(exc), parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation, parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None, parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count, algorithm_name=algorithm_name, algorithm_path=algorithm_path, algorithm_dispatch=dispatch, fidelity=fidelity)
         except (OSError, TypeError, ValueError, KeyError) as exc:
+            if teacher_service is not None:
+                teacher_service.close()
             return self._failure(manifest, started, "training_config", str(exc), parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation, parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None, parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count, algorithm_name=algorithm_name, algorithm_path=algorithm_path, algorithm_dispatch=dispatch, fidelity=fidelity)
 
 

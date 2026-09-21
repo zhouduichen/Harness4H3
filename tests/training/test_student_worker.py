@@ -82,3 +82,24 @@ def test_worker_refuses_manifest_digest_mismatch(tmp_path):
         assert "manifest_digest_mismatch" in str(exc)
     else:
         raise AssertionError("tampered manifest should not load")
+
+
+def test_progressive_worker_publishes_each_child_as_next_teacher(tmp_path):
+    payload = valid_payload()
+    payload["training"].update({"method": "progressive_distillation", "source_steps": 4, "target_steps": 1})
+    proposal = StudentProposal.from_dict(payload)
+    manifest = StudentCompiler(StudentTarget()).compile(proposal, tmp_path / "progressive-compile")
+    teacher = tmp_path / "teacher.safetensors"
+    save_file({"teacher": torch.ones(1)}, str(teacher))
+
+    result = StudentTrainWorker(FakeBackend()).run(
+        manifest, teacher, tmp_path / "progressive-child", max_steps=1, device="cpu"
+    )
+
+    assert result.status == "success"
+    assert len(result.stage_lineage) == 2
+    assert result.stage_lineage[0]["student_nfe"] == 2
+    assert result.stage_lineage[1]["teacher_checkpoint"] == result.stage_lineage[0]["student_checkpoint"]
+    assert result.stage_lineage[0]["promoted_as_next_teacher"] is True
+    assert result.stage_lineage[1]["promoted_as_next_teacher"] is False
+    assert all(Path(item["student_checkpoint"]).is_file() for item in result.stage_lineage)

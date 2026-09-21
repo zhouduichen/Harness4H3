@@ -131,11 +131,21 @@ class AcceptanceGate:
     ) -> GateDecision:
         violations = []
         evidence_ids = []
+        edge_complete = _edge_evidence_complete(evidence)
+        edge_metric_for = {
+            "latency_s": "edge_latency",
+            "peak_memory_gb": "edge_memory",
+            "energy_j": "edge_energy",
+        }
         for item in evidence.values():
             evidence_ids.append(item.input_reference)
         for constraint, threshold in hard_constraints.items():
             metric, direction = _constraint_metric(str(constraint))
             item = _find_evidence(evidence, metric)
+            if edge_complete and metric in edge_metric_for:
+                edge_item = _find_evidence(evidence, edge_metric_for[metric])
+                if edge_item is not None:
+                    item = edge_item
             if item is None or item.value is None or not item.valid:
                 violations.append("%s:missing_or_invalid" % constraint)
                 continue
@@ -159,7 +169,6 @@ class AcceptanceGate:
                     objective_values[str(objective)] = float(item.value)
         feasible = not violations
         promotable = feasible
-        edge_complete = _edge_evidence_complete(evidence)
         target_satisfied = feasible and promotable and bool(min_rounds_met) and edge_complete
         reason = "feasible" if feasible else "hard_constraint_failure"
         if feasible and not min_rounds_met:

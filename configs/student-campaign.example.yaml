@@ -42,10 +42,19 @@ student:
     model: qwen3.5-controller
     base_url: http://127.0.0.1:8000/v1
     timeout_s: 600
+  # These may be the same serving backend with different model identities, or
+  # separate advocate/critical/revision checkpoints for cross-model review.
+  advocate_model: qwen3.5-advocate
+  critical_model: qwen3.5-critical
+  revision_model: qwen3.5-revision
   # This must be a trusted, fixed evaluator entrypoint on the remote host.
   evaluation_command:
     - /home/intern/miniconda3/envs/comfy/bin/python
     - /home/intern/huangjiahao/Harness4H3/tools/student_evaluate_worker.py
+  # Optional but required for TARGET_SATISFIED: a trusted target-device
+  # adapter that writes the exact EdgeEvidence contract to --result.
+  # target_device_command: [/absolute/path/to/trusted_target_device_adapter]
+  # target_device_id: edge-device-v1
   target:
     min_params: 1000000000
     max_params: 2000000000

@@ -118,11 +118,20 @@ def build_student_control_plane(
     )
     provider_name = str(getattr(provider, "provider_name", "openai_compatible"))
     model_name = str(getattr(provider, "model_name", "student-review-model"))
+    advocate_model = str(getattr(config, "advocate_model", "") or (model_name + "::advocate"))
+    critic_model = str(
+        getattr(config, "critical_model", "")
+        or getattr(config, "critic_model", "")
+        or (model_name + "::critical")
+    )
+    modifier_model = str(getattr(config, "revision_model", "") or (model_name + "::revision"))
+    if len({advocate_model, critic_model, modifier_model}) != 3:
+        raise ValueError("review actors must use distinct model identities")
     base_url = str(getattr(provider, "base_url", "http://127.0.0.1:11434"))
     timeout_s = float(getattr(provider, "timeout_s", 180.0))
-    advocate_identity = ActorIdentity("student-advocate", model_name, "llm-advocate-v1")
-    critic_identity = ActorIdentity("student-critical", model_name, "llm-critical-v1")
-    modifier_identity = ActorIdentity("student-revision", model_name, "llm-revision-v1")
+    advocate_identity = ActorIdentity("student-advocate", advocate_model, "llm-advocate-v1")
+    critic_identity = ActorIdentity("student-critical", critic_model, "llm-critical-v1")
+    modifier_identity = ActorIdentity("student-revision", modifier_model, "llm-revision-v1")
     evaluator_identity = ActorIdentity("student-evaluator", "student-evaluate-worker", "clip-temporal-v1")
     base = CampaignBase(
         schema_version=1,
@@ -163,15 +172,15 @@ def build_student_control_plane(
     else:
         _atomic_json(base_path, base.to_dict())
     advocate = StructuredLLMReviewAgent(
-        advocate_identity, "advocate", model_name=model_name, base_url=base_url,
+        advocate_identity, "advocate", model_name=advocate_model, base_url=base_url,
         provider=provider_name, timeout_s=timeout_s,
     )
     critical = StructuredLLMReviewAgent(
-        base.critic_identity, "critical", model_name=model_name, base_url=base_url,
+        base.critic_identity, "critical", model_name=critic_model, base_url=base_url,
         provider=provider_name, timeout_s=timeout_s,
     )
     modifier = StructuredLLMReviewAgent(
-        modifier_identity, "revision", model_name=model_name, base_url=base_url,
+        modifier_identity, "revision", model_name=modifier_model, base_url=base_url,
         provider=provider_name, timeout_s=timeout_s,
     )
     return base, capabilities, ReviewPipeline(advocate, critical, modifier, base, max_rounds=1)
@@ -556,10 +565,29 @@ class CampaignResult:
     candidate_decisions: tuple[Mapping[str, Any], ...] = ()
     stop_reason: str = ""
     trace_path: Optional[str] = None
+    optimization_status: Optional[str] = None
+    execution_status: Optional[str] = None
+    exit_code: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.optimization_status is None:
+            object.__setattr__(self, "optimization_status", self.status)
+        if self.execution_status is None:
+            execution_status = {
+                "INTEGRITY_FAILURE": "INTEGRITY_FAILURE",
+                "INFRA_FAILURE": "INFRA_FAILURE",
+                "UNHANDLED_EXCEPTION": "UNHANDLED_EXCEPTION",
+            }.get(self.status, "COMPLETED")
+            object.__setattr__(self, "execution_status", execution_status)
+        if self.exit_code is None:
+            object.__setattr__(self, "exit_code", 0 if self.execution_status == "COMPLETED" else 1)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status,
+            "optimization_status": self.optimization_status,
+            "execution_status": self.execution_status,
+            "exit_code": self.exit_code,
             "rounds_completed": self.rounds_completed,
             "failure_code": self.failure_code,
             "message": self.message,
@@ -640,6 +668,7 @@ class StudentCampaign:
         max_failures: int = 4,
         min_rounds_before_success: int = 1,
         retention_handler: Optional[Callable[[TrainingResult, StudentEvaluation, str, str], None]] = None,
+        target_device_evaluator: Optional[Any] = None,
         campaign_base: Optional[Any] = None,
         capability_snapshot: Optional[Any] = None,
         review_pipeline: Optional[Any] = None,
@@ -665,6 +694,7 @@ class StudentCampaign:
         self.max_failures = int(max_failures)
         self.min_rounds_before_success = int(min_rounds_before_success)
         self.retention_handler = retention_handler
+        self.target_device_evaluator = target_device_evaluator
         self.campaign_base = campaign_base
         self.capability_snapshot = capability_snapshot
         self.review_pipeline = review_pipeline
@@ -1608,6 +1638,31 @@ class StudentCampaign:
                     )
                     evaluation_valid = bool(getattr(evaluation_obj, "valid", False))
                     evaluation_promotable = bool(getattr(evaluation_obj, "promotable", False))
+                    edge_items = []
+                    if evaluation_valid and evaluation_promotable and self.target_device_evaluator is not None:
+                        from .edge import EdgeEvidence, validate_edge_evidence
+
+                        if training_obj is None or not getattr(training_obj, "child_checkpoint", None):
+                            raise ValueError("target_device_checkpoint_missing")
+                        edge_items = list(
+                            self.target_device_evaluator.evaluate(
+                                Path(training_obj.child_checkpoint),
+                                reviewed_candidate.provenance.get("student_proposal") or reviewed_candidate,
+                                self._control_round_dir(round_index, reviewed_candidate.candidate_id, execution.get("fidelity", self.fidelity_schedule[-1])),
+                            )
+                        )
+                        edge_items = list(validate_edge_evidence(edge_items))
+                        evidence_items.extend(item.to_metric_evidence() for item in edge_items)
+                        trace.append(
+                            "edge.completed",
+                            round_id=round_id,
+                            experiment_id=reviewed_candidate.experiment_id,
+                            candidate_id=reviewed_candidate.candidate_id,
+                            parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                            actor=self.campaign_base.evaluator_identity,
+                            payload={"evidence": [item.to_dict() for item in edge_items]},
+                            evidence_ids=tuple(item.measurement_reference for item in edge_items),
+                        )
                     evidence_items.append(MetricEvidence("evaluation_promotable", "student-adapter-v1", str(self.output_root / round_id / candidate.candidate_id), 1.0 if evaluation_promotable else 0.0, evaluation_promotable, "student-evaluator", "server", True))
                     evidence_map = {item.metric_name: item for item in evidence_items}
                     if validation.get("graph_status") != "compiled":
@@ -1915,7 +1970,7 @@ class StudentCampaign:
                 )
             except Exception as exc:
                 return CampaignResult(
-                    "INFRA_FAILURE",
+                    "UNHANDLED_EXCEPTION",
                     0,
                     (),
                     "campaign_infrastructure_failure",
@@ -2129,7 +2184,10 @@ class StudentCampaign:
                 False,
                 stop_reason="campaign_budget_exhausted",
             )
-        status = "BUDGET_EXHAUSTED" if rounds else "INFRA_FAILURE"
+        # Proposal/evaluation failures are optimization outcomes once the
+        # bounded campaign loop has completed; infrastructure failures are
+        # reserved for the control-plane exception path above.
+        status = "BUDGET_EXHAUSTED"
         self._persist_resume(int(max_rounds) + 1, status, failures, seen)
         return CampaignResult(status, len(rounds), tuple(rounds), last_failure, "campaign did not reach an accepted student")
 

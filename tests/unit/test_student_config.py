@@ -64,3 +64,28 @@ def test_clip_quality_backend_requires_local_model_path(tmp_path):
         _write_config(tmp_path, quality_backend="clip_temporal", clip_model_path="/srv/models/clip")
     )
     assert config.evaluation_manifest == "/srv/harness/work/student/evaluation-manifest.json"
+
+
+def test_target_device_and_review_models_are_explicitly_configurable(tmp_path):
+    config = load_student_campaign_config(
+        _write_config(
+            tmp_path,
+            target_device_command=["/opt/edge/run"],
+            target_device_id="phone-a",
+            advocate_model="advocate-v1",
+            critical_model="critical-v1",
+            revision_model="revision-v1",
+        )
+    )
+    assert config.target_device_command == ("/opt/edge/run",)
+    assert config.target_device_id == "phone-a"
+    assert (config.advocate_model, config.critical_model, config.revision_model) == (
+        "advocate-v1",
+        "critical-v1",
+        "revision-v1",
+    )
+
+
+def test_target_device_command_requires_device_identity(tmp_path):
+    with pytest.raises(StudentConfigError, match="configured together"):
+        load_student_campaign_config(_write_config(tmp_path, target_device_command=["/opt/edge/run"]))

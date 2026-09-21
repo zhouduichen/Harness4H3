@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import urllib.error
 
-from harness4h3.student.campaign import OpenAICompatibleStudentProposalProvider, StudentCampaign, student_proposal_json_schema
+from harness4h3.student.campaign import CampaignResult, OpenAICompatibleStudentProposalProvider, StudentCampaign, student_proposal_json_schema
 from harness4h3.student.compiler import StudentCompiler
 from harness4h3.student.evaluator import StudentEvaluation
 from harness4h3.student.proposal import StudentTarget
@@ -69,6 +69,18 @@ def test_student_schema_is_strict_and_contains_target_limits():
     assert schema["additionalProperties"] is False
     assert schema["properties"]["architecture"]["properties"]["latent_channels"]["const"] == 24
     assert schema["properties"]["architecture"]["properties"]["hidden_size"]["minimum"] == 1024
+
+
+def test_optimization_outcomes_are_successful_program_executions():
+    for status in ("TARGET_SATISFIED", "PROMOTABLE", "NO_PROGRESS", "BUDGET_EXHAUSTED"):
+        result = CampaignResult(status, 0, ())
+        assert result.optimization_status == status
+        assert result.execution_status == "COMPLETED"
+        assert result.exit_code == 0
+    for status in ("INFRA_FAILURE", "INTEGRITY_FAILURE", "UNHANDLED_EXCEPTION"):
+        result = CampaignResult(status, 0, ())
+        assert result.execution_status == status
+        assert result.exit_code != 0
 
 
 def test_campaign_records_invalid_proposal_for_next_call(tmp_path):

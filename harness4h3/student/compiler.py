@@ -31,6 +31,8 @@ class CompileManifest:
     target: Mapping[str, Any]
     parameter_count: int
     estimated_peak_memory_gb: float
+    memory_estimator_version: str
+    memory_breakdown: Mapping[str, float]
     input_shape: Tuple[int, ...]
     output_shape: Tuple[int, ...]
     conditioning_shape: Tuple[int, ...]
@@ -47,6 +49,8 @@ class CompileManifest:
             "target": dict(self.target),
             "parameter_count": self.parameter_count,
             "estimated_peak_memory_gb": self.estimated_peak_memory_gb,
+            "memory_estimator_version": self.memory_estimator_version,
+            "memory_breakdown": dict(self.memory_breakdown),
             "input_shape": list(self.input_shape),
             "output_shape": list(self.output_shape),
             "conditioning_shape": list(self.conditioning_shape),
@@ -76,6 +80,8 @@ class CompileManifest:
             target=dict(raw["target"]),
             parameter_count=int(raw["parameter_count"]),
             estimated_peak_memory_gb=float(raw["estimated_peak_memory_gb"]),
+            memory_estimator_version=str(raw.get("memory_estimator_version", "student-memory-v1")),
+            memory_breakdown={str(key): float(value) for key, value in dict(raw.get("memory_breakdown") or {}).items()},
             input_shape=tuple(int(value) for value in raw["input_shape"]),
             output_shape=tuple(int(value) for value in raw["output_shape"]),
             conditioning_shape=tuple(int(value) for value in raw["conditioning_shape"]),
@@ -143,6 +149,8 @@ class StudentCompiler:
             "target": asdict(self.target),
             "parameter_count": int(parameter_count),
             "estimated_peak_memory_gb": float(report.estimated_peak_memory_gb or 0.0),
+            "memory_estimator_version": "student-memory-v2-dmd2-aware",
+            "memory_breakdown": dict(report.memory_breakdown),
             "input_shape": list(input_shape),
             "output_shape": list(output_shape),
             "conditioning_shape": list(conditioning_shape),
@@ -181,6 +189,8 @@ class StudentCompiler:
             target=asdict(self.target),
             parameter_count=int(parameter_count),
             estimated_peak_memory_gb=float(report.estimated_peak_memory_gb or 0.0),
+            memory_estimator_version="student-memory-v2-dmd2-aware",
+            memory_breakdown=dict(report.memory_breakdown),
             input_shape=input_shape,
             output_shape=output_shape,
             conditioning_shape=conditioning_shape,

@@ -4,7 +4,7 @@ import copy
 
 import pytest
 
-from harness4h3.student.proposal import ProposalValidationError, StudentProposal, StudentTarget
+from harness4h3.student.proposal import ProposalValidationError, StudentProposal, StudentTarget, estimate_training_memory
 
 
 def valid_payload(*, hidden_size: int = 2048, depth: int = 24):
@@ -79,3 +79,11 @@ def test_round_trip_does_not_mutate_input():
     expected["training"].pop("batch_size")
     assert proposal.to_dict() == expected
     assert payload == original
+
+
+def test_dmd2_memory_estimator_accounts_for_critic_and_optimizer_state():
+    total, breakdown = estimate_training_memory(1_000_000_000, method="dmd2")
+    assert total > 0
+    assert breakdown["critic_parameters_gb"] > 0
+    assert breakdown["critic_optimizer_gb"] > 0
+    assert breakdown["student_ema_gb"] > 0

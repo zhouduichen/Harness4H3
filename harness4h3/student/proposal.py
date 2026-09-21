@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 
@@ -286,6 +286,7 @@ class ValidationReport:
     estimated_params: Optional[int] = None
     estimated_peak_memory_gb: Optional[float] = None
     duplicate_key: Optional[str] = None
+    memory_breakdown: Mapping[str, float] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -315,6 +316,50 @@ def estimate_parameter_count(architecture: ArchitectureSpec, condition_dim: int 
     # floating-point rounding.
     block = 4 * hidden * hidden + 4 * hidden + 2 * expansion * hidden + expansion + hidden + 2 * hidden
     return int(patch + output + condition + timestep + architecture.depth * block + hidden)
+
+
+def estimate_training_memory(
+    parameter_count: int,
+    *,
+    method: str,
+    precision_bytes: int = 2,
+) -> tuple[float, Mapping[str, float]]:
+    """Estimate the peak Student-device training footprint by algorithm.
+
+    DMD2 keeps a trainable Student, a trainable critic, AdamW state for both,
+    an EMA copy, and an activation reserve.  Progressive distillation only
+    keeps the Student optimizer and a frozen promoted teacher; the online H3
+    teacher is placed on the separate Teacher service GPUs.
+    """
+
+    if int(parameter_count) <= 0 or int(precision_bytes) <= 0:
+        raise ValueError("parameter_count and precision_bytes must be positive")
+    parameter_bytes = float(parameter_count * precision_bytes)
+    gradient_bytes = parameter_bytes
+    optimizer_bytes = float(parameter_count * 8)
+    if method == "dmd2":
+        breakdown = {
+            "student_parameters_gb": parameter_bytes / 1024**3,
+            "student_gradients_gb": gradient_bytes / 1024**3,
+            "student_optimizer_gb": optimizer_bytes / 1024**3,
+            "critic_parameters_gb": parameter_bytes / 1024**3,
+            "critic_gradients_gb": gradient_bytes / 1024**3,
+            "critic_optimizer_gb": optimizer_bytes / 1024**3,
+            "student_ema_gb": parameter_bytes / 1024**3,
+            "activation_reserve_gb": parameter_bytes * 0.20 / 1024**3,
+        }
+    elif method == "progressive_distillation":
+        breakdown = {
+            "student_parameters_gb": parameter_bytes / 1024**3,
+            "student_gradients_gb": gradient_bytes / 1024**3,
+            "student_optimizer_gb": optimizer_bytes / 1024**3,
+            "promoted_teacher_gb": parameter_bytes / 1024**3,
+            "activation_reserve_gb": parameter_bytes * 0.20 / 1024**3,
+        }
+    else:
+        raise ValueError("unsupported training method: %s" % method)
+    total = float(sum(breakdown.values()))
+    return total, breakdown
 
 
 @dataclass(frozen=True)
@@ -425,16 +470,17 @@ class StudentProposal:
                 % (estimated, target.min_params, target.max_params)
             )
         precision_bytes = 2 if self.deployment.precision in {"bf16", "fp16"} else 4
-        optimizer_bytes = 8
-        # Parameters + gradients + AdamW moments, plus a conservative 20% activation reserve.
-        peak_bytes = estimated * (precision_bytes + precision_bytes + optimizer_bytes) * 1.2
-        peak_gb = peak_bytes / float(1024**3)
+        peak_gb, memory_breakdown = estimate_training_memory(
+            estimated,
+            method=self.training.method,
+            precision_bytes=precision_bytes,
+        )
         if peak_gb > target.max_peak_memory_gb:
             errors.append(
                 "estimated peak memory %.2f GB exceeds target %.2f GB"
                 % (peak_gb, target.max_peak_memory_gb)
             )
-        return ValidationReport(tuple(errors), estimated, peak_gb)
+        return ValidationReport(tuple(errors), estimated, peak_gb, memory_breakdown=memory_breakdown)
 
 
 __all__ = [
@@ -447,4 +493,5 @@ __all__ = [
     "ValidationReport",
     "canonical_digest",
     "estimate_parameter_count",
+    "estimate_training_memory",
 ]

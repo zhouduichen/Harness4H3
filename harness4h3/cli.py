@@ -57,7 +57,14 @@ from .student.campaign import StudentCampaign, build_student_control_plane, buil
 from .student.compiler import StudentCompiler
 from .student.config import StudentConfigError, load_student_campaign_config
 from .student.proposal import StudentProposal
-from .student.remote import RemoteStudentBaseline, RemoteStudentEvaluator, RemoteStudentRetention, RemoteStudentSupervisor, RemoteStudentWorker
+from .student.remote import (
+    RemoteStudentBaseline,
+    RemoteStudentEvaluator,
+    RemoteStudentRetention,
+    RemoteStudentSupervisor,
+    RemoteStudentWorker,
+    RemoteTargetDeviceEvaluator,
+)
 
 
 def _emit(value: Any, json_mode: bool) -> None:
@@ -581,6 +588,11 @@ def cmd_student_run(args: argparse.Namespace) -> int:
         max_failures=config.max_failures,
         min_rounds_before_success=config.min_rounds_before_success,
         retention_handler=RemoteStudentRetention(config, client).retain,
+        target_device_evaluator=(
+            RemoteTargetDeviceEvaluator(config, client)
+            if config.target_device_command and config.target_device_id
+            else None
+        ),
         campaign_base=campaign_base,
         capability_snapshot=capability_snapshot,
         review_pipeline=review_pipeline,
@@ -598,7 +610,7 @@ def cmd_student_run(args: argparse.Namespace) -> int:
     )
     result = campaign.run(max_rounds=args.max_rounds or config.max_rounds)
     _emit(result.to_dict(), args.json)
-    return 0 if result.status == "TARGET_SATISFIED" else 1
+    return int(result.exit_code)
 
 
 def cmd_student_status(args: argparse.Namespace) -> int:

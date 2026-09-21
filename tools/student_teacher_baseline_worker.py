@@ -15,7 +15,12 @@ from typing import Any, Mapping
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness4h3.student.evaluation_manifest import EvaluationManifest
 from harness4h3.student.gpu import select_free_cuda_device
-from harness4h3.student.inference import decode_video_latent, load_h3_cache_item, sample_h3_latent, write_video
+from harness4h3.student.inference import (
+    decode_video_latent,
+    load_h3_cache_item,
+    sample_h3_latent_with_role,
+    write_video,
+)
 from harness4h3.student.quality import ClipTemporalQualityBackend, QualityBackendUnavailable
 from harness4h3.student.proposal import StudentTarget
 from harness4h3.campaign.base import sha256_path
@@ -81,6 +86,16 @@ def main(argv=None) -> int:
         cases = []
         latencies = []
         peak_memory_gb = 0.0
+        model_load_time_s = 0.0
+        teacher_adapter = None
+        teacher_role = None
+        if args.baseline_kind == "h3_teacher_generation_baseline":
+            from h3_training.adapters.real_h3 import RealMiniMaxH3Adapter
+
+            model_load_started = time.perf_counter()
+            teacher_adapter = RealMiniMaxH3Adapter(Path(args.comfyui_root), device=str(device), dtype=torch.bfloat16)
+            teacher_role = teacher_adapter.load_role(Path(args.teacher), trainable=False)
+            model_load_time_s = time.perf_counter() - model_load_started
         for case in manifest.cases:
             cache_key = str(Path(case.cache_path).resolve())
             for seed in case.seeds:
@@ -89,12 +104,12 @@ def main(argv=None) -> int:
                 if args.baseline_kind == "h3_teacher_generation_baseline" and cache_item.get("audio_latent") is None:
                     raise ValueError("H3 teacher baseline requires audio latent in cache item %s" % cache_key)
                 if args.baseline_kind == "h3_teacher_generation_baseline":
-                    latent, sampling_latency = sample_h3_latent(
-                        Path(args.teacher),
+                    latent, sampling_latency = sample_h3_latent_with_role(
+                        teacher_adapter,
+                        teacher_role,
                         cache_item["prompt"],
                         tuple(cache_item["latent"].shape),
                         tuple(cache_item["audio_latent"].shape),
-                        Path(args.comfyui_root),
                         device,
                         sampling_steps=args.sampling_steps,
                         seed=int(seed),
@@ -113,7 +128,9 @@ def main(argv=None) -> int:
                 latency = float(sampling_latency + decode_latency)
                 if device.type == "cuda":
                     peak_memory_gb = max(peak_memory_gb, float(torch.cuda.max_memory_allocated(device)) / float(1024 ** 3))
+                quality_started = time.perf_counter()
                 evidence = quality_backend.evaluate(video_path, case.caption).to_dict()
+                quality_latency = time.perf_counter() - quality_started
                 latencies.append(latency)
                 cases.append(
                     {
@@ -123,7 +140,14 @@ def main(argv=None) -> int:
                         "quality": evidence,
                         "latency_s": latency,
                         "sampling_latency_s": float(sampling_latency),
+                        "sampling_latency": float(sampling_latency),
                         "decode_latency_s": float(decode_latency),
+                        "decode_latency": float(decode_latency),
+                        "quality_latency_s": float(quality_latency),
+                        "quality_latency": float(quality_latency),
+                        "model_load_time_s": float(model_load_time_s),
+                        "model_load_time": float(model_load_time_s),
+                        "peak_memory": float(peak_memory_gb),
                         "generation_latency_s": latency,
                         "frame_count": int(frames.shape[0]),
                         "resolution": [int(frames.shape[2]), int(frames.shape[1])],
@@ -138,6 +162,15 @@ def main(argv=None) -> int:
             "latency_p95_s": _p95(latencies),
             "latency_ms": float(statistics.median(latencies)) * 1000.0,
             "peak_memory_gb": peak_memory_gb,
+            "model_load_time_s": float(model_load_time_s),
+            "model_load_time": float(model_load_time_s),
+            "sampling_latency_s": float(statistics.median([item["sampling_latency_s"] for item in cases])),
+            "sampling_latency": float(statistics.median([item["sampling_latency_s"] for item in cases])),
+            "decode_latency_s": float(statistics.median([item["decode_latency_s"] for item in cases])),
+            "decode_latency": float(statistics.median([item["decode_latency_s"] for item in cases])),
+            "quality_latency_s": float(statistics.median([item["quality_latency_s"] for item in cases])),
+            "quality_latency": float(statistics.median([item["quality_latency_s"] for item in cases])),
+            "peak_memory": float(peak_memory_gb),
             "model_size_gb": (
                 float(Path(args.teacher).stat().st_size) / float(1024 ** 3)
                 if args.teacher

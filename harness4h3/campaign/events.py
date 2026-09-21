@@ -27,6 +27,7 @@ EVENT_TYPES = frozenset(
         "training.completed",
         "evaluation.started",
         "evaluation.completed",
+        "edge.completed",
         "gate.decided",
         "archive.updated",
         "parent.selected",

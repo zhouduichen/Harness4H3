@@ -98,6 +98,12 @@ class StudentCampaignConfig:
     max_metric_regression: float = 0.02
     no_improvement_patience: int = 3
     baseline_command: Tuple[str, ...] = ()
+    target_device_command: Tuple[str, ...] = ()
+    target_device_id: str = ""
+    advocate_model: str = ""
+    critic_model: str = ""
+    critical_model: str = ""
+    revision_model: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -106,6 +112,7 @@ class StudentCampaignConfig:
         value["experience_path"] = str(self.experience_path)
         value["evaluation_command"] = list(self.evaluation_command)
         value["baseline_command"] = list(self.baseline_command)
+        value["target_device_command"] = list(self.target_device_command)
         value["remote"] = asdict(self.remote)
         return value
 
@@ -286,6 +293,34 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         else [worker_python, str(PurePosixPath(remote.harness_root) / "tools" / "student_teacher_baseline_worker.py")],
         "student.baseline_command",
     )
+    target_device_raw = student.get("target_device_command")
+    target_device_command = _command(target_device_raw, "student.target_device_command") if target_device_raw is not None else ()
+    target_device_id = str(student.get("target_device_id", "")).strip()
+    if bool(target_device_command) != bool(target_device_id):
+        raise StudentConfigError(
+            "student.target_device_command and student.target_device_id must be configured together"
+        )
+    review_models = _mapping(student.get("review_models", {}), "student.review_models")
+    unknown_review_models = sorted(set(review_models) - {"advocate", "critic", "critical", "revision"})
+    if unknown_review_models:
+        raise StudentConfigError(
+            "student.review_models has unknown field(s): %s" % ", ".join(unknown_review_models)
+        )
+    advocate_model = str(
+        student.get("advocate_model", review_models.get("advocate", ""))
+        or (controller.model + "::advocate")
+    ).strip()
+    configured_critic = student.get(
+        "critical_model",
+        student.get("critic_model", review_models.get("critical", review_models.get("critic", ""))),
+    )
+    critic_model = str(configured_critic or (controller.model + "::critical")).strip()
+    revision_model = str(
+        student.get("revision_model", review_models.get("revision", ""))
+        or (controller.model + "::revision")
+    ).strip()
+    if len({advocate_model, critic_model, revision_model}) != 3:
+        raise StudentConfigError("student.review_models must provide three distinct model identities")
     try:
         teacher_world_size = int(student.get("teacher_world_size", 3))
         teacher_rank_min_free_memory_gb = float(student.get("teacher_rank_min_free_memory_gb", 20.0))
@@ -346,6 +381,12 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         max_metric_regression=max_metric_regression,
         no_improvement_patience=no_improvement_patience,
         baseline_command=baseline_command,
+        target_device_command=target_device_command,
+        target_device_id=target_device_id,
+        advocate_model=advocate_model,
+        critic_model=critic_model,
+        critical_model=critic_model,
+        revision_model=revision_model,
     )
 
 

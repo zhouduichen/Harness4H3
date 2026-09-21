@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from ..remote.ssh import SSHClient
 from .compiler import CompileManifest
 from .config import StudentCampaignConfig
+from .edge import EdgeEvidence, validate_edge_evidence
 from .evaluator import StudentEvaluation
 from .worker import TrainingResult
 
@@ -230,6 +231,45 @@ class RemoteStudentBaseline:
         if not isinstance(raw, Mapping) or raw.get("status") != "success":
             raise RuntimeError("teacher baseline failed: %s" % dict(raw or {}))
         return dict(raw)
+
+
+class RemoteTargetDeviceEvaluator:
+    """Invoke the configured target-device export/deploy/benchmark command."""
+
+    def __init__(self, config: StudentCampaignConfig, client: SSHClient):
+        self.config = config
+        self.client = client
+        if not config.target_device_command or not config.target_device_id:
+            raise ValueError("target-device command and device id are required")
+
+    def evaluate(self, checkpoint: Path, proposal: Any, round_dir: Path) -> tuple[EdgeEvidence, ...]:
+        remote_dir = str(PurePosixPath(self.config.remote_campaign_root) / round_dir.name)
+        result_path = remote_dir + "/target-device-result.json"
+        proposal_path = remote_dir + "/target-device-proposal.json"
+        self.client.remove_file(result_path)
+        proposal_payload = proposal.to_dict() if hasattr(proposal, "to_dict") else dict(proposal)
+        self.client.write_json(proposal_path, proposal_payload)
+        command = tuple(self.config.target_device_command) + (
+            "--checkpoint",
+            str(checkpoint),
+            "--output",
+            remote_dir + "/target-device",
+            "--proposal",
+            proposal_path,
+            "--result",
+            result_path,
+            "--target-device-id",
+            self.config.target_device_id,
+        )
+        self.client.run(command, timeout_s=max(3600.0, self.config.controller.timeout_s * 20), check=False)
+        raw = self.client.read_json(result_path)
+        if not isinstance(raw, Mapping) or raw.get("status") != "success":
+            raise RuntimeError("target-device evaluation failed: %s" % dict(raw or {}))
+        raw_evidence = raw.get("evidence")
+        if not isinstance(raw_evidence, list):
+            raise ValueError("target-device result must contain an evidence array")
+        evidence = tuple(EdgeEvidence.from_dict(item) for item in raw_evidence)
+        return validate_edge_evidence(evidence, target_device_id=self.config.target_device_id)
 
 
 class RemoteStudentRetention:
