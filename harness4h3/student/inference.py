@@ -155,7 +155,17 @@ def decode_video_latent(comfyui_root: Path, vae_name: str, latent: torch.Tensor)
         mapping = nodes.NODE_CLASS_MAPPINGS
         loader = mapping["VAELoader"]()
         vae = loader.load_vae(str(vae_name))[0]
-        decoded = mapping["VAEDecode"]().decode(vae, {"samples": latent})[0]
+        # Full-frame H3 VAE decoding can approach the capacity of a 48 GB
+        # card even for the small fixed manifest. Tiled spatial+temporal
+        # decoding keeps evaluation reproducible without changing the VAE.
+        decoded = mapping["VAEDecodeTiled"]().decode(
+            vae,
+            {"samples": latent},
+            tile_size=256,
+            overlap=64,
+            temporal_size=8,
+            temporal_overlap=2,
+        )[0]
     except (AttributeError, ImportError, KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
         raise StudentGenerationError("student_vae_decode_failed", str(exc)) from exc
     if not isinstance(decoded, torch.Tensor) or decoded.ndim not in (4, 5):
