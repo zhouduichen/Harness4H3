@@ -11,6 +11,8 @@ from .proposal import (
     canonical_digest,
 )
 from .campaign import StudentProposalBatchProvider, build_student_control_plane, student_proposal_batch_json_schema
+from .fidelity import FidelityGate, FidelityGateDecision, stage_spec
+from .worker import FidelitySpec, fidelity_spec
 
 __all__ = [
     "ArchitectureSpec",
@@ -24,4 +26,9 @@ __all__ = [
     "StudentProposalBatchProvider",
     "build_student_control_plane",
     "student_proposal_batch_json_schema",
+    "FidelitySpec",
+    "fidelity_spec",
+    "FidelityGate",
+    "FidelityGateDecision",
+    "stage_spec",
 ]

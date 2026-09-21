@@ -30,6 +30,7 @@ class RemoteStudentWorker:
         manifest: CompileManifest,
         round_dir: Path,
         *,
+        train_steps: int | None = None,
         parent_checkpoint: str | Path | None = None,
         parent_candidate_id: str | None = None,
         fidelity: str = "F1",
@@ -80,6 +81,8 @@ class RemoteStudentWorker:
             "--parent-candidate-id",
             str(parent_candidate_id or ""),
         )
+        if train_steps is not None:
+            command += ("--train-steps", str(int(train_steps)))
         if parent_checkpoint:
             command += ("--parent-checkpoint", str(parent_checkpoint))
         self.client.run(command, timeout_s=max(3600.0, self.config.controller.timeout_s * 20), check=False)
@@ -106,7 +109,17 @@ class RemoteStudentEvaluator:
         self.config = config
         self.client = client
 
-    def evaluate(self, checkpoint: Path, round_dir: Path) -> StudentEvaluation:
+    def evaluate(
+        self,
+        checkpoint: Path,
+        round_dir: Path,
+        *,
+        fidelity: str = "F3",
+        evaluation_cases: int | None = None,
+        seed_count: int | None = None,
+        verifier_strength: str | None = None,
+        timeout_s: float | None = None,
+    ) -> StudentEvaluation:
         remote_dir = str(PurePosixPath(self.config.remote_campaign_root) / round_dir.name)
         remote_result = remote_dir + "/evaluation-result.json"
         command = tuple(self.config.evaluation_command) + (
@@ -141,7 +154,15 @@ class RemoteStudentEvaluator:
         if self.config.clip_model_path:
             command += ("--clip-model-path", self.config.clip_model_path)
         command += ("--quality-backend", self.config.quality_backend)
-        self.client.run(command, timeout_s=max(3600.0, self.config.controller.timeout_s * 20), check=False)
+        command += ("--fidelity", str(fidelity))
+        if evaluation_cases is not None:
+            command += ("--max-cases", str(int(evaluation_cases)))
+        if seed_count is not None:
+            command += ("--seed-count", str(int(seed_count)))
+        if verifier_strength:
+            command += ("--verifier-strength", str(verifier_strength))
+        evaluation_timeout = float(timeout_s) if timeout_s is not None else max(3600.0, self.config.controller.timeout_s * 20)
+        self.client.run(command, timeout_s=max(30.0, evaluation_timeout), check=False)
         raw = self.client.read_json(remote_result)
         if not isinstance(raw, Mapping):
             raise ValueError("remote Student evaluator result must be an object")
@@ -173,6 +194,8 @@ class RemoteStudentBaseline:
         output = str(root / "teacher-baseline")
         result_path = str(root / "teacher-baseline-result.json")
         command = tuple(self.config.baseline_command) + (
+            "--teacher",
+            self.config.teacher_checkpoint,
             "--evaluation-manifest",
             str(self.config.evaluation_manifest),
             "--output",

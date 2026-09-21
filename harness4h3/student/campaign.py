@@ -20,52 +20,6 @@ from .retention import apply_retention, retain_after_evaluation
 from .worker import TrainingResult
 
 
-class _StaticStudentReviewAgent:
-    """Fixed, auditable Advocate/Critical/Modifier for Student candidates."""
-
-    def __init__(self, identity: Any, role: str):
-        self.identity = identity
-        self.role = str(role)
-
-    def review(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
-        candidate = request.get("candidate") or {}
-        candidate_id = str(candidate.get("candidate_id") or "candidate")
-        fields = [str(item) for item in candidate.get("mutation_fields") or ()]
-        evidence_ids = [str(item) for item in request.get("evidence_ids") or ()]
-        evidence_ids.append("candidate:%s" % candidate_id)
-        phase = str(request.get("phase", ""))
-        if self.role == "advocate":
-            return {
-                "bottleneck": "student_quality_and_efficiency",
-                "changed_fields": fields,
-                "expected_metric_delta": dict(candidate.get("predicted_metric_delta") or {}),
-                "supporting_evidence_ids": list(dict.fromkeys(evidence_ids)),
-                "falsification_experiment": "run the fixed semantic, hard-constraint, and Pareto verifiers",
-                "resource_assumptions": {
-                    "phase": phase,
-                    "fidelity_schedule": list(request.get("fidelity_schedule") or ()),
-                    "capability_snapshot": str(request.get("capability_snapshot_digest") or ""),
-                },
-            }
-        if self.role == "critical":
-            return {
-                "objections": [],
-                "objection_categories": [],
-                "missing_evidence_ids": [],
-                "proxy_gaming_risks": [],
-                "target_device_risks": [],
-                "required_revisions": [],
-                "hard_objection": False,
-            }
-        return {
-            "candidate": candidate,
-            "base_digest": str(request.get("base_digest") or ""),
-            "changed_fields": fields,
-            "resolved_objection_ids": [],
-            "reason": "static modifier retained the reviewed candidate",
-        }
-
-
 def build_student_control_plane(
     config: Any,
     provider: StudentProposalProvider,
@@ -74,9 +28,9 @@ def build_student_control_plane(
 ):
     """Build the immutable Student control plane used by CLI and Detached runs."""
 
-    from ..campaign.base import ActorIdentity, CampaignBase, canonical_digest
+    from ..campaign.base import ActorIdentity, CampaignBase, canonical_digest, sha256_path
     from ..campaign.capabilities import Capability, CapabilitySnapshot
-    from ..campaign.reviews import ReviewPipeline
+    from ..campaign.reviews import ReviewPipeline, StructuredLLMReviewAgent
 
     if str(getattr(config, "quality_backend", "")).lower() != "clip_temporal":
         raise ValueError("Student control plane requires the semantic clip_temporal verifier")
@@ -85,6 +39,33 @@ def build_student_control_plane(
 
     target = asdict(config.target)
     baseline_metrics = dict((teacher_baseline or {}).get("optimization_metrics") or {})
+    baseline_payload = dict(teacher_baseline or {})
+    baseline_kind = str(baseline_payload.get("kind") or "")
+    if baseline_kind and baseline_kind != "h3_teacher_generation_baseline":
+        raise ValueError(
+            "Student optimization requires h3_teacher_generation_baseline; "
+            "reference_reconstruction_baseline is quality-only"
+        )
+    teacher_hash = baseline_payload.get("teacher_checkpoint_sha256")
+    if teacher_hash is None:
+        try:
+            teacher_hash = sha256_path(Path(config.teacher_checkpoint))
+        except Exception as exc:
+            raise ValueError("teacher checkpoint content identity is unavailable") from exc
+    manifest_digest = baseline_payload.get("evaluation_manifest_digest")
+    if manifest_digest is None:
+        try:
+            manifest_digest = sha256_path(Path(config.evaluation_manifest))
+        except Exception as exc:
+            raise ValueError("evaluation manifest content identity is unavailable") from exc
+    clip_model_hash = baseline_payload.get("clip_model_hash")
+    if clip_model_hash is None:
+        try:
+            clip_model_hash = sha256_path(Path(config.clip_model_path))
+        except Exception as exc:
+            raise ValueError("CLIP model content identity is unavailable") from exc
+    evaluator_version = "clip-temporal-v1"
+    clip_model_identity = str(Path(config.clip_model_path).name)
     quality_floor = None
     if baseline_metrics.get("quality") is not None:
         quality_floor = float(baseline_metrics["quality"]) * float(config.quality_floor_ratio)
@@ -116,13 +97,15 @@ def build_student_control_plane(
     if quality_floor is not None:
         target_profile["constraints"]["min_quality_score"] = quality_floor
     verifier_bank = {
+        "version": "student-verifier-bank-v2",
         "semantic": "clip_temporal",
+        "evaluator_version": evaluator_version,
         "hard": ["graph_valid", "video_decodable", "semantic_verified", "algorithm_dispatch", "parent_checkpoint_bound", "fidelity_executed", "quality_verified", "latency_verified", "memory_verified", "model_size_verified"],
         "pareto": ["quality", "latency_s", "peak_memory_gb", "model_size_gb"],
     }
     capabilities = CapabilitySnapshot(
         (
-            Capability("distill", "training", "StudentTrainWorker.velocity_distill", {"method": "velocity_distill"}, "V4", True, "trusted algorithm dispatch"),
+            Capability("progressive_distillation", "training", "StudentTrainWorker.progressive_distillation", {"method": "progressive_distillation"}, "V4", True, "trusted algorithm dispatch with binary stage validation"),
             Capability("dmd2", "training", "StudentTrainWorker.dmd2", {"method": "dmd2"}, "V4", True, "trusted algorithm dispatch"),
             Capability("quantize", "quantization", "student.quantization.quantize_checkpoint", {"quantization": ["none", "int8"]}, "V4", True, "trusted artifact transform"),
             Capability("semantic_verify", "verification", "student_evaluate_worker.clip_temporal", {"backend": "clip_temporal"}, "V4", True, "fixed semantic verifier"),
@@ -133,22 +116,34 @@ def build_student_control_plane(
         str(getattr(provider, "model_name", provider.__class__.__name__)),
         "student-controller-v1",
     )
-    critic_identity = ActorIdentity("student-critical", "fixed-critical-v1", "1")
+    provider_name = str(getattr(provider, "provider_name", "openai_compatible"))
+    model_name = str(getattr(provider, "model_name", "student-review-model"))
+    base_url = str(getattr(provider, "base_url", "http://127.0.0.1:11434"))
+    timeout_s = float(getattr(provider, "timeout_s", 180.0))
+    advocate_identity = ActorIdentity("student-advocate", model_name, "llm-advocate-v1")
+    critic_identity = ActorIdentity("student-critical", model_name, "llm-critical-v1")
+    modifier_identity = ActorIdentity("student-revision", model_name, "llm-revision-v1")
     evaluator_identity = ActorIdentity("student-evaluator", "student-evaluate-worker", "clip-temporal-v1")
     base = CampaignBase(
         schema_version=1,
-        campaign_id="student-%s" % canonical_digest({"goal": config.goal, "teacher": config.teacher_checkpoint})[7:23],
+        campaign_id="student-%s" % canonical_digest({"goal": config.goal, "teacher_checkpoint_sha256": teacher_hash, "manifest_digest": manifest_digest})[7:23],
         target_profile=target_profile,
         target_profile_hash=canonical_digest(target_profile),
         verifier_bank=verifier_bank,
         verifier_bank_hash=canonical_digest(verifier_bank),
-        dataset_manifest_hash=canonical_digest({"evaluation_manifest": config.evaluation_manifest, "h3_cache_dir": config.h3_cache_dir}),
-        evaluation_recipe_hash=canonical_digest({"evaluation_command": list(config.evaluation_command), "quality_backend": config.quality_backend, "clip_model_path": config.clip_model_path}),
+        dataset_manifest_hash=str(manifest_digest),
+        evaluation_recipe_hash=canonical_digest({"evaluation_command": list(config.evaluation_command), "quality_backend": config.quality_backend, "evaluator_version": evaluator_version, "evaluation_manifest_digest": manifest_digest, "clip_model_identity": clip_model_identity, "clip_model_hash": clip_model_hash}),
         controller_identity=controller_identity,
         critic_identity=critic_identity,
         evaluator_identity=evaluator_identity,
         prompt_version="student-controller-prompt-v2-batch",
         capability_snapshot=capabilities.to_dict(),
+        teacher_checkpoint_sha256=str(teacher_hash),
+        evaluation_manifest_digest=str(manifest_digest),
+        evaluator_version=evaluator_version,
+        clip_model_identity=clip_model_identity,
+        clip_model_hash=str(clip_model_hash),
+        capability_snapshot_hash=capabilities.digest,
     )
     base_path = Path(output_root).resolve() / "campaign-base.json"
     if base_path.is_file():
@@ -167,9 +162,18 @@ def build_student_control_plane(
         ))
     else:
         _atomic_json(base_path, base.to_dict())
-    advocate = _StaticStudentReviewAgent(ActorIdentity("student-advocate", "fixed-advocate-v1", "1"), "advocate")
-    critical = _StaticStudentReviewAgent(base.critic_identity, "critical")
-    modifier = _StaticStudentReviewAgent(ActorIdentity("student-modifier", "fixed-modifier-v1", "1"), "modifier")
+    advocate = StructuredLLMReviewAgent(
+        advocate_identity, "advocate", model_name=model_name, base_url=base_url,
+        provider=provider_name, timeout_s=timeout_s,
+    )
+    critical = StructuredLLMReviewAgent(
+        base.critic_identity, "critical", model_name=model_name, base_url=base_url,
+        provider=provider_name, timeout_s=timeout_s,
+    )
+    modifier = StructuredLLMReviewAgent(
+        modifier_identity, "revision", model_name=model_name, base_url=base_url,
+        provider=provider_name, timeout_s=timeout_s,
+    )
     return base, capabilities, ReviewPipeline(advocate, critical, modifier, base, max_rounds=1)
 
 
@@ -240,15 +244,13 @@ def student_proposal_json_schema(target: StudentTarget = StudentTarget()) -> Map
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "method": {"type": "string", "enum": ["velocity_distill", "dmd2"]},
+            "method": {"type": "string", "enum": ["progressive_distillation", "dmd2"]},
             "source_steps": {**integer, "maximum": 256},
             "target_steps": {**integer, "maximum": 64},
-            "max_steps": {**integer, "maximum": 100000},
             "learning_rate": {**positive_number, "maximum": 0.01},
             "critic_learning_rate": {**positive_number, "maximum": 0.01},
-            "batch_size": integer,
         },
-        "required": ["method", "source_steps", "target_steps", "max_steps", "learning_rate", "critic_learning_rate", "batch_size"],
+        "required": ["method", "source_steps", "target_steps", "learning_rate", "critic_learning_rate"],
     }
     return {
         "type": "object",
@@ -306,7 +308,10 @@ def _student_architect_prompt(context: Mapping[str, Any]) -> str:
         "For this registered graph, hidden_size=2048 and depth=24 is a legal reference scale, "
         "but you may choose another width/depth/head/patch combination. "
         "temporal_layers must be unique layer indices within depth. "
-        "Keep source_steps<=256, target_steps<=64, and learning rates<=0.01. "
+        "Use method progressive_distillation or dmd2; keep source_steps<=256, target_steps<=64, "
+        "and for progressive_distillation use only binary-halving-reachable step pairs. "
+        "The trusted campaign config controls the optimizer budget; do not emit max_steps or batch_size. "
+        "Keep learning rates<=0.01. "
         "For mlp_ratio=4.0 on this registered graph, hidden=1536/depth=24 "
         "is 727394400 parameters and invalid; hidden=1792/depth=24 is "
         "980747360 and still invalid. Legal reference points include "
@@ -647,6 +652,7 @@ class StudentCampaign:
         initial_parent_checkpoint: Optional[str | Path] = None,
         teacher_baseline: Optional[Mapping[str, Any]] = None,
         quality_policy: Optional[Mapping[str, Any] | StudentQualityPolicy] = None,
+        max_steps: int = 256,
     ):
         self.provider = provider
         self.compiler = compiler
@@ -670,6 +676,7 @@ class StudentCampaign:
         self.fidelity_schedule = tuple(str(item) for item in fidelity_schedule)
         self.parent_checkpoint = str(initial_parent_checkpoint) if initial_parent_checkpoint else None
         self.teacher_baseline = dict(teacher_baseline or {})
+        self.max_steps = int(max_steps)
         if isinstance(quality_policy, StudentQualityPolicy):
             self.quality_policy = quality_policy
         elif quality_policy is not None:
@@ -683,14 +690,19 @@ class StudentCampaign:
         self._best_reward: Optional[float] = None
         self._no_improvement_rounds = 0
         self._improvement_count = 0
+        self._control_parent_metrics: dict[str, float] = {}
         if self.max_failures < 0:
             raise ValueError("max_failures must be non-negative")
         if self.min_rounds_before_success <= 0:
             raise ValueError("min_rounds_before_success must be positive")
+        if self.max_steps <= 0:
+            raise ValueError("max_steps must be positive")
         if not 1 <= self.min_candidates <= self.max_candidates:
             raise ValueError("candidate bounds are invalid")
         if not self.fidelity_schedule:
             raise ValueError("fidelity_schedule must not be empty")
+        if self.fidelity_schedule != tuple(("F1", "F2", "F3")[: len(self.fidelity_schedule)]):
+            raise ValueError("fidelity_schedule must be an ordered F1 -> F2 -> F3 prefix")
         self.events_path = self.output_root / "campaign-events.jsonl"
         self.resume_path = self.output_root / "resume.json"
         self.decision_trace_path = self.output_root / "decision-trace.jsonl"
@@ -1028,6 +1040,7 @@ class StudentCampaign:
         *,
         round_index: int,
         training: Optional[Mapping[str, Any]] = None,
+        baseline_metrics: Optional[Mapping[str, Any]] = None,
     ) -> None:
         actual = {
             name: item.value
@@ -1035,9 +1048,14 @@ class StudentCampaign:
             if item.value is not None and item.metric_name not in {"video_decodable", "evaluation_promotable"}
         }
         predicted = dict(candidate.predicted_metric_delta)
-        delta = {
-            name: float(value) - float(predicted[name])
+        baseline = dict(baseline_metrics or {})
+        actual_delta = {
+            name: float(value) - float(baseline.get(name, 0.0))
             for name, value in actual.items()
+        }
+        prediction_error = {
+            name: float(value) - float(predicted[name])
+            for name, value in actual_delta.items()
             if name in predicted and isinstance(predicted[name], (int, float))
         }
         record = {
@@ -1048,7 +1066,8 @@ class StudentCampaign:
             "candidate_digest": candidate.digest(self.campaign_base),
             "predicted_metric_delta": predicted,
             "actual_metrics": actual,
-            "prediction_error": delta,
+            "actual_delta": actual_delta,
+            "prediction_error": prediction_error,
             "gate": decision.to_dict(),
             "execution_evidence": {
                 "algorithm_name": (training or {}).get("algorithm_name"),
@@ -1059,9 +1078,9 @@ class StudentCampaign:
                 "fidelity_executed": actual.get("fidelity_executed"),
                 "semantic_verified": actual.get("semantic_verified"),
             },
-            "promotable": bool(decision.promotable),
-            "target_satisfied": bool(decision.target_satisfied),
-            "failure_code": None if decision.feasible else "gate_rejected",
+            "promotable": bool(getattr(decision, "promotable", False)),
+            "target_satisfied": bool(getattr(decision, "target_satisfied", False)),
+            "failure_code": None if bool(getattr(decision, "feasible", getattr(decision, "passed", False))) else "gate_rejected",
         }
         self.experience_path.parent.mkdir(parents=True, exist_ok=True)
         with self.experience_path.open("a", encoding="utf-8") as handle:
@@ -1069,11 +1088,62 @@ class StudentCampaign:
             handle.flush()
             os.fsync(handle.fileno())
 
-    def _append_control_archive(self, candidate: Any, decision: Mapping[str, Any]) -> None:
+    @staticmethod
+    def _mapping_distance(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
+        keys = set(left) | set(right)
+        if not keys:
+            return 0.0
+        distances = []
+        for key in keys:
+            a, b = left.get(key), right.get(key)
+            if isinstance(a, Mapping) and isinstance(b, Mapping):
+                distances.append(StudentCampaign._mapping_distance(a, b))
+            elif isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) and not isinstance(b, bool):
+                scale = max(1.0, abs(float(a)), abs(float(b)))
+                distances.append(min(1.0, abs(float(a) - float(b)) / scale))
+            else:
+                distances.append(0.0 if a == b else 1.0)
+        return sum(distances) / float(len(distances))
+
+    def _control_novelty(self, candidate: Any, decision: Mapping[str, Any]) -> Mapping[str, float]:
+        previous = []
+        if self.archive_path.is_file():
+            try:
+                previous = [
+                    json.loads(line)
+                    for line in self.archive_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                previous = []
+        previous = [item for item in previous if isinstance(item, Mapping) and item.get("candidate_digest") != candidate.digest(self.campaign_base)]
+        if not previous:
+            return {"architecture_distance": 1.0, "training_distance": 1.0, "behavior_distance": 1.0, "novelty": 1.0}
+        architecture = dict(candidate.architecture)
+        training = dict(candidate.training_recipe)
+        behavior = dict(decision.get("objective_values") or {})
+        distances = []
+        for item in previous:
+            distances.append(
+                (
+                    self._mapping_distance(architecture, dict(item.get("architecture") or {})),
+                    self._mapping_distance(training, dict(item.get("training_recipe") or {})),
+                    self._mapping_distance(behavior, dict(item.get("behavior") or {})),
+                )
+            )
+        minimum = min(distances, key=lambda value: sum(value))
+        return {
+            "architecture_distance": float(minimum[0]),
+            "training_distance": float(minimum[1]),
+            "behavior_distance": float(minimum[2]),
+            "novelty": float(sum(minimum) / 3.0),
+        }
+
+    def _append_control_archive(self, candidate: Any, decision: Mapping[str, Any]) -> Mapping[str, float]:
         if candidate is None:
-            return
+            return {"architecture_distance": 0.0, "training_distance": 0.0, "behavior_distance": 0.0, "novelty": 0.0}
         mutation_fields = tuple(candidate.mutation_fields)
-        novelty = len(set(mutation_fields)) / float(max(1, len(candidate.mutation_fields)))
+        novelty = self._control_novelty(candidate, decision)
         common = {
             "schema_version": 1,
             "candidate_id": candidate.candidate_id,
@@ -1081,7 +1151,10 @@ class StudentCampaign:
             "generation": candidate.generation,
             "candidate_digest": candidate.digest(self.campaign_base),
             "mutation_fields": list(mutation_fields),
-            "novelty": novelty,
+            **novelty,
+            "architecture": dict(candidate.architecture),
+            "training_recipe": dict(candidate.training_recipe),
+            "behavior": dict(decision.get("objective_values") or {}),
             "decision": dict(decision),
             "target_profile_hash": self.campaign_base.target_profile_hash,
             "verifier_bank_hash": self.campaign_base.verifier_bank_hash,
@@ -1093,6 +1166,7 @@ class StudentCampaign:
                 handle.write(json.dumps({**common, "archive_kind": kind}, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        return novelty
 
     def _control_round_dir(self, round_index: int, candidate_id: str, fidelity: str) -> Path:
         """Use a worker-safe flat name for local and SSH round adapters."""
@@ -1108,6 +1182,7 @@ class StudentCampaign:
         from ..campaign.failures import FailureAttributor
         from ..campaign.gates import AcceptanceGate, MetricEvidence, pareto_dominates
         from ..campaign.proposals import validate_batch
+        from .fidelity import FidelityGate, stage_spec
 
         if self.campaign_base is None:
             raise ValueError("campaign base is required for control-plane execution")
@@ -1117,6 +1192,7 @@ class StudentCampaign:
         if getattr(getattr(self.review_pipeline, "critical", None), "identity", None) != self.campaign_base.critic_identity:
             raise ValueError("review pipeline Critical identity must match the immutable campaign critic identity")
         gate = self.acceptance_gate or AcceptanceGate()
+        fidelity_gate = FidelityGate()
         trace = DecisionTrace(self.decision_trace_path, self.campaign_base)
         existing = trace.read()
         if not existing:
@@ -1270,7 +1346,9 @@ class StudentCampaign:
                         payload=review.to_dict(),
                         evidence_ids=review.advocate.supporting_evidence_ids,
                     )
-                    reviewed_candidate = review.revision.candidate if review.revision is not None else candidate
+                    reviewed_candidate = review.final_candidate or (
+                        review.revision.candidate if review.revision is not None else candidate
+                    )
                     if review.revision is not None:
                         trace.append(
                             "proposal.revised",
@@ -1304,7 +1382,9 @@ class StudentCampaign:
                     fidelity_parent_checkpoint = parent_checkpoint
                     fidelity_parent_candidate_id = parent_id
                     fidelity_history = []
+                    fidelity_gate_decision = None
                     for fidelity in self.fidelity_schedule:
+                        spec = stage_spec(self.max_steps, fidelity)
                         trace.append(
                             "training.started",
                             round_id=round_id,
@@ -1316,6 +1396,15 @@ class StudentCampaign:
                                 "fidelity": fidelity,
                                 "parent_checkpoint": fidelity_parent_checkpoint,
                                 "parent_candidate_id": fidelity_parent_candidate_id,
+                                "fidelity_spec": {
+                                    "train_steps": spec.train_steps,
+                                    "cumulative_train_steps": spec.cumulative_train_steps,
+                                    "evaluation_cases": spec.evaluation_cases,
+                                    "seed_count": spec.seed_count,
+                                    "verifier_strength": spec.verifier_strength,
+                                    "timeout_s": spec.timeout_s,
+                                    "gpu_budget": spec.gpu_budget,
+                                },
                                 "validation": dict(validation),
                             },
                             evidence_ids=(str(validation.get("manifest_digest")),),
@@ -1324,20 +1413,47 @@ class StudentCampaign:
                             reviewed_candidate,
                             fidelity,
                             self._control_round_dir(round_index, reviewed_candidate.candidate_id, fidelity),
+                            train_steps=spec.train_steps,
                             parent_checkpoint=fidelity_parent_checkpoint,
                             parent_candidate_id=fidelity_parent_candidate_id,
                         )
                         public_execution = self._control_public_execution(execution)
                         training_obj = execution.get("_training_result")
                         evaluation_obj = execution.get("_evaluation")
+                        stage_evidence = adapter.verify(
+                            reviewed_candidate,
+                            execution,
+                            self._control_round_dir(round_index, reviewed_candidate.candidate_id, fidelity),
+                        )
+                        fidelity_gate_decision = fidelity_gate.evaluate(spec, stage_evidence)
                         fidelity_history.append(
                             {
                                 "fidelity": fidelity,
+                                "fidelity_spec": {
+                                    "train_steps": spec.train_steps,
+                                    "cumulative_train_steps": spec.cumulative_train_steps,
+                                    "evaluation_cases": spec.evaluation_cases,
+                                    "seed_count": spec.seed_count,
+                                    "verifier_strength": spec.verifier_strength,
+                                    "timeout_s": spec.timeout_s,
+                                    "gpu_budget": spec.gpu_budget,
+                                },
                                 "parent_checkpoint": fidelity_parent_checkpoint,
                                 "parent_candidate_id": fidelity_parent_candidate_id,
                                 "training": dict(public_execution.get("training") or {}),
                                 "evaluation": dict(public_execution.get("evaluation") or {}),
+                                "gate": fidelity_gate_decision.to_dict(),
                             }
+                        )
+                        trace.append(
+                            "fidelity.gate",
+                            round_id=round_id,
+                            experiment_id=reviewed_candidate.experiment_id,
+                            candidate_id=reviewed_candidate.candidate_id,
+                            parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                            actor=self.campaign_base.evaluator_identity,
+                            payload=fidelity_gate_decision.to_dict(),
+                            evidence_ids=tuple(item.input_reference for item in stage_evidence),
                         )
                         if training_obj is not None and getattr(training_obj, "status", "failed") == "success":
                             fidelity_parent_checkpoint = (
@@ -1357,6 +1473,54 @@ class StudentCampaign:
                         )
                         if training_obj is None or getattr(training_obj, "status", "failed") != "success":
                             break
+                        if not fidelity_gate_decision.passed:
+                            break
+                    if (
+                        training_obj is not None
+                        and getattr(training_obj, "status", "failed") == "success"
+                        and (fidelity_gate_decision is None or not fidelity_gate_decision.passed)
+                    ):
+                        self._append_control_experience(
+                            reviewed_candidate,
+                            {item.metric_name: item for item in stage_evidence},
+                            fidelity_gate_decision,
+                            round_index=round_index,
+                            training=training_obj.to_dict(),
+                            baseline_metrics=self._control_parent_metrics,
+                        )
+                        failure = attributor.attribute(
+                            "fidelity",
+                            {
+                                "failure_code": "fidelity_gate_failed",
+                                "message": "fidelity %s failed: %s" % (
+                                    fidelity_gate_decision.fidelity if fidelity_gate_decision else self.fidelity_schedule[0],
+                                    ", ".join(fidelity_gate_decision.violations if fidelity_gate_decision else ("no_stage_result",)),
+                                ),
+                            },
+                            tuple(fidelity_gate_decision.required_evidence if fidelity_gate_decision else ()),
+                        )
+                        decision = {
+                            "candidate_id": reviewed_candidate.candidate_id,
+                            "parent_candidate_id": reviewed_candidate.parent_candidate_id,
+                            "promotable": False,
+                            "target_satisfied": False,
+                            "failure_code": failure.failure_code,
+                            "failure": failure.to_dict(),
+                            "fidelity_history": fidelity_history,
+                            "review": review.to_dict(),
+                        }
+                        candidate_decisions.append(decision)
+                        trace.append(
+                            "campaign.replanned",
+                            round_id=round_id,
+                            experiment_id=reviewed_candidate.experiment_id,
+                            candidate_id=reviewed_candidate.candidate_id,
+                            parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                            actor=self.campaign_base.controller_identity,
+                            payload={"failure": failure.to_dict(), "action": "retain_parent"},
+                            evidence_ids=failure.evidence_ids,
+                        )
+                        continue
                     training_payload = public_execution.get("training") or {}
                     trace.append(
                         "training.metric",
@@ -1474,6 +1638,16 @@ class StudentCampaign:
                 except (TypeError, ValueError, KeyError, OSError) as exc:
                     failure = attributor.attribute("execution", {"failure_code": "campaign_error", "message": str(exc)}, ())
                     candidate_decisions.append({"candidate_id": candidate.candidate_id, "promotable": False, "target_satisfied": False, "failure_code": failure.failure_code, "failure": failure.to_dict()})
+                    trace.append(
+                        "campaign.replanned",
+                        round_id=round_id,
+                        experiment_id=candidate.experiment_id,
+                        candidate_id=candidate.candidate_id,
+                        parent_candidate_id=candidate.parent_candidate_id,
+                        actor=self.campaign_base.controller_identity,
+                        payload={"failure": failure.to_dict(), "action": "retain_parent"},
+                        evidence_ids=(),
+                    )
 
             # Apply the Pareto gate only after every candidate in the batch has
             # fixed verifier evidence. A merely feasible candidate is not
@@ -1519,6 +1693,7 @@ class StudentCampaign:
                     final_gate,
                     round_index=round_index,
                     training=training_obj.to_dict() if training_obj is not None else None,
+                    baseline_metrics=self._control_parent_metrics,
                 )
                 updated_round_results.append((reviewed_candidate, final_gate, training_obj, evaluation_obj, validation, evidence_map))
             round_results = updated_round_results
@@ -1526,12 +1701,7 @@ class StudentCampaign:
             candidate_by_id = {item.candidate_id: item for item in batch.candidates}
             for decision in candidate_decisions[decision_start:]:
                 archived_candidate = candidate_by_id.get(decision.get("candidate_id"))
-                self._append_control_archive(archived_candidate, decision)
-                novelty = (
-                    len(set(archived_candidate.mutation_fields)) / float(max(1, len(archived_candidate.mutation_fields)))
-                    if archived_candidate is not None
-                    else 0.0
-                )
+                novelty = self._append_control_archive(archived_candidate, decision)
                 trace.append(
                     "archive.updated",
                     round_id=round_id,
@@ -1541,7 +1711,7 @@ class StudentCampaign:
                     actor=self.campaign_base.controller_identity,
                     payload={
                         "archive_kinds": ["pareto" if decision.get("promotable") else "failure", "novelty"],
-                        "novelty": novelty,
+                        "novelty": dict(novelty),
                         "pareto_feasible": bool(decision.get("pareto_feasible", False)),
                         "pareto_dominated_by": list(decision.get("pareto_dominated_by") or ()),
                     },
@@ -1560,6 +1730,10 @@ class StudentCampaign:
                     or getattr(selected_training, "child_checkpoint", None)
                 )
                 self.parent_checkpoint = parent_checkpoint
+                self._control_parent_metrics = {
+                    str(key): float(value) for key, value in selected_gate.objective_values.items()
+                    if isinstance(value, (int, float))
+                }
                 trace.append(
                     "parent.selected",
                     round_id=round_id,
@@ -1611,8 +1785,14 @@ class StudentCampaign:
             payload={"reason": stop_reason, "promotable": last_promotable, "target_satisfied": last_target_satisfied},
             evidence_ids=(),
         )
+        terminal_status = (
+            "TARGET_SATISFIED" if last_target_satisfied else
+            "PROMOTABLE" if last_promotable else
+            "BUDGET_EXHAUSTED" if stop_reason in {"failure_budget_exhausted", "max_rounds"} else
+            "NO_PROGRESS"
+        )
         return CampaignResult(
-            "target_satisfied" if last_target_satisfied else ("promotable" if last_promotable else "failed"),
+            terminal_status,
             len(completed_rounds),
             tuple(completed_rounds),
             last_failure,
@@ -1648,7 +1828,36 @@ class StudentCampaign:
         if int(max_rounds) <= 0:
             raise ValueError("max_rounds must be positive")
         if self.campaign_base is not None:
-            return self._run_control_plane(max_rounds=int(max_rounds))
+            from ..campaign.events import TraceIntegrityError
+
+            try:
+                return self._run_control_plane(max_rounds=int(max_rounds))
+            except TraceIntegrityError as exc:
+                return CampaignResult(
+                    "INTEGRITY_FAILURE",
+                    0,
+                    (),
+                    "trace_integrity_failure",
+                    str(exc),
+                    False,
+                    False,
+                    (),
+                    "integrity_failure",
+                    str(self.decision_trace_path),
+                )
+            except Exception as exc:
+                return CampaignResult(
+                    "INFRA_FAILURE",
+                    0,
+                    (),
+                    "campaign_infrastructure_failure",
+                    str(exc),
+                    False,
+                    False,
+                    (),
+                    "infrastructure_failure",
+                    str(self.decision_trace_path),
+                )
         self.output_root.mkdir(parents=True, exist_ok=True)
         start_round, persisted_failures, persisted_seen = self._load_resume()
         failures: list[Mapping[str, Any]] = persisted_failures
@@ -1774,14 +1983,15 @@ class StudentCampaign:
                                         stop_reason = "no_improvement_patience"
                                         self._append_event({"round": round_index, "status": status, "failure_code": None if status == "success" else "no_pareto_improvement", "proposal_digest": proposal.digest, "llm_context": context, "optimization": {"incumbent": self._incumbent, "frontier": self._frontier}})
                                         self._persist_resume(round_index + 1, status, failures, seen)
+                                        terminal = "PROMOTABLE" if status == "success" else "NO_PROGRESS"
                                         return CampaignResult(
-                                            status,
+                                            terminal,
                                             len(rounds),
                                             tuple(rounds),
                                             None if status == "success" else "no_pareto_improvement",
                                             "effective optimization stopped after no-improvement patience",
-                                            status == "success",
-                                            status == "success",
+                                            terminal == "PROMOTABLE",
+                                            False,
                                             stop_reason=stop_reason,
                                         )
                                     self._append_event({"round": round_index, "status": "accepted_intermediate", "failure_code": None, "proposal_digest": proposal.digest, "llm_context": context, "optimization": {"incumbent": self._incumbent, "frontier": self._frontier}})
@@ -1789,7 +1999,7 @@ class StudentCampaign:
                                 if round_index >= self.min_rounds_before_success:
                                     self._append_event({"round": round_index, "status": "success", "failure_code": None, "proposal_digest": proposal.digest, "llm_context": context})
                                     self._persist_resume(round_index + 1, "success", failures, seen)
-                                    return CampaignResult("success", round_index, tuple(rounds), None, "student accepted")
+                                    return CampaignResult("PROMOTABLE", round_index, tuple(rounds), None, "server evidence is promotable; edge evidence is still required", True, False)
                                 self._append_event({"round": round_index, "status": "accepted_intermediate", "failure_code": None, "proposal_digest": proposal.digest, "llm_context": context})
                                 self._persist_resume(round_index + 1, "running", failures, seen)
                                 continue
@@ -1810,14 +2020,15 @@ class StudentCampaign:
                                     status = "success" if self._improvement_count > 0 else "no_pareto_improvement"
                                     stop_reason = "no_improvement_patience"
                                     self._persist_resume(round_index + 1, status, failures, seen)
+                                    terminal = "PROMOTABLE" if status == "success" else "NO_PROGRESS"
                                     return CampaignResult(
-                                        status,
+                                        terminal,
                                         len(rounds),
                                         tuple(rounds),
                                         None if status == "success" else "no_pareto_improvement",
                                         "effective optimization stopped after no-improvement patience",
-                                        status == "success",
-                                        status == "success",
+                                        terminal == "PROMOTABLE",
+                                        False,
                                         stop_reason=stop_reason,
                                     )
                                 self._persist_resume(round_index + 1, "running", failures, seen)
@@ -1838,18 +2049,19 @@ class StudentCampaign:
                 break
         if self.strict_optimization:
             status = "success" if self._improvement_count > 0 else "no_pareto_improvement"
-            self._persist_resume(int(max_rounds) + 1, status, failures, seen)
+            terminal = "PROMOTABLE" if status == "success" else "NO_PROGRESS"
+            self._persist_resume(int(max_rounds) + 1, terminal, failures, seen)
             return CampaignResult(
-                status,
+                terminal,
                 len(rounds),
                 tuple(rounds),
                 None if status == "success" else "no_pareto_improvement",
                 "effective optimization reached the round budget",
-                status == "success",
-                status == "success",
+                terminal == "PROMOTABLE",
+                False,
                 stop_reason="campaign_budget_exhausted",
             )
-        status = "failed" if rounds else "no_rounds"
+        status = "BUDGET_EXHAUSTED" if rounds else "INFRA_FAILURE"
         self._persist_resume(int(max_rounds) + 1, status, failures, seen)
         return CampaignResult(status, len(rounds), tuple(rounds), last_failure, "campaign did not reach an accepted student")
 

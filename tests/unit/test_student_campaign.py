@@ -90,7 +90,7 @@ def test_campaign_records_invalid_proposal_for_next_call(tmp_path):
         output_root=tmp_path,
         max_failures=2,
     ).run(max_rounds=1)
-    assert result.status == "failed"
+    assert result.status == "BUDGET_EXHAUSTED"
     event = json.loads((tmp_path / "campaign-events.jsonl").read_text().splitlines()[0])
     assert event["failure_code"] == "proposal_invalid"
 
@@ -171,7 +171,7 @@ def test_strict_campaign_rejects_valid_but_dominated_candidates(tmp_path):
         quality_policy={"no_improvement_patience": 1},
     ).run(max_rounds=3)
 
-    assert result.status == "no_pareto_improvement"
+    assert result.status == "NO_PROGRESS"
     assert any(item.failure_code == "pareto_rejected" for item in result.rounds[1:])
 
 
@@ -197,7 +197,7 @@ def test_strict_campaign_accepts_efficiency_frontier_and_persists_context(tmp_pa
         quality_policy={"no_improvement_patience": 2},
     ).run(max_rounds=4)
 
-    assert result.status == "success"
+    assert result.status == "PROMOTABLE"
     resume = json.loads((tmp_path / "resume.json").read_text())
     assert resume["improvement_count"] == 1
     assert resume["incumbent"]["latency"] == 9000.0

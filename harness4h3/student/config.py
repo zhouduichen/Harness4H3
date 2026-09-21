@@ -268,8 +268,9 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         any(not item for item in fidelity_schedule)
         or len(set(fidelity_schedule)) != len(fidelity_schedule)
         or any(item not in {"F1", "F2", "F3"} for item in fidelity_schedule)
+        or fidelity_schedule != ("F1", "F2", "F3")[: len(fidelity_schedule)]
     ):
-        raise StudentConfigError("student.fidelity_schedule must contain unique names from F1, F2, F3")
+        raise StudentConfigError("student.fidelity_schedule must be an ordered F1 -> F2 -> F3 prefix")
     if (
         max_rounds <= 0
         or max_failures < 0

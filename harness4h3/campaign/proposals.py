@@ -30,8 +30,8 @@ MUTATION_FIELDS = frozenset(
 
 
 _CAPABILITY_ALIASES = {
-    "velocity_distill": "distill",
-    "progressive_distill": "step_distill",
+    "velocity_distill": "progressive_distillation",
+    "progressive_distill": "progressive_distillation",
 }
 
 

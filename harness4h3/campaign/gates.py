@@ -73,6 +73,17 @@ _ALIASES = {
     "energy_j": "energy_j",
 }
 
+_EDGE_REQUIRED_EVIDENCE = (
+    "edge_exported",
+    "edge_quantized",
+    "edge_runtime",
+    "edge_device",
+    "edge_latency",
+    "edge_memory",
+    "edge_energy",
+    "edge_thermal",
+)
+
 
 def _metric_name(value: str) -> str:
     return _ALIASES.get(value, value)
@@ -92,6 +103,20 @@ def _constraint_metric(name: str) -> Tuple[str, Optional[str]]:
     if name.startswith("min_"):
         return _metric_name(name[4:]), "min"
     return _metric_name(name), None
+
+
+def _edge_evidence_complete(evidence: Mapping[str, MetricEvidence]) -> bool:
+    explicit = _find_evidence(evidence, "edge_evidence_complete")
+    if explicit is not None and explicit.value is not None and explicit.valid and float(explicit.value) > 0:
+        return explicit.device_profile_id != "server"
+    return all(
+        (item := _find_evidence(evidence, name)) is not None
+        and item.value is not None
+        and item.valid
+        and float(item.value) > 0
+        and item.device_profile_id != "server"
+        for name in _EDGE_REQUIRED_EVIDENCE
+    )
 
 
 class AcceptanceGate:
@@ -134,10 +159,13 @@ class AcceptanceGate:
                     objective_values[str(objective)] = float(item.value)
         feasible = not violations
         promotable = feasible
-        target_satisfied = feasible and promotable and bool(min_rounds_met)
+        edge_complete = _edge_evidence_complete(evidence)
+        target_satisfied = feasible and promotable and bool(min_rounds_met) and edge_complete
         reason = "feasible" if feasible else "hard_constraint_failure"
         if feasible and not min_rounds_met:
             reason = "promotable_before_target_satisfied"
+        elif feasible and not edge_complete:
+            reason = "promotable_for_edge_test"
         return GateDecision(
             feasible=feasible,
             promotable=promotable,

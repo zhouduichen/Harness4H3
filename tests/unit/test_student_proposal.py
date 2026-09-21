@@ -74,4 +74,8 @@ def test_round_trip_does_not_mutate_input():
     payload = valid_payload()
     original = copy.deepcopy(payload)
     proposal = StudentProposal.from_dict(payload)
-    assert proposal.to_dict() == original
+    expected = copy.deepcopy(original)
+    expected["training"].pop("max_steps")
+    expected["training"].pop("batch_size")
+    assert proposal.to_dict() == expected
+    assert payload == original

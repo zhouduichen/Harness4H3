@@ -21,6 +21,7 @@ EVENT_TYPES = frozenset(
         "critic.completed",
         "proposal.revised",
         "training.started",
+        "fidelity.gate",
         "training.metric",
         "training.completed",
         "evaluation.started",

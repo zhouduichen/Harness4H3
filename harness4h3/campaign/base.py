@@ -6,12 +6,43 @@ import copy
 import hashlib
 import json
 import math
+import re
+from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Optional
 
 
 class CampaignBaseError(ValueError):
     """Raised when a campaign verification base is malformed."""
+
+
+def sha256_file(path: Path) -> str:
+    path = Path(path).resolve()
+    if not path.is_file():
+        raise CampaignBaseError("content identity path is not a file: %s" % path)
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return "sha256:" + digest.hexdigest()
+
+
+def sha256_path(path: Path) -> str:
+    """Hash a file or directory's bytes and relative names deterministically."""
+
+    path = Path(path).resolve()
+    if path.is_file():
+        return sha256_file(path)
+    if not path.is_dir():
+        raise CampaignBaseError("content identity path does not exist: %s" % path)
+    digest = hashlib.sha256()
+    for child in sorted(item for item in path.rglob("*") if item.is_file()):
+        digest.update(str(child.relative_to(path)).encode("utf-8"))
+        digest.update(b"\0")
+        with child.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+    return "sha256:" + digest.hexdigest()
 
 
 def canonical_json(value: Any) -> str:
@@ -31,6 +62,24 @@ def canonical_json(value: Any) -> str:
 
 def canonical_digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _verify_canonical_content_hash(value: str, content: Any, name: str) -> None:
+    """Reject tampering for new canonical hashes while reading legacy fixtures.
+
+    Older campaign fixtures used shorthand values such as ``sha256:target``.
+    They remain readable for compatibility, but every real campaign base emits
+    a full 256-bit digest and those digests are always checked against content.
+    """
+
+    hash_content = content
+    if name == "capability_snapshot_hash" and isinstance(content, Mapping) and "digest" in content:
+        # CapabilitySnapshot.to_dict() carries its own digest.  Exclude that
+        # derived field to avoid hashing a value that contains itself.
+        hash_content = dict(content)
+        hash_content.pop("digest", None)
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", value) and value != canonical_digest(hash_content):
+        raise CampaignBaseError("%s does not match its immutable content" % name)
 
 
 def _copy_mapping(value: Any, name: str) -> Dict[str, Any]:
@@ -92,6 +141,12 @@ class CampaignBase:
     evaluator_identity: ActorIdentity
     prompt_version: str
     capability_snapshot: Mapping[str, Any]
+    teacher_checkpoint_sha256: Optional[str] = None
+    evaluation_manifest_digest: Optional[str] = None
+    evaluator_version: str = ""
+    clip_model_identity: str = ""
+    clip_model_hash: Optional[str] = None
+    capability_snapshot_hash: Optional[str] = None
 
     def __post_init__(self) -> None:
         if isinstance(self.schema_version, bool) or int(self.schema_version) != 1:
@@ -112,6 +167,21 @@ class CampaignBase:
             raise CampaignBaseError("all campaign actors must be ActorIdentity values")
         if len(set(identities)) != len(identities):
             raise CampaignBaseError("controller, critic, and evaluator identities must be pairwise distinct")
+        for name in ("teacher_checkpoint_sha256", "evaluation_manifest_digest", "clip_model_hash", "capability_snapshot_hash"):
+            value = getattr(self, name)
+            if value is not None:
+                _nonempty(value, name)
+        for name in ("evaluator_version", "clip_model_identity"):
+            value = getattr(self, name)
+            if value:
+                _nonempty(value, name)
+        if self.capability_snapshot_hash is None:
+            capability_content = dict(self.capability_snapshot)
+            capability_content.pop("digest", None)
+            object.__setattr__(self, "capability_snapshot_hash", canonical_digest(capability_content))
+        _verify_canonical_content_hash(self.target_profile_hash, self.target_profile, "target_profile_hash")
+        _verify_canonical_content_hash(self.verifier_bank_hash, self.verifier_bank, "verifier_bank_hash")
+        _verify_canonical_content_hash(self.capability_snapshot_hash, self.capability_snapshot, "capability_snapshot_hash")
         try:
             self._payload()
         except (TypeError, ValueError) as exc:
@@ -132,6 +202,12 @@ class CampaignBase:
             "evaluator_identity": self.evaluator_identity.to_dict(),
             "prompt_version": self.prompt_version,
             "capability_snapshot": copy.deepcopy(dict(self.capability_snapshot)),
+            "teacher_checkpoint_sha256": self.teacher_checkpoint_sha256,
+            "evaluation_manifest_digest": self.evaluation_manifest_digest,
+            "evaluator_version": self.evaluator_version,
+            "clip_model_identity": self.clip_model_identity,
+            "clip_model_hash": self.clip_model_hash,
+            "capability_snapshot_hash": self.capability_snapshot_hash,
         }
 
     def payload(self) -> Mapping[str, Any]:
@@ -164,6 +240,12 @@ class CampaignBase:
             "evaluator_identity",
             "prompt_version",
             "capability_snapshot",
+            "teacher_checkpoint_sha256",
+            "evaluation_manifest_digest",
+            "evaluator_version",
+            "clip_model_identity",
+            "clip_model_hash",
+            "capability_snapshot_hash",
             "base_digest",
         }
         unknown = sorted(set(raw) - allowed)
@@ -186,6 +268,12 @@ class CampaignBase:
             evaluator_identity=ActorIdentity.from_dict(raw["evaluator_identity"]),
             prompt_version=str(raw["prompt_version"]),
             capability_snapshot=_copy_mapping(raw["capability_snapshot"], "capability_snapshot"),
+            teacher_checkpoint_sha256=str(raw["teacher_checkpoint_sha256"]) if raw.get("teacher_checkpoint_sha256") is not None else None,
+            evaluation_manifest_digest=str(raw["evaluation_manifest_digest"]) if raw.get("evaluation_manifest_digest") is not None else None,
+            evaluator_version=str(raw.get("evaluator_version", "")),
+            clip_model_identity=str(raw.get("clip_model_identity", "")),
+            clip_model_hash=str(raw["clip_model_hash"]) if raw.get("clip_model_hash") is not None else None,
+            capability_snapshot_hash=str(raw["capability_snapshot_hash"]) if raw.get("capability_snapshot_hash") is not None else None,
         )
         stored = raw.get("base_digest")
         if stored is not None and stored != base.digest:

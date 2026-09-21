@@ -57,7 +57,11 @@ class StudentBatch:
     latent: Tensor
     conditioning: Tensor
     timestep: Tensor
-    target: Tensor
+    target: Optional[Tensor] = None
+    audio_latent: Optional[Tensor] = None
+    audio_noise: Optional[Tensor] = None
+    noise: Optional[Tensor] = None
+    audio_timestep: Optional[Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +94,16 @@ class TrainingResult:
     algorithm_path: Optional[str] = None
     algorithm_dispatch: str = "not_started"
     fidelity: str = "F1"
+    train_steps: int = 0
+    cumulative_train_steps: int = 0
+    evaluation_cases: int = 0
+    seed_count: int = 0
+    verifier_strength: str = ""
+    timeout_s: float = 0.0
+    gpu_budget: int = 0
+    total_parameter_count: int = 0
+    inheritance_ratio: float = 0.0
+    initialization_mode: str = "fresh_init"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -153,27 +167,36 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
 class StudentAlgorithmAdapter(DenoisingModelAdapter):
     """Adapt the existing H3 algorithms to the registered Student graph.
 
-    The real H3 worker produces a detached teacher target for every batch. The
-    algorithm layer still owns the optimization semantics; this adapter only
-    maps the Student tensor signature and exposes the trusted target through
-    the frozen teacher role. No proposal can replace this adapter or its
-    executable algorithm classes.
+    The real H3 worker supplies a loaded teacher role.  Teacher predictions
+    are made inside the algorithm step for the current noisy latent and
+    timestep; a detached target is retained only for explicitly offline test
+    backends, whose TrainingResult is marked ``offline_simulation``.
     """
 
-    def __init__(self):
+    def __init__(self, *, teacher_adapter: Optional[DenoisingModelAdapter] = None, teacher_role: Any = None):
+        self.teacher_adapter = teacher_adapter
+        self.teacher_role = teacher_role
         self._teacher_target: Optional[torch.Tensor] = None
+        self._teacher_audio_clean: Optional[torch.Tensor] = None
+        self._teacher_audio_noise: Optional[torch.Tensor] = None
+        self._teacher_audio_timestep: Optional[torch.Tensor] = None
 
     def prepare_batch(self, raw: Any, generator: torch.Generator) -> PreparedBatch:
         if isinstance(raw, PreparedBatch):
             return raw
         if not isinstance(raw, StudentBatch):
             raise TrainingFailure("invalid_training_config", "Student algorithm batches must be StudentBatch values")
-        self._teacher_target = raw.target.detach()
+        self._teacher_target = raw.target.detach() if raw.target is not None else None
+        self._teacher_audio_clean = raw.audio_latent.detach() if raw.audio_latent is not None else None
+        self._teacher_audio_noise = raw.audio_noise.detach() if raw.audio_noise is not None else None
+        self._teacher_audio_timestep = raw.audio_timestep.detach() if raw.audio_timestep is not None else None
+        noise = raw.noise if raw.noise is not None else torch.randn_like(raw.latent)
+        audio_noise = raw.audio_noise
         return PreparedBatch(
             conditioning=Conditioning(raw.conditioning),
-            latents=ModalLatents(video=raw.latent),
-            noise=ModalLatents(video=torch.randn_like(raw.latent)),
-            timesteps=ModalTimesteps(video=raw.timestep),
+            latents=ModalLatents(video=raw.latent, audio=raw.audio_latent),
+            noise=ModalLatents(video=noise, audio=audio_noise),
+            timesteps=ModalTimesteps(video=raw.timestep, audio=raw.audio_timestep),
         )
 
     @staticmethod
@@ -184,21 +207,53 @@ class StudentAlgorithmAdapter(DenoisingModelAdapter):
         return value
 
     def add_noise(self, clean: ModalLatents, noise: ModalLatents, timestep: ModalTimesteps) -> ModalLatents:
-        if clean.video is None or noise.video is None or timestep.video is None:
-            raise TrainingFailure("invalid_training_config", "Student algorithms require a video latent")
-        value = self._broadcast(timestep.video, clean.video)
-        return ModalLatents(video=value * clean.video + (1.0 - value) * noise.video)
+        video = None
+        audio = None
+        if clean.video is not None:
+            if noise.video is None or timestep.video is None:
+                raise TrainingFailure("invalid_training_config", "Student video noise inputs are incomplete")
+            value = self._broadcast(timestep.video, clean.video)
+            video = value * clean.video + (1.0 - value) * noise.video
+        if clean.audio is not None:
+            if noise.audio is None or timestep.audio is None:
+                raise TrainingFailure("invalid_training_config", "Student audio noise inputs are incomplete")
+            value = self._broadcast(timestep.audio, clean.audio)
+            audio = value * clean.audio + (1.0 - value) * noise.audio
+        if video is None and audio is None:
+            raise TrainingFailure("invalid_training_config", "Student algorithms require a latent")
+        return ModalLatents(video=video, audio=audio)
 
     def predict(self, role: Any, noisy: ModalLatents, timestep: ModalTimesteps, conditioning: Conditioning) -> ModalPrediction:
         if noisy.video is None or timestep.video is None:
             raise TrainingFailure("invalid_training_config", "Student algorithms require a video prediction")
         if getattr(role, "name", "") == "teacher":
-            if self._teacher_target is None:
-                raise TrainingFailure("teacher_target_missing", "teacher target was not prepared")
-            target = self._teacher_target.to(device=noisy.video.device, dtype=noisy.video.dtype)
-            if tuple(target.shape) != tuple(noisy.video.shape):
-                raise TrainingFailure("teacher_target_shape_mismatch", str(tuple(target.shape)))
-            return ModalPrediction(video=target)
+            if self.teacher_adapter is not None and self.teacher_role is not None:
+                full_noisy = noisy
+                if full_noisy.audio is None and self._teacher_audio_clean is not None:
+                    audio_clean = self._teacher_audio_clean.to(device=noisy.video.device, dtype=noisy.video.dtype)
+                    audio_noise = self._teacher_audio_noise
+                    audio_timestep = timestep.audio if timestep.audio is not None else timestep.video
+                    if audio_noise is not None and audio_timestep is not None:
+                        audio_noise = audio_noise.to(device=noisy.video.device, dtype=noisy.video.dtype)
+                        audio_timestep = audio_timestep.to(device=noisy.video.device)
+                        full_noisy = ModalLatents(
+                            video=noisy.video,
+                            audio=self.add_noise(
+                                ModalLatents(audio=audio_clean),
+                                ModalLatents(audio=audio_noise),
+                                ModalTimesteps(audio=audio_timestep),
+                            ).audio,
+                        )
+                prediction = self.teacher_adapter.predict(self.teacher_role, full_noisy, timestep, conditioning)
+                if prediction.video is None:
+                    raise TrainingFailure("teacher_prediction_missing", "real H3 teacher returned no video prediction")
+                return ModalPrediction(video=prediction.video)
+            if self._teacher_target is not None:
+                target = self._teacher_target.to(device=noisy.video.device, dtype=noisy.video.dtype)
+                if tuple(target.shape) != tuple(noisy.video.shape):
+                    raise TrainingFailure("teacher_target_shape_mismatch", str(tuple(target.shape)))
+                return ModalPrediction(video=target)
+            raise TrainingFailure("teacher_predictor_missing", "a real teacher predictor is required")
         output = role.model(noisy.video, conditioning.text, timestep.video)
         if not isinstance(output, torch.Tensor) or tuple(output.shape) != tuple(noisy.video.shape):
             raise TrainingFailure("student_forward_shape_mismatch", "Student algorithm output does not match latent shape")
@@ -241,7 +296,7 @@ class StudentAlgorithmAdapter(DenoisingModelAdapter):
 
 
 def fidelity_step_budget(max_steps: int, fidelity: str) -> int:
-    """Map a trusted fidelity label to a deterministic optimizer budget."""
+    """Return the cumulative optimizer budget for one fidelity tier."""
 
     value = int(max_steps)
     if value <= 0:
@@ -251,6 +306,36 @@ def fidelity_step_budget(max_steps: int, fidelity: str) -> int:
         raise ValueError("unsupported fidelity: %s" % fidelity)
     divisor = {"F1": 4, "F2": 2, "F3": 1}[normalized]
     return max(1, value // divisor)
+
+
+@dataclass(frozen=True)
+class FidelitySpec:
+    name: str
+    train_steps: int
+    cumulative_train_steps: int
+    evaluation_cases: int
+    seed_count: int
+    verifier_strength: str
+    timeout_s: float
+    gpu_budget: int
+
+
+def fidelity_spec(max_steps: int, fidelity: str) -> FidelitySpec:
+    name = str(fidelity).strip().upper()
+    if name not in {"F1", "F2", "F3"}:
+        raise ValueError("unsupported fidelity: %s" % fidelity)
+    cumulative = fidelity_step_budget(max_steps, name)
+    previous = fidelity_step_budget(max_steps, {"F1": "F1", "F2": "F1", "F3": "F2"}[name]) if name != "F1" else 0
+    return FidelitySpec(
+        name=name,
+        train_steps=max(1, cumulative - previous),
+        cumulative_train_steps=cumulative,
+        evaluation_cases={"F1": 1, "F2": 4, "F3": 16}[name],
+        seed_count={"F1": 1, "F2": 2, "F3": 4}[name],
+        verifier_strength={"F1": "cheap", "F2": "semantic", "F3": "full"}[name],
+        timeout_s={"F1": 900.0, "F2": 1800.0, "F3": 3600.0}[name],
+        gpu_budget={"F1": 1, "F2": 1, "F3": 2}[name],
+    )
 
 
 class StudentTrainWorker:
@@ -305,7 +390,7 @@ class StudentTrainWorker:
         )
 
     @staticmethod
-    def _inherit_parent(student: nn.Module, parent_checkpoint: Path) -> tuple[str, int]:
+    def _inherit_parent(student: nn.Module, parent_checkpoint: Path) -> tuple[str, int, int]:
         parent_checkpoint = Path(parent_checkpoint).resolve()
         if not parent_checkpoint.is_file():
             raise StudentTrainingError("parent_checkpoint_missing", str(parent_checkpoint))
@@ -321,18 +406,26 @@ class StudentTrainWorker:
             for name, value in state.items()
             if name in current and tuple(value.shape) == tuple(current[name].shape)
         }
+        parameter_names = {name for name, _ in student.named_parameters()}
+        total = sum(int(parameter.numel()) for _, parameter in student.named_parameters())
         if not matched:
             raise StudentTrainingError("parent_checkpoint_incompatible", "no Student tensors match the proposed graph")
         with torch.no_grad():
             for name, value in matched.items():
                 current[name].copy_(value.to(device=current[name].device))
-        return sha256_file(parent_checkpoint), len(matched)
+        inherited = sum(int(value.numel()) for name, value in matched.items() if name in parameter_names)
+        return sha256_file(parent_checkpoint), inherited, total
 
     @staticmethod
-    def _algorithm_runs(proposal: StudentProposal, student: nn.Module, adapter: StudentAlgorithmAdapter) -> tuple[list[Any], str]:
-        teacher_model = nn.Identity()
+    def _algorithm_runs(
+        proposal: StudentProposal,
+        student: nn.Module,
+        teacher: Any,
+        adapter: StudentAlgorithmAdapter,
+    ) -> tuple[list[Any], str]:
+        teacher_model = getattr(teacher, "model", teacher)
         method = proposal.training.method
-        if method == "velocity_distill":
+        if method == "progressive_distillation":
             stages = plan_binary_stages(proposal.training.source_steps, proposal.training.target_steps)
             return [
                 ProgressiveDistillation(
@@ -375,6 +468,7 @@ class StudentTrainWorker:
         device: Optional[str] = None,
         teacher_device: Optional[str] = None,
         student_device: Optional[str] = None,
+        train_steps: Optional[int] = None,
         parent_checkpoint: Optional[Path] = None,
         parent_candidate_id: Optional[str] = None,
         fidelity: str = "F1",
@@ -384,6 +478,7 @@ class StudentTrainWorker:
         output_dir = Path(output_dir).resolve()
         parent_sha256: Optional[str] = None
         inherited_parameter_count = 0
+        total_parameter_count = 0
         parent_kind = "teacher_seed"
         algorithm_name: Optional[str] = None
         algorithm_path: Optional[str] = None
@@ -408,17 +503,25 @@ class StudentTrainWorker:
             inherit_parent = parent_checkpoint is not None and str(parent_candidate_id or "") != "M0000"
             if inherit_parent:
                 parent_kind = "student_checkpoint"
-                parent_sha256, inherited_parameter_count = self._inherit_parent(student, Path(parent_checkpoint))
+                parent_sha256, inherited_parameter_count, total_parameter_count = self._inherit_parent(student, Path(parent_checkpoint))
             else:
                 parent_sha256 = teacher_sha256
-            steps = fidelity_step_budget(int(max_steps if max_steps is not None else proposal.training.max_steps), fidelity)
+                total_parameter_count = sum(int(parameter.numel()) for parameter in student.parameters())
+            configured_steps = int(train_steps if train_steps is not None else (max_steps if max_steps is not None else 256))
+            if configured_steps <= 0:
+                raise StudentTrainingError("invalid_training_config", "train_steps must be positive")
+            spec = fidelity_spec(int(max_steps if max_steps is not None else 256), fidelity)
+            steps = configured_steps if train_steps is not None else spec.train_steps
             # DMD2 alternates critic and Student updates; one optimizer
             # iteration would exercise only the critic and cannot publish a
             # changed Student checkpoint.
             if proposal.training.method == "dmd2":
                 steps = max(2, steps)
-            adapter = StudentAlgorithmAdapter()
-            methods, algorithm_path = self._algorithm_runs(proposal, student, adapter)
+            adapter = StudentAlgorithmAdapter(
+                teacher_adapter=getattr(self.backend, "adapter", None),
+                teacher_role=teacher,
+            )
+            methods, algorithm_path = self._algorithm_runs(proposal, student, teacher, adapter)
             algorithm_name = proposal.training.method
             initial_state = {
                 name: value.detach().to(device="cpu").clone()
@@ -499,6 +602,16 @@ class StudentTrainWorker:
                 parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count,
                 algorithm_name=algorithm_name, algorithm_dispatch=dispatch, fidelity=str(fidelity),
                 algorithm_path=algorithm_path,
+                train_steps=steps,
+                cumulative_train_steps=spec.cumulative_train_steps,
+                evaluation_cases=spec.evaluation_cases,
+                seed_count=spec.seed_count,
+                verifier_strength=spec.verifier_strength,
+                timeout_s=spec.timeout_s,
+                gpu_budget=spec.gpu_budget,
+                total_parameter_count=total_parameter_count,
+                inheritance_ratio=(float(inherited_parameter_count) / float(total_parameter_count)) if total_parameter_count else 0.0,
+                initialization_mode=("full_resume" if inherited_parameter_count == total_parameter_count and total_parameter_count else "partial_transfer" if inherited_parameter_count else "fresh_init"),
             )
         except StudentTrainingError as exc:
             return self._failure(manifest, started, exc.code, exc.message, parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation, parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None, parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count, algorithm_name=algorithm_name, algorithm_path=algorithm_path, algorithm_dispatch=dispatch, fidelity=fidelity)
@@ -530,12 +643,12 @@ class RealH3TeacherBackend:
         self.dtype = dtype
         self.teacher_targets_dir = Path(teacher_targets_dir).resolve() if teacher_targets_dir else None
         self.adapter = None
+        if self.teacher_targets_dir is not None:
+            raise ValueError(
+                "precomputed teacher targets are proxy_training and cannot be used by the real Student capability"
+            )
 
     def load_teacher(self, checkpoint: Path, device: torch.device) -> Any:
-        if self.teacher_targets_dir is not None:
-            if not self.teacher_targets_dir.is_dir():
-                raise StudentTrainingError("teacher_targets_missing", str(self.teacher_targets_dir))
-            return {"precomputed_teacher_targets": True}
         from h3_training.adapters.real_h3 import RealMiniMaxH3Adapter
 
         self.adapter = RealMiniMaxH3Adapter(self.comfyui_root, device=str(device), dtype=self.dtype)
@@ -552,27 +665,6 @@ class RealH3TeacherBackend:
         max_steps: int,
         device: torch.device,
     ) -> Iterable[StudentBatch]:
-        if self.teacher_targets_dir is not None:
-            paths = sorted(self.teacher_targets_dir.glob("*.pt"))
-            if not paths:
-                raise StudentTrainingError("teacher_targets_missing", str(self.teacher_targets_dir))
-            for index in range(max_steps):
-                try:
-                    raw = torch.load(paths[index % len(paths)], map_location="cpu", weights_only=False)
-                except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                    raise StudentTrainingError("teacher_targets_corrupt", str(exc)) from exc
-                if not isinstance(raw, Mapping):
-                    raise StudentTrainingError("teacher_targets_corrupt", "target item must be a mapping")
-                required = ("latent", "conditioning", "timestep", "target")
-                if any(name not in raw for name in required):
-                    raise StudentTrainingError("teacher_targets_corrupt", "target item is missing required tensors")
-                yield StudentBatch(
-                    latent=torch.as_tensor(raw["latent"]).to(device=device, dtype=self.dtype),
-                    conditioning=torch.as_tensor(raw["conditioning"]).to(device=device, dtype=self.dtype),
-                    timestep=torch.as_tensor(raw["timestep"]).to(device=device, dtype=torch.float32),
-                    target=torch.as_tensor(raw["target"]).to(device=device, dtype=self.dtype),
-                )
-            return
         if self.adapter is None:
             raise StudentTrainingError("h3_adapter_unavailable", "real H3 adapter was not initialized")
         paths = sorted(self.cache_dir.glob("*.pt"))
@@ -584,23 +676,17 @@ class RealH3TeacherBackend:
             prepared = self.adapter.prepare_batch(raw, generator)
             if prepared.latents is None or prepared.noise is None or prepared.timesteps is None:
                 raise StudentTrainingError("invalid_h3_batch", "H3 batch lacks latent/noise/timestep tensors")
-            noisy = self.adapter.add_noise(prepared.latents, prepared.noise, prepared.timesteps)
-            if noisy.video is None or prepared.timesteps.video is None:
+            if prepared.latents.video is None or prepared.noise.video is None or prepared.timesteps.video is None:
                 raise StudentTrainingError("invalid_h3_batch", "H3 batch lacks video tensors")
-            with torch.no_grad():
-                teacher_prediction = self.adapter.predict(
-                    teacher,
-                    noisy,
-                    prepared.timesteps,
-                    prepared.conditioning,
-                )
-            if teacher_prediction.video is None:
-                raise StudentTrainingError("invalid_h3_batch", "H3 teacher returned no video prediction")
             yield StudentBatch(
-                latent=noisy.video.to(device=device, dtype=self.dtype),
+                latent=prepared.latents.video.to(device=device, dtype=self.dtype),
                 conditioning=prepared.conditioning.text.to(device=device, dtype=self.dtype),
                 timestep=prepared.timesteps.video.to(device=device, dtype=torch.float32),
-                target=teacher_prediction.video.detach().to(device=device, dtype=self.dtype),
+                target=None,
+                audio_latent=prepared.latents.audio.to(device=device, dtype=self.dtype) if prepared.latents.audio is not None else None,
+                audio_noise=prepared.noise.audio.to(device=device, dtype=self.dtype) if prepared.noise.audio is not None else None,
+                noise=prepared.noise.video.to(device=device, dtype=self.dtype),
+                audio_timestep=prepared.timesteps.audio.to(device=device, dtype=torch.float32) if prepared.timesteps.audio is not None else None,
             )
 
     def save_student(self, student: nn.Module, path: Path, metadata: Mapping[str, str]) -> None:
@@ -620,7 +706,9 @@ __all__ = [
     "StudentAlgorithmAdapter",
     "StudentTrainWorker",
     "StudentTrainingError",
+    "FidelitySpec",
     "TrainingResult",
+    "fidelity_spec",
     "fidelity_step_budget",
     "sha256_file",
 ]

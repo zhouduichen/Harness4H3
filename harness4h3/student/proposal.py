@@ -192,10 +192,22 @@ class TrainingSpec:
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "TrainingSpec":
         raw = _mapping(raw, "training")
+        # ``max_steps`` and ``batch_size`` were present in an older proposal
+        # envelope.  Accept them only as inert compatibility input so an old
+        # persisted proposal can be read; they are deliberately not emitted by
+        # ``to_dict`` or exposed in the Controller JSON schema.  The trusted
+        # campaign config owns the executable budget and the worker currently
+        # owns its fixed batch construction.
         _keys(raw, cls._FIELDS, "training")
-        _required(raw, cls._FIELDS[:6], "training")
+        _required(
+            raw,
+            ("method", "source_steps", "target_steps", "learning_rate", "critic_learning_rate"),
+            "training",
+        )
         method = _string(raw["method"], "training.method")
-        if method not in {"velocity_distill", "dmd2"}:
+        if method == "velocity_distill":
+            method = "progressive_distillation"
+        if method not in {"progressive_distillation", "dmd2"}:
             raise ProposalValidationError("training.method is unsupported: %s" % method)
         source_steps = _integer(raw["source_steps"], "training.source_steps", minimum=1)
         target_steps = _integer(raw["target_steps"], "training.target_steps", minimum=1)
@@ -205,13 +217,22 @@ class TrainingSpec:
             raise ProposalValidationError("training.source_steps must not exceed 256")
         if target_steps > 64:
             raise ProposalValidationError("training.target_steps must not exceed 64")
-        max_steps = _integer(raw["max_steps"], "training.max_steps", minimum=1)
+        max_steps = _integer(raw.get("max_steps", 1), "training.max_steps", minimum=1)
         if max_steps > 100_000:
             raise ProposalValidationError("training.max_steps must not exceed 100000")
         learning_rate = _number(raw["learning_rate"], "training.learning_rate", minimum=0.0)
         critic_learning_rate = _number(raw["critic_learning_rate"], "training.critic_learning_rate", minimum=0.0)
         if learning_rate > 0.01 or critic_learning_rate > 0.01:
             raise ProposalValidationError("training learning rates must not exceed 0.01")
+        if method == "progressive_distillation":
+            current = source_steps
+            while current > target_steps:
+                if current % 2 or current // 2 < target_steps:
+                    raise ProposalValidationError(
+                        "progressive_distillation source_steps=%d cannot reach target_steps=%d by binary halving"
+                        % (source_steps, target_steps)
+                    )
+                current //= 2
         return cls(
             method=method,
             source_steps=source_steps,
@@ -223,7 +244,16 @@ class TrainingSpec:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        # Executable training budget and batch construction are not Controller
+        # actions.  They are selected by trusted campaign configuration and
+        # worker/runtime code respectively.
+        return {
+            "method": self.method,
+            "source_steps": self.source_steps,
+            "target_steps": self.target_steps,
+            "learning_rate": self.learning_rate,
+            "critic_learning_rate": self.critic_learning_rate,
+        }
 
 
 @dataclass(frozen=True)

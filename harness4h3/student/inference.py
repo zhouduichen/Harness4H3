@@ -12,6 +12,7 @@ from typing import Any, Mapping, Optional
 import torch
 
 from h3_training.adapters.real_h3 import RealMiniMaxH3Adapter
+from h3_training.data.schema import Conditioning, ModalInterval, ModalLatents, ModalTimesteps
 
 from .model import build_student
 from .proposal import StudentProposal, StudentTarget
@@ -75,6 +76,12 @@ def load_h3_cache_item(
         "path": selected,
         "prompt": prompt.unsqueeze(0).to(device=device, dtype=dtype),
         "latent": latent,
+        "audio_latent": (
+            RealMiniMaxH3Adapter._unpack_audio(
+                torch.as_tensor(raw["audio"]).float(), device=torch.device("cpu"), dtype=torch.float32
+            )
+            if "audio" in raw else None
+        ),
         "caption": str(raw.get("caption", "")).strip(),
     }
 
@@ -144,6 +151,48 @@ def sample_student_latent(
         # to sigma=0 therefore subtracts the negative sigma delta.
         latent = latent - (next_sigma - sigma) * velocity
     return latent
+
+
+def sample_h3_latent(
+    checkpoint: Path,
+    prompt: torch.Tensor,
+    video_shape: tuple[int, ...],
+    audio_shape: tuple[int, ...],
+    comfyui_root: Path,
+    device: torch.device,
+    *,
+    sampling_steps: int,
+    seed: int,
+    dtype: torch.dtype = torch.bfloat16,
+) -> tuple[torch.Tensor, float]:
+    """Run the authentic H3 teacher forward/scheduler loop for one case."""
+
+    if int(sampling_steps) <= 0:
+        raise StudentGenerationError("invalid_sampling_steps", "sampling_steps must be positive")
+    adapter = RealMiniMaxH3Adapter(comfyui_root, device=str(device), dtype=dtype)
+    role = adapter.load_role(Path(checkpoint), trainable=False)
+    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    video = torch.randn(video_shape, generator=generator, device="cpu", dtype=torch.float32).to(device=device, dtype=dtype)
+    audio = torch.randn(audio_shape, generator=generator, device="cpu", dtype=torch.float32).to(device=device, dtype=dtype)
+    schedule = adapter.schedule(int(sampling_steps))
+    conditioning = Conditioning(prompt.to(device=device, dtype=dtype))
+    started = time.perf_counter()
+    with torch.inference_mode():
+        for index in range(int(sampling_steps)):
+            timestep = ModalTimesteps(
+                video=torch.full((video.shape[0],), float(schedule.video_sigmas[index]), device=device, dtype=torch.float32),
+                audio=torch.full((audio.shape[0],), float(schedule.audio_sigmas[index]), device=device, dtype=torch.float32),
+            )
+            prediction = adapter.predict(role, ModalLatents(video=video, audio=audio), timestep, conditioning)
+            interval = ModalInterval(
+                video=(schedule.video_sigmas[index], schedule.video_sigmas[index + 1]),
+                audio=(schedule.audio_sigmas[index], schedule.audio_sigmas[index + 1]),
+            )
+            updated = adapter.scheduler_step(role, ModalLatents(video=video, audio=audio), prediction, interval)
+            if updated.video is None or updated.audio is None:
+                raise StudentGenerationError("h3_teacher_output_missing", "H3 teacher returned incomplete latent output")
+            video, audio = updated.video, updated.audio
+    return video, time.perf_counter() - started
 
 
 def decode_video_latent(comfyui_root: Path, vae_name: str, latent: torch.Tensor) -> torch.Tensor:
@@ -236,7 +285,6 @@ def generate_video(
     cache_path: Optional[Path] = None,
     seed: int = 20260920,
 ) -> Mapping[str, Any]:
-    started = time.perf_counter()
     selected = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     if selected.type == "cuda" and not torch.cuda.is_available():
         raise StudentGenerationError("device_unavailable", "CUDA is not available")
@@ -249,16 +297,23 @@ def generate_video(
     dtype = torch.bfloat16 if proposal.deployment.precision == "bf16" else torch.float16
     prompt = _load_prompt(cache_dir, target, selected, dtype, cache_path=cache_path)
     model = load_student_model(proposal, checkpoint, target, selected)
+    started = time.perf_counter()
     latent = sample_student_latent(model, prompt, proposal, target, selected, seed=seed)
+    sampling_latency = time.perf_counter() - started
     del model
     if selected.type == "cuda":
         torch.cuda.empty_cache()
+    decode_started = time.perf_counter()
     frames = decode_video_latent(comfyui_root, vae_name, latent)
     write_video(frames, output_path)
+    decode_latency = time.perf_counter() - decode_started
     peak = torch.cuda.max_memory_allocated(selected) / float(1024**3) if selected.type == "cuda" else 0.0
     return {
         "video_path": str(Path(output_path).resolve()),
-        "latency_s": time.perf_counter() - started,
+        "latency_s": float(sampling_latency + decode_latency),
+        "sampling_latency_s": float(sampling_latency),
+        "decode_latency_s": float(decode_latency),
+        "generation_latency_s": float(sampling_latency + decode_latency),
         "peak_memory_gb": float(peak),
         "frame_count": int(frames.shape[0]),
         "resolution": [int(frames.shape[2]), int(frames.shape[1])],
@@ -274,5 +329,6 @@ __all__ = [
     "load_h3_cache_item",
     "load_student_model",
     "sample_student_latent",
+    "sample_h3_latent",
     "write_video",
 ]

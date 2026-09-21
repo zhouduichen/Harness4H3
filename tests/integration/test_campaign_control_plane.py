@@ -180,8 +180,8 @@ def test_control_plane_runs_batch_review_gate_and_persists_lineage(tmp_path):
     ).run(max_rounds=1)
 
     assert result.promotable is True
-    assert result.target_satisfied is True
-    assert result.status == "target_satisfied"
+    assert result.target_satisfied is False
+    assert result.status == "PROMOTABLE"
     assert len(result.candidate_decisions) == 3
     assert (tmp_path / "experience.jsonl").is_file()
     archive = [json.loads(line) for line in (tmp_path / "archive.jsonl").read_text().splitlines()]
@@ -213,8 +213,8 @@ def test_control_plane_recovery_keeps_parent_until_verified_child(tmp_path):
         max_failures=2,
     ).run(max_rounds=2)
 
-    assert result.status == "target_satisfied"
-    assert result.target_satisfied is True
+    assert result.status == "PROMOTABLE"
+    assert result.target_satisfied is False
     assert any(item.get("failure_code") == "worker_oom" for item in result.candidate_decisions)
     events = [json.loads(line) for line in (tmp_path / "decision-trace.jsonl").read_text().splitlines()]
     selected = [item for item in events if item["event_type"] == "parent.selected"]

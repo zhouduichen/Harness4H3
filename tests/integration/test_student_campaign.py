@@ -79,7 +79,7 @@ def test_two_round_campaign_passes_failure_to_revised_proposal(tmp_path):
         max_failures=3,
     ).run(max_rounds=2)
     assert result.rounds_completed == 2
-    assert result.status == "success"
+    assert result.status == "PROMOTABLE"
     assert worker.calls == 2
 
     events = [json.loads(line) for line in (tmp_path / "campaign-events.jsonl").read_text().splitlines()]

@@ -72,7 +72,8 @@ def _stage_teacher_checkpoint(source: Path, stage_dir: Path) -> Path:
     return target
 
 
-def _run_teacher_target_worker(args, teacher_devices: tuple[str, ...], output_dir: Path) -> Path:
+def _run_proxy_teacher_target_worker(args, teacher_devices: tuple[str, ...], output_dir: Path) -> Path:
+    """Legacy proxy experiment; never used by the production capability."""
     target_dir = output_dir / "teacher-targets"
     result_path = target_dir / "teacher-result.json"
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -145,6 +146,7 @@ def main(argv=None) -> int:
     parser.add_argument("--controller-release-file", default="")
     parser.add_argument("--controller-worker-lease-file", default="")
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--train-steps", type=int, default=None)
     parser.add_argument("--fidelity", default="F1")
     parser.add_argument("--parent-checkpoint", default="")
     parser.add_argument("--parent-candidate-id", default="")
@@ -176,21 +178,25 @@ def main(argv=None) -> int:
                 args.controller_worker_lease_file or None,
                 selected_devices,
             )
-            staged_teacher_checkpoint = _run_teacher_target_worker(
-                args, teacher_devices, Path(args.output).resolve()
+            # The Student algorithm receives the loaded H3 teacher role and
+            # invokes its forward pass for the current noisy sample/timestep.
+            # Do not materialize fixed teacher targets: that path is only a
+            # proxy experiment and is not a real Student capability.
+            staged_teacher_checkpoint = _stage_teacher_checkpoint(
+                Path(args.teacher), Path(args.teacher_stage_dir)
             )
         else:
-            raise RuntimeError("production Student worker requires --device auto for distributed H3 teacher targets")
+            raise RuntimeError("production Student worker requires --device auto for distributed real H3 teacher execution")
         backend = RealH3TeacherBackend(
             Path(args.comfyui_root),
             Path(args.cache_dir),
-            teacher_targets_dir=Path(args.output).resolve() / "teacher-targets",
         )
         result = StudentTrainWorker(backend, target=target).run(
             manifest,
             staged_teacher_checkpoint,
             Path(args.output),
             max_steps=args.max_steps,
+            train_steps=args.train_steps,
             device=selected_student_device,
             teacher_device=selected_teacher_device,
             student_device=selected_student_device,

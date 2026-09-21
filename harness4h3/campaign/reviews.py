@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 
@@ -34,11 +37,222 @@ class ReviewIdentityError(ReviewContractError):
     """Raised when review actors violate the trust boundary."""
 
 
+class ReviewLLMError(ReviewContractError):
+    """Raised when a structured LLM review cannot be obtained or decoded."""
+
+
 class ReviewAgent(Protocol):
     identity: ActorIdentity
 
     def review(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         ...
+
+
+def review_json_schema(role: str) -> Mapping[str, Any]:
+    """Return the closed JSON schema for one independent review role."""
+
+    role = str(role).strip().lower()
+    string_array = {"type": "array", "items": {"type": "string"}}
+    if role == "advocate":
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "bottleneck": {"type": "string", "minLength": 1},
+                "changed_fields": string_array,
+                "expected_metric_delta": {"type": "object", "additionalProperties": {"type": "number"}},
+                "supporting_evidence_ids": string_array,
+                "falsification_experiment": {"type": "string", "minLength": 1},
+                "resource_assumptions": {"type": "object"},
+            },
+            "required": [
+                "bottleneck", "changed_fields", "expected_metric_delta", "supporting_evidence_ids",
+                "falsification_experiment", "resource_assumptions",
+            ],
+        }
+    if role == "critical":
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "objections": string_array,
+                "objection_categories": string_array,
+                "missing_evidence_ids": string_array,
+                "proxy_gaming_risks": string_array,
+                "target_device_risks": string_array,
+                "required_revisions": string_array,
+                "hard_objection": {"type": "boolean"},
+            },
+            "required": [
+                "objections", "objection_categories", "missing_evidence_ids", "proxy_gaming_risks",
+                "target_device_risks", "required_revisions", "hard_objection",
+            ],
+        }
+    if role == "revision":
+        candidate_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "candidate_id": {"type": "string", "minLength": 1},
+                "parent_candidate_id": {"type": ["string", "null"]},
+                "generation": {"type": "integer", "minimum": 0},
+                "experiment_id": {"type": "string", "minLength": 1},
+                "proposal_digest": {"type": "string", "minLength": 1},
+                "mutation_fields": string_array,
+                "architecture": {"type": "object"},
+                "training_recipe": {"type": "object"},
+                "deployment_recipe": {"type": "object"},
+                "provenance": {"type": "object"},
+                "predicted_metric_delta": {"type": "object", "additionalProperties": {"type": "number"}},
+            },
+            "required": [
+                "candidate_id", "parent_candidate_id", "generation", "experiment_id", "proposal_digest",
+                "mutation_fields", "architecture", "training_recipe", "deployment_recipe", "provenance",
+                "predicted_metric_delta",
+            ],
+        }
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "candidate": candidate_schema,
+                "base_digest": {"type": "string", "minLength": 1},
+                "changed_fields": string_array,
+                "resolved_objection_ids": string_array,
+                "reason": {"type": "string", "minLength": 1},
+            },
+            "required": ["candidate", "base_digest", "changed_fields", "resolved_objection_ids", "reason"],
+        }
+    raise ReviewContractError("unsupported review role: %s" % role)
+
+
+def _review_prompt(role: str, request: Mapping[str, Any]) -> str:
+    candidate = request.get("candidate")
+    context = json.dumps(dict(request), ensure_ascii=False, sort_keys=True)
+    if role == "advocate":
+        instruction = (
+            "Act as the Advocate for this candidate. Build the strongest evidence-grounded case "
+            "for the proposed design, identify its actual bottleneck, and predict numeric metric "
+            "deltas. Do not invent evidence or alter the target profile/verifier bank."
+        )
+    elif role == "critical":
+        instruction = (
+            "Act as an independent Critical reviewer. Assume the Controller candidate is wrong "
+            "until evidence proves otherwise. Actively search for unsupported assumption, proxy "
+            "gaming, goal drift, repeated failed design, resource mismatch, evaluator blind spot, "
+            "architecture/algorithm incompatibility, and target-device mismatch. You have no right "
+            "to modify TargetProfile, VerifierBank, or the final Gate; report objections only."
+        )
+    else:
+        instruction = (
+            "Act as an independent Revision agent. Revise only the CandidateEnvelope to address "
+            "the Critical objections. Preserve candidate_id, immutable campaign base digest, and "
+            "the registered action space. Never edit TargetProfile, VerifierBank, or any final gate."
+        )
+    return (
+        instruction
+        + " Return exactly one JSON object matching the supplied schema, with no markdown or prose outside JSON.\n"
+        + "CANDIDATE=" + json.dumps(candidate, ensure_ascii=False, sort_keys=True)
+        + "\nREQUEST=" + context
+    )
+
+
+class StructuredLLMReviewAgent:
+    """One role-specific structured-output LLM reviewer.
+
+    The three campaign roles use separate instances, identities, and prompts.
+    The response is parsed and then validated by the typed report classes and
+    CandidateEnvelope parser; the LLM cannot mutate trusted campaign objects.
+    """
+
+    def __init__(
+        self,
+        identity: ActorIdentity,
+        role: str,
+        *,
+        model_name: str,
+        base_url: str,
+        provider: str = "openai_compatible",
+        timeout_s: float = 180.0,
+    ) -> None:
+        self.identity = identity
+        self.role = str(role).strip().lower()
+        review_json_schema(self.role)
+        self.model_name = str(model_name)
+        self.base_url = str(base_url).rstrip("/")
+        self.provider = str(provider).strip().lower().replace("-", "_")
+        self.timeout_s = float(timeout_s)
+        if not self.model_name or not self.base_url or self.timeout_s <= 0:
+            raise ValueError("structured review agent configuration is invalid")
+
+    def _endpoint_and_payload(self, request: Mapping[str, Any]) -> tuple[str, Dict[str, Any]]:
+        schema = review_json_schema(self.role)
+        prompt = _review_prompt(self.role, request)
+        if self.provider == "ollama":
+            endpoint = self.base_url + "/api/chat"
+            payload = {
+                "model": self.model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "think": False,
+                "format": schema,
+                "options": {"temperature": 0.0},
+            }
+        else:
+            endpoint = self.base_url + ("/chat/completions" if self.base_url.endswith("/v1") else "/v1/chat/completions")
+            payload = {
+                "model": self.model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.0,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "student_%s_review" % self.role,
+                        "strict": True,
+                        "schema": schema,
+                    },
+                },
+            }
+        return endpoint, payload
+
+    @staticmethod
+    def _content(raw: Mapping[str, Any]) -> Any:
+        try:
+            message = raw["choices"][0]["message"]
+            content = message["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            try:
+                content = raw["message"]["content"]
+            except (KeyError, TypeError) as nested:
+                raise ReviewLLMError("review response has no structured message content") from nested
+        if isinstance(content, list):
+            content = "".join(
+                item.get("text", "") for item in content if isinstance(item, Mapping)
+            )
+        if isinstance(content, str):
+            try:
+                return json.loads(content)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ReviewLLMError("review response content is not JSON") from exc
+        return content
+
+    def review(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        endpoint, payload = self._endpoint_and_payload(request)
+        http_request = urllib.request.Request(
+            endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(http_request, timeout=self.timeout_s) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ReviewLLMError("%s review request failed: %s" % (self.role, exc)) from exc
+        parsed = self._content(raw if isinstance(raw, Mapping) else {})
+        if not isinstance(parsed, Mapping):
+            raise ReviewLLMError("%s review response must be a JSON object" % self.role)
+        return dict(parsed)
 
 
 def _required_string(value: Any, name: str) -> str:
@@ -206,6 +420,7 @@ class CandidateReview:
     final_critical: CriticalReport
     approved: bool
     rejection_reasons: Tuple[str, ...]
+    final_candidate: Optional[CandidateEnvelope] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -216,6 +431,7 @@ class CandidateReview:
             "final_critical": self.final_critical.to_dict(),
             "approved": self.approved,
             "rejection_reasons": list(self.rejection_reasons),
+            "final_candidate": self.final_candidate.to_dict() if self.final_candidate else None,
         }
 
 
@@ -266,7 +482,22 @@ class ReviewPipeline:
         advocate = AdvocateReport.from_dict(
             self.advocate.review(self._request(candidate, context, phase="advocate", round_index=0))
         )
-        current = candidate
+        # The Advocate owns the prediction; persist it in the immutable
+        # candidate envelope before Critical/Revision see the candidate.
+        current = copy.copy(candidate)
+        current = CandidateEnvelope(
+            candidate_id=current.candidate_id,
+            parent_candidate_id=current.parent_candidate_id,
+            generation=current.generation,
+            experiment_id=current.experiment_id,
+            proposal_digest=current.proposal_digest,
+            mutation_fields=current.mutation_fields,
+            architecture=current.architecture,
+            training_recipe=current.training_recipe,
+            deployment_recipe=current.deployment_recipe,
+            provenance=current.provenance,
+            predicted_metric_delta=dict(advocate.expected_metric_delta),
+        )
         critical_rounds = []
         revision = None
         final_critical = None
@@ -295,7 +526,22 @@ class ReviewPipeline:
                 raise ReviewContractError("revision cannot change the immutable campaign base")
             if revision.candidate.candidate_id != candidate.candidate_id:
                 raise ReviewContractError("revision cannot change candidate_id")
-            current = revision.candidate
+            revised = revision.candidate
+            if dict(revised.predicted_metric_delta) != dict(advocate.expected_metric_delta):
+                revised = CandidateEnvelope(
+                    candidate_id=revised.candidate_id,
+                    parent_candidate_id=revised.parent_candidate_id,
+                    generation=revised.generation,
+                    experiment_id=revised.experiment_id,
+                    proposal_digest=revised.proposal_digest,
+                    mutation_fields=revised.mutation_fields,
+                    architecture=revised.architecture,
+                    training_recipe=revised.training_recipe,
+                    deployment_recipe=revised.deployment_recipe,
+                    provenance=revised.provenance,
+                    predicted_metric_delta=dict(advocate.expected_metric_delta),
+                )
+            current = revised
         if final_critical is None:
             final_critical = critical_rounds[-1]
         reasons = []
@@ -311,6 +557,7 @@ class ReviewPipeline:
             final_critical=final_critical,
             approved=not reasons,
             rejection_reasons=tuple(reasons),
+            final_candidate=current,
         )
 
 
@@ -322,6 +569,9 @@ __all__ = [
     "ReviewAgent",
     "ReviewContractError",
     "ReviewIdentityError",
+    "ReviewLLMError",
     "ReviewPipeline",
     "RevisionRecord",
+    "StructuredLLMReviewAgent",
+    "review_json_schema",
 ]

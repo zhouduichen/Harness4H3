@@ -78,10 +78,11 @@ def main(argv=None) -> int:
             review_pipeline=review_pipeline,
             initial_parent_checkpoint=config.teacher_checkpoint,
             fidelity_schedule=config.fidelity_schedule,
+            max_steps=config.max_steps,
         )
         campaign = StudentCampaign(*campaign_args, **campaign_kwargs)
         result = campaign.run(max_rounds=args.max_rounds or config.max_rounds)
-        exit_code = 0 if result.status == "success" else 1
+        exit_code = 0 if result.status == "TARGET_SATISFIED" else 1
         payload = result.to_dict()
     except Exception as exc:
         exit_code = 1

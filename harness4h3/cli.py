@@ -586,6 +586,7 @@ def cmd_student_run(args: argparse.Namespace) -> int:
         review_pipeline=review_pipeline,
         initial_parent_checkpoint=config.teacher_checkpoint,
         fidelity_schedule=config.fidelity_schedule,
+        max_steps=config.max_steps,
         teacher_baseline=teacher_baseline,
         quality_policy={
             "quality_floor_ratio": config.quality_floor_ratio,
@@ -597,7 +598,7 @@ def cmd_student_run(args: argparse.Namespace) -> int:
     )
     result = campaign.run(max_rounds=args.max_rounds or config.max_rounds)
     _emit(result.to_dict(), args.json)
-    return 0 if result.status == "success" else 1
+    return 0 if result.status == "TARGET_SATISFIED" else 1
 
 
 def cmd_student_status(args: argparse.Namespace) -> int:

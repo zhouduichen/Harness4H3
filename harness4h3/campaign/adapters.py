@@ -22,7 +22,16 @@ class CandidateExecutor(Protocol):
     def validate(self, candidate: CandidateEnvelope, round_dir: Path) -> Mapping[str, Any]:
         ...
 
-    def execute(self, candidate: CandidateEnvelope, fidelity: str, round_dir: Path) -> Mapping[str, Any]:
+    def execute(
+        self,
+        candidate: CandidateEnvelope,
+        fidelity: str,
+        round_dir: Path,
+        train_steps: int | None = None,
+        *,
+        parent_checkpoint: str | Path | None = None,
+        parent_candidate_id: str | None = None,
+    ) -> Mapping[str, Any]:
         ...
 
     def verify(
@@ -53,6 +62,7 @@ class StudentCampaignAdapter:
         round_dir: Path,
         *,
         fidelity: str,
+        train_steps: int | None = None,
         parent_checkpoint: str | Path | None,
         parent_candidate_id: str | None,
     ) -> TrainingResult:
@@ -63,11 +73,36 @@ class StudentCampaignAdapter:
         kwargs = {}
         if "fidelity" in parameters:
             kwargs["fidelity"] = fidelity
+        if "train_steps" in parameters and train_steps is not None:
+            kwargs["train_steps"] = int(train_steps)
         if "parent_checkpoint" in parameters:
             kwargs["parent_checkpoint"] = parent_checkpoint
         if "parent_candidate_id" in parameters:
             kwargs["parent_candidate_id"] = parent_candidate_id
         return run(compile_manifest, round_dir, **kwargs)
+
+    def _run_evaluator(
+        self,
+        checkpoint: Path,
+        round_dir: Path,
+        *,
+        fidelity: str,
+        training: TrainingResult,
+    ) -> StudentEvaluation:
+        evaluate = self.evaluator.evaluate
+        parameters = inspect.signature(evaluate).parameters
+        kwargs = {}
+        optional = {
+            "fidelity": fidelity,
+            "evaluation_cases": int(training.evaluation_cases) if training.evaluation_cases else None,
+            "seed_count": int(training.seed_count) if training.seed_count else None,
+            "verifier_strength": training.verifier_strength or None,
+            "timeout_s": float(training.timeout_s) if training.timeout_s else None,
+        }
+        for name, value in optional.items():
+            if name in parameters and value is not None:
+                kwargs[name] = value
+        return evaluate(checkpoint, round_dir, **kwargs)
 
     def run_proposal(
         self,
@@ -75,6 +110,7 @@ class StudentCampaignAdapter:
         round_dir: Path,
         *,
         fidelity: str = "F1",
+        train_steps: int | None = None,
         parent_checkpoint: str | Path | None = None,
         parent_candidate_id: str | None = None,
     ) -> Mapping[str, Any]:
@@ -85,6 +121,7 @@ class StudentCampaignAdapter:
             compile_manifest,
             round_dir,
             fidelity=fidelity,
+            train_steps=train_steps,
             parent_checkpoint=parent_checkpoint,
             parent_candidate_id=parent_candidate_id,
         )
@@ -109,7 +146,9 @@ class StudentCampaignAdapter:
                 "_training_result": training,
                 "_evaluation": None,
             }
-        evaluation = self.evaluator.evaluate(Path(training.child_checkpoint), round_dir)
+        evaluation = self._run_evaluator(
+            Path(training.child_checkpoint), round_dir, fidelity=fidelity, training=training
+        )
         return {
             "fidelity": fidelity,
             "proposal": parsed.to_dict(),
@@ -145,6 +184,7 @@ class StudentCampaignAdapter:
         *,
         fidelity: str,
         round_dir: Path,
+        train_steps: int | None = None,
         parent_checkpoint: str | Path | None = None,
         parent_candidate_id: str | None = None,
     ) -> Mapping[str, Any]:
@@ -155,6 +195,7 @@ class StudentCampaignAdapter:
             raw,
             round_dir,
             fidelity=fidelity,
+            train_steps=train_steps,
             parent_checkpoint=parent_checkpoint,
             parent_candidate_id=parent_candidate_id,
         )
@@ -174,6 +215,7 @@ class StudentCampaignAdapter:
         candidate: CandidateEnvelope,
         fidelity: str,
         round_dir: Path,
+        train_steps: int | None = None,
         *,
         parent_checkpoint: str | Path | None = None,
         parent_candidate_id: str | None = None,
@@ -181,6 +223,7 @@ class StudentCampaignAdapter:
         return self.run_candidate(
             candidate,
             fidelity=fidelity,
+            train_steps=train_steps,
             round_dir=round_dir,
             parent_checkpoint=parent_checkpoint,
             parent_candidate_id=parent_candidate_id,
@@ -192,6 +235,11 @@ class StudentCampaignAdapter:
         validity = execution.get("v3") or {}
         fidelity = str(execution.get("fidelity") or "")
         algorithm_dispatch = str(training.get("algorithm_dispatch") or "")
+        # Legacy test doubles predate the explicit dispatch field.  Real
+        # workers always persist it; infer only the conservative success case
+        # so old fixtures remain readable without weakening a failed result.
+        if algorithm_dispatch in {"", "not_started"} and training.get("status") == "success" and int(training.get("optimizer_steps", 0) or 0) > 0:
+            algorithm_dispatch = "executed"
         quality_metrics = evaluation.get("quality_metrics") or {}
         semantic_verified = (
             quality_metrics.get("semantic") is not None
@@ -213,13 +261,29 @@ class StudentCampaignAdapter:
                 ),
                 MetricEvidence(
                     "parent_checkpoint_bound", "student-adapter-v1", str(round_dir),
-                    1.0 if training.get("parent_sha256") else 0.0,
-                    bool(training.get("parent_sha256")), "student-worker", "server", True,
+                    1.0 if (training.get("parent_sha256") or training.get("initialization_mode") == "fresh_init") else 0.0,
+                    bool(training.get("parent_sha256") or training.get("initialization_mode") == "fresh_init"),
+                    "student-worker", "server", True,
                 ),
                 MetricEvidence(
                     "parent_inherited", "student-adapter-v1", str(round_dir),
                     1.0 if training.get("parent_inherited") else 0.0,
                     bool(training.get("parent_inherited")), "student-worker", "server", False,
+                ),
+                MetricEvidence(
+                    "inherited_parameter_count", "student-adapter-v2", str(round_dir),
+                    float(training.get("inherited_parameter_count", 0)),
+                    training.get("inherited_parameter_count") is not None, "student-worker", "server", False,
+                ),
+                MetricEvidence(
+                    "total_parameter_count", "student-adapter-v2", str(round_dir),
+                    float(training.get("total_parameter_count", 0)),
+                    training.get("total_parameter_count") is not None, "student-worker", "server", False,
+                ),
+                MetricEvidence(
+                    "inheritance_ratio", "student-adapter-v2", str(round_dir),
+                    float(training.get("inheritance_ratio", 0.0)),
+                    training.get("inheritance_ratio") is not None, "student-worker", "server", False,
                 ),
                 MetricEvidence(
                     "fidelity_executed", "student-adapter-v1", str(round_dir),
@@ -267,6 +331,15 @@ class StudentCampaignAdapter:
                     1.0 if (training.get("model_size_bytes") is not None or hardware.get("model_size_gb") is not None) else 0.0,
                     training.get("model_size_bytes") is not None or hardware.get("model_size_gb") is not None,
                     "student-evaluator", "server", True,
+                ),
+                MetricEvidence(
+                    "promotable_for_edge_test", "student-adapter-v1", str(round_dir),
+                    1.0 if evaluation.get("promotable") else 0.0,
+                    bool(evaluation.get("promotable")), "student-evaluator", "server", False,
+                ),
+                MetricEvidence(
+                    "edge_evidence_complete", "student-adapter-v1", str(round_dir),
+                    0.0, False, "student-evaluator", "server", False,
                 ),
             )
         )

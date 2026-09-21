@@ -66,6 +66,10 @@ def main(argv=None) -> int:
     parser.add_argument("--clip-model-path", default="")
     parser.add_argument("--quality-device", default="cpu", help="device for semantic/temporal quality; CPU avoids competing with H3 VAE memory")
     parser.add_argument("--quality-backend", choices=("clip_temporal", "structural_proxy"), default="structural_proxy")
+    parser.add_argument("--fidelity", choices=("F1", "F2", "F3"), default="F3")
+    parser.add_argument("--max-cases", type=int, default=None)
+    parser.add_argument("--seed-count", type=int, default=None)
+    parser.add_argument("--verifier-strength", choices=("cheap", "semantic", "full"), default=None)
     parser.add_argument("--controller-hold-file", default="")
     parser.add_argument("--controller-release-file", default="")
     parser.add_argument("--controller-worker-lease-file", default="")
@@ -92,13 +96,27 @@ def main(argv=None) -> int:
                 training = dict(raw_training)
         evaluator = StudentEvaluator(black_frame_ratio_threshold=args.black_frame_ratio_threshold)
         manifest = EvaluationManifest.from_path(Path(args.evaluation_manifest)) if args.evaluation_manifest else None
-        if args.quality_backend == "clip_temporal" and manifest is None:
+        verifier_strength = args.verifier_strength or {"F1": "cheap", "F2": "semantic", "F3": "full"}[args.fidelity]
+        if args.quality_backend == "clip_temporal" and verifier_strength != "cheap" and manifest is None:
             raise QualityBackendUnavailable("clip_temporal evaluation requires --evaluation-manifest")
-        quality_backend = ClipTemporalQualityBackend(args.clip_model_path, device=args.quality_device) if args.quality_backend == "clip_temporal" else None
+        # F1 is deliberately structural-only.  F2/F3 may use the configured
+        # semantic verifier, but a configured structural backend remains an
+        # explicit proxy and is recorded as such in the evidence.
+        quality_backend = (
+            ClipTemporalQualityBackend(args.clip_model_path, device=args.quality_device)
+            if args.quality_backend == "clip_temporal" and verifier_strength != "cheap"
+            else None
+        )
         cases = []
         if manifest is not None:
-            for case in manifest.cases:
-                for seed in case.seeds:
+            selected_cases = manifest.cases[: args.max_cases] if args.max_cases is not None else manifest.cases
+            if not selected_cases:
+                raise ValueError("evaluation manifest contains no cases for this fidelity stage")
+            for case in selected_cases:
+                selected_seeds = case.seeds[: args.seed_count] if args.seed_count is not None else case.seeds
+                if not selected_seeds:
+                    raise ValueError("evaluation manifest case contains no seeds for this fidelity stage")
+                for seed in selected_seeds:
                     cases.append((case.case_id, Path(case.cache_path), case.caption, int(seed)))
         else:
             cases.append(("default", None, "", int(args.seed)))
@@ -125,6 +143,8 @@ def main(argv=None) -> int:
                 "quantization": training.get("quantization"),
                 "model_size_gb": float(generation["checkpoint_bytes"]) / float(1024**3),
                 "energy_j": args.energy_j,
+                "fidelity": args.fidelity,
+                "verifier_strength": verifier_strength,
             }
             preliminary = evaluator.evaluate(case_path, hardware=hardware_case)
             if not preliminary.valid:
@@ -167,6 +187,8 @@ def main(argv=None) -> int:
             "energy_j": args.energy_j,
             "case_count": len(case_results),
             "evaluation_manifest_digest": manifest.digest if manifest is not None else None,
+            "fidelity": args.fidelity,
+            "verifier_strength": verifier_strength,
         }
         aggregate_score = float(statistics.mean(qualities))
         quality = {
@@ -180,6 +202,8 @@ def main(argv=None) -> int:
         }
         metric_evidence = MetricVerifierBank().evaluate(quality, hardware)
         metric_payload = metric_evidence.to_dict()
+        metric_payload["fidelity"] = args.fidelity
+        metric_payload["verifier_strength"] = verifier_strength
         metric_payload["optimization_metrics"] = {
             "quality": aggregate_score,
             "latency": hardware["latency_ms"],

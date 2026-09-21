@@ -89,7 +89,7 @@ def _category(name: str) -> str:
         return "architecture"
     if name in {"quantize"}:
         return "quantization"
-    if name in {"distill", "step_distill", "velocity_distill", "progressive_distill", "dmd2", "recovery_finetune"}:
+    if name in {"progressive_distillation", "distill", "step_distill", "velocity_distill", "progressive_distill", "dmd2", "recovery_finetune"}:
         return "training"
     return "runtime"
 

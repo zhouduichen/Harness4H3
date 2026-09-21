@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import shutil
 import statistics
 import sys
 import time
@@ -15,9 +15,10 @@ from typing import Any, Mapping
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness4h3.student.evaluation_manifest import EvaluationManifest
 from harness4h3.student.gpu import select_free_cuda_device
-from harness4h3.student.inference import decode_video_latent, load_h3_cache_item, write_video
+from harness4h3.student.inference import decode_video_latent, load_h3_cache_item, sample_h3_latent, write_video
 from harness4h3.student.quality import ClipTemporalQualityBackend, QualityBackendUnavailable
 from harness4h3.student.proposal import StudentTarget
+from harness4h3.campaign.base import sha256_path
 
 
 def _write(path: Path, value: Mapping[str, Any]) -> None:
@@ -33,6 +34,7 @@ def _p95(values: list[float]) -> float:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Calibrate H3 teacher quality on a fixed evaluation manifest")
     parser.add_argument("--evaluation-manifest", required=True)
+    parser.add_argument("--teacher", default="", help="authentic MiniMax-H3 teacher checkpoint")
     parser.add_argument("--output", required=True)
     parser.add_argument("--result", required=True)
     parser.add_argument("--comfyui-root", required=True)
@@ -47,6 +49,13 @@ def main(argv=None) -> int:
     parser.add_argument("--condition-dim", type=int, default=5120)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--wait-for-gpu-s", type=int, default=600)
+    parser.add_argument("--sampling-steps", type=int, default=4)
+    parser.add_argument("--seed", type=int, default=20260920)
+    parser.add_argument(
+        "--baseline-kind",
+        choices=("h3_teacher_generation_baseline", "reference_reconstruction_baseline"),
+        default="h3_teacher_generation_baseline",
+    )
     args = parser.parse_args(argv)
     output_dir = Path(args.output).resolve()
     result_path = Path(args.result).resolve()
@@ -54,6 +63,11 @@ def main(argv=None) -> int:
         import torch
 
         manifest = EvaluationManifest.from_path(Path(args.evaluation_manifest))
+        evaluation_manifest_digest = "sha256:" + hashlib.sha256(Path(args.evaluation_manifest).read_bytes()).hexdigest()
+        if args.baseline_kind == "h3_teacher_generation_baseline" and not args.teacher:
+            raise ValueError("--teacher is required for h3_teacher_generation_baseline")
+        teacher_checkpoint_sha256 = sha256_path(Path(args.teacher)) if args.teacher else None
+        clip_model_hash = sha256_path(Path(args.clip_model_path))
         device_name = select_free_cuda_device(8.0, args.wait_for_gpu_s) if args.device == "auto" else args.device
         device = torch.device(device_name)
         quality_backend = ClipTemporalQualityBackend(args.clip_model_path, device=args.quality_device)
@@ -66,34 +80,40 @@ def main(argv=None) -> int:
         )
         cases = []
         latencies = []
-        decoded_by_cache: dict[str, dict[str, Any]] = {}
+        peak_memory_gb = 0.0
         for case in manifest.cases:
             cache_key = str(Path(case.cache_path).resolve())
             for seed in case.seeds:
                 video_path = output_dir / "teacher-baseline" / ("%s-%d.mp4" % (case.case_id, seed))
-                cached = decoded_by_cache.get(cache_key)
-                if cached is None:
-                    cache_item = load_h3_cache_item(Path(args.cache_dir), target, device, torch.float32, cache_path=Path(case.cache_path))
-                    started = time.perf_counter()
-                    latent = torch.as_tensor(cache_item["latent"], device=device)
-                    frames = decode_video_latent(Path(args.comfyui_root), args.vae_name, latent)
-                    source_path = output_dir / "teacher-baseline" / ("source-%04d.mp4" % (len(decoded_by_cache) + 1))
-                    write_video(frames, source_path)
-                    evidence = quality_backend.evaluate(source_path, case.caption)
-                    cached = {
-                        "video_path": str(source_path),
-                        "quality": evidence.to_dict(),
-                        "latency_s": time.perf_counter() - started,
-                        "frame_count": int(frames.shape[0]),
-                        "resolution": [int(frames.shape[2]), int(frames.shape[1])],
-                    }
-                    decoded_by_cache[cache_key] = cached
-                    del frames, latent
-                    if device.type == "cuda":
-                        torch.cuda.empty_cache()
-                shutil.copy2(cached["video_path"], video_path)
-                latency = float(cached["latency_s"])
-                evidence = dict(cached["quality"])
+                cache_item = load_h3_cache_item(Path(args.cache_dir), target, device, torch.bfloat16, cache_path=Path(case.cache_path))
+                if args.baseline_kind == "h3_teacher_generation_baseline" and cache_item.get("audio_latent") is None:
+                    raise ValueError("H3 teacher baseline requires audio latent in cache item %s" % cache_key)
+                if args.baseline_kind == "h3_teacher_generation_baseline":
+                    latent, sampling_latency = sample_h3_latent(
+                        Path(args.teacher),
+                        cache_item["prompt"],
+                        tuple(cache_item["latent"].shape),
+                        tuple(cache_item["audio_latent"].shape),
+                        Path(args.comfyui_root),
+                        device,
+                        sampling_steps=args.sampling_steps,
+                        seed=int(seed),
+                        dtype=torch.bfloat16,
+                    )
+                else:
+                    # This is intentionally a separate upper-reference: it
+                    # reconstructs cached latents and never claims to be an
+                    # executable H3 generation baseline.
+                    latent = cache_item["latent"].to(device=device, dtype=torch.bfloat16)
+                    sampling_latency = 0.0
+                decode_started = time.perf_counter()
+                frames = decode_video_latent(Path(args.comfyui_root), args.vae_name, latent)
+                write_video(frames, video_path)
+                decode_latency = time.perf_counter() - decode_started
+                latency = float(sampling_latency + decode_latency)
+                if device.type == "cuda":
+                    peak_memory_gb = max(peak_memory_gb, float(torch.cuda.max_memory_allocated(device)) / float(1024 ** 3))
+                evidence = quality_backend.evaluate(video_path, case.caption).to_dict()
                 latencies.append(latency)
                 cases.append(
                     {
@@ -102,30 +122,59 @@ def main(argv=None) -> int:
                         "video_path": str(video_path),
                         "quality": evidence,
                         "latency_s": latency,
-                        "frame_count": int(cached["frame_count"]),
-                        "resolution": list(cached["resolution"]),
+                        "sampling_latency_s": float(sampling_latency),
+                        "decode_latency_s": float(decode_latency),
+                        "generation_latency_s": latency,
+                        "frame_count": int(frames.shape[0]),
+                        "resolution": [int(frames.shape[2]), int(frames.shape[1])],
                     }
                 )
+                del frames, latent
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
         quality = float(statistics.mean(float(item["quality"]["aggregate"]) for item in cases))
         hardware = {
             "latency_s": float(statistics.median(latencies)),
             "latency_p95_s": _p95(latencies),
             "latency_ms": float(statistics.median(latencies)) * 1000.0,
+            "peak_memory_gb": peak_memory_gb,
+            "model_size_gb": (
+                float(Path(args.teacher).stat().st_size) / float(1024 ** 3)
+                if args.teacher
+                else None
+            ),
             "case_count": len(cases),
             "device": device_name,
             "evaluation_manifest_digest": manifest.digest,
         }
         payload = {
             "status": "success",
+            "kind": args.baseline_kind,
             "manifest_digest": manifest.digest,
+            "evaluation_manifest_digest": evaluation_manifest_digest,
+            "teacher_checkpoint_sha256": teacher_checkpoint_sha256,
+            "clip_model_hash": clip_model_hash,
+            "teacher_checkpoint": str(Path(args.teacher).resolve()) if args.teacher else None,
+            "sampling_steps": int(args.sampling_steps),
+            "seed_policy": "evaluation_manifest seeds",
+            "generation_latency_boundary": (
+                "teacher_sampling_plus_vae_decode_excluding_quality"
+                if args.baseline_kind == "h3_teacher_generation_baseline"
+                else "vae_decode_only_excluding_quality"
+            ),
+            "used_for": (
+                "student_campaign_optimization_baseline"
+                if args.baseline_kind == "h3_teacher_generation_baseline"
+                else "reconstruction_quality_upper_reference"
+            ),
             "quality_backend": "clip_temporal",
             "quality": {"score": quality, "score_type": "clip_temporal", "cases": cases},
             "hardware": hardware,
             "optimization_metrics": {
                 "quality": quality,
                 "latency": hardware["latency_ms"],
-                "memory": 0.0,
-                "size": 0.0,
+                "memory": hardware["peak_memory_gb"],
+                "size": hardware["model_size_gb"],
             },
         }
         _write(result_path, payload)
