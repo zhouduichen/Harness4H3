@@ -749,9 +749,8 @@ class StudentCampaign:
             return
         mutation_fields = tuple(candidate.mutation_fields)
         novelty = len(set(mutation_fields)) / float(max(1, len(candidate.mutation_fields)))
-        record = {
+        common = {
             "schema_version": 1,
-            "archive_kind": "pareto" if decision.get("promotable") else "failure",
             "candidate_id": candidate.candidate_id,
             "parent_candidate_id": candidate.parent_candidate_id,
             "generation": candidate.generation,
@@ -762,9 +761,11 @@ class StudentCampaign:
             "target_profile_hash": self.campaign_base.target_profile_hash,
             "verifier_bank_hash": self.campaign_base.verifier_bank_hash,
         }
+        kinds = ["pareto" if decision.get("promotable") else "failure", "novelty"]
         self.archive_path.parent.mkdir(parents=True, exist_ok=True)
         with self.archive_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            for kind in kinds:
+                handle.write(json.dumps({**common, "archive_kind": kind}, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
 
@@ -1119,7 +1120,7 @@ class StudentCampaign:
                     candidate_id=decision.get("candidate_id"),
                     parent_candidate_id=archived_candidate.parent_candidate_id if archived_candidate else None,
                     actor=self.campaign_base.controller_identity,
-                    payload={"archive_kind": "pareto" if decision.get("promotable") else "failure", "novelty": novelty},
+                    payload={"archive_kinds": ["pareto" if decision.get("promotable") else "failure", "novelty"], "novelty": novelty},
                     evidence_ids=(),
                 )
 

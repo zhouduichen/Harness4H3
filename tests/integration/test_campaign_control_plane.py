@@ -185,7 +185,7 @@ def test_control_plane_runs_batch_review_gate_and_persists_lineage(tmp_path):
     assert len(result.candidate_decisions) == 3
     assert (tmp_path / "experience.jsonl").is_file()
     archive = [json.loads(line) for line in (tmp_path / "archive.jsonl").read_text().splitlines()]
-    assert {item["archive_kind"] for item in archive} == {"pareto"}
+    assert {item["archive_kind"] for item in archive} == {"pareto", "novelty"}
     events = [json.loads(line) for line in (tmp_path / "decision-trace.jsonl").read_text().splitlines()]
     assert events[0]["event_type"] == "campaign.created"
     assert any(item["event_type"] == "parent.selected" for item in events)
