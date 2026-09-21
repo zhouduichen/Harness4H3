@@ -38,6 +38,7 @@ def main(argv=None) -> int:
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--vae-name", required=True)
     parser.add_argument("--clip-model-path", required=True)
+    parser.add_argument("--quality-device", default="cpu", help="device for semantic/temporal quality; CPU avoids competing with H3 VAE memory")
     parser.add_argument("--latent-channels", type=int, default=24)
     parser.add_argument("--latent-frames", type=int, default=5)
     parser.add_argument("--latent-height", type=int, default=16)
@@ -54,7 +55,7 @@ def main(argv=None) -> int:
         manifest = EvaluationManifest.from_path(Path(args.evaluation_manifest))
         device_name = select_free_cuda_device(8.0, args.wait_for_gpu_s) if args.device == "auto" else args.device
         device = torch.device(device_name)
-        quality_backend = ClipTemporalQualityBackend(args.clip_model_path, device=device_name)
+        quality_backend = ClipTemporalQualityBackend(args.clip_model_path, device=args.quality_device)
         target = StudentTarget(
             latent_channels=args.latent_channels,
             latent_frames=args.latent_frames,

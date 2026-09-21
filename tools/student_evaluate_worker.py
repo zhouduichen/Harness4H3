@@ -64,6 +64,7 @@ def main(argv=None) -> int:
     parser.add_argument("--energy-j", type=float, default=None, help="optional measured generation energy; never inferred")
     parser.add_argument("--evaluation-manifest", default="")
     parser.add_argument("--clip-model-path", default="")
+    parser.add_argument("--quality-device", default="cpu", help="device for semantic/temporal quality; CPU avoids competing with H3 VAE memory")
     parser.add_argument("--quality-backend", choices=("clip_temporal", "structural_proxy"), default="structural_proxy")
     parser.add_argument("--controller-hold-file", default="")
     parser.add_argument("--controller-release-file", default="")
@@ -93,7 +94,7 @@ def main(argv=None) -> int:
         manifest = EvaluationManifest.from_path(Path(args.evaluation_manifest)) if args.evaluation_manifest else None
         if args.quality_backend == "clip_temporal" and manifest is None:
             raise QualityBackendUnavailable("clip_temporal evaluation requires --evaluation-manifest")
-        quality_backend = ClipTemporalQualityBackend(args.clip_model_path, device=selected_device) if args.quality_backend == "clip_temporal" else None
+        quality_backend = ClipTemporalQualityBackend(args.clip_model_path, device=args.quality_device) if args.quality_backend == "clip_temporal" else None
         cases = []
         if manifest is not None:
             for case in manifest.cases:
