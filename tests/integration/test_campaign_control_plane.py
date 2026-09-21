@@ -136,7 +136,7 @@ class Advocate:
 
 
 class Critical:
-    identity = ActorIdentity("critic", "reviewer", "2")
+    identity = ActorIdentity("critic", "model-b", "1")
 
     def review(self, request: Mapping[str, Any]):
         return {

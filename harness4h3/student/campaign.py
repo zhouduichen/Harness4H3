@@ -788,6 +788,8 @@ class StudentCampaign:
         snapshot = self._control_snapshot()
         if self.review_pipeline is None:
             raise ValueError("control-plane StudentCampaign requires an independent review_pipeline")
+        if getattr(getattr(self.review_pipeline, "critical", None), "identity", None) != self.campaign_base.critic_identity:
+            raise ValueError("review pipeline Critical identity must match the immutable campaign critic identity")
         gate = self.acceptance_gate or AcceptanceGate()
         trace = DecisionTrace(self.decision_trace_path, self.campaign_base)
         existing = trace.read()
