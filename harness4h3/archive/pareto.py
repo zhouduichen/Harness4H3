@@ -2,45 +2,78 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..controller.schemas import EvaluationResult
-from .model_candidate import MODEL_ID_PATTERN
+from ..target.profile import ObjectiveSpec
+
+
+SEARCH_ID_PATTERN = re.compile(r"(?:M|S|C)[0-9]{4,}")
+DEFAULT_OBJECTIVES = (
+    ObjectiveSpec("quality_score", "maximize"),
+    ObjectiveSpec("latency_s", "minimize"),
+    ObjectiveSpec("peak_memory_gb", "minimize"),
+    ObjectiveSpec("model_size_gb", "minimize"),
+    ObjectiveSpec("energy_j", "minimize"),
+)
 
 
 @dataclass(frozen=True)
 class ParetoEntry:
     candidate_id: str
     evaluation: EvaluationResult
+    objectives: Tuple[ObjectiveSpec, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"candidate_id": self.candidate_id, "evaluation": self.evaluation.to_dict()}
+        return {
+            "candidate_id": self.candidate_id,
+            "evaluation": self.evaluation.to_dict(),
+            "objectives": [item.to_dict() for item in self.objectives],
+        }
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "ParetoEntry":
-        return cls(str(raw["candidate_id"]), EvaluationResult.from_dict(raw["evaluation"]))
+        objectives = tuple(
+            ObjectiveSpec(
+                name=str(item["name"]),
+                direction=str(item["direction"]),
+                weight=float(item.get("weight", 1.0)),
+            )
+            for item in (raw.get("objectives") or [])
+            if isinstance(item, Mapping)
+        )
+        return cls(str(raw["candidate_id"]), EvaluationResult.from_dict(raw["evaluation"]), objectives)
 
 
-def _objectives(result: EvaluationResult) -> Tuple[Tuple[Optional[float], bool], ...]:
-    hardware = result.hardware
-    return (
-        (result.quality_score, True),
-        (hardware.latency_s, False),
-        (hardware.peak_memory_gb, False),
-        (hardware.model_size_gb, False),
-        (hardware.energy_j, False),
-    )
+def _metric_value(result: EvaluationResult, name: str) -> Optional[float]:
+    if name == "quality_score":
+        value = result.quality_score
+    else:
+        value = getattr(result.hardware, name, None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
-def dominates(a: EvaluationResult, b: EvaluationResult) -> bool:
+def _objectives(result: EvaluationResult, objectives: Sequence[ObjectiveSpec] = ()) -> Tuple[Tuple[Optional[float], bool], ...]:
+    specs = tuple(objectives) or DEFAULT_OBJECTIVES
+    return tuple((_metric_value(result, item.name), item.direction == "maximize") for item in specs)
+
+
+def dominates(
+    a: EvaluationResult,
+    b: EvaluationResult,
+    objectives: Sequence[ObjectiveSpec] = (),
+) -> bool:
     if a.feasible != b.feasible:
         return a.feasible
     strictly_better = False
     compared = False
-    for (a_value, maximize), (b_value, _) in zip(_objectives(a), _objectives(b)):
+    for (a_value, maximize), (b_value, _) in zip(_objectives(a, objectives), _objectives(b, objectives)):
         if b_value is None:
             continue
         if a_value is None:
@@ -66,14 +99,23 @@ class ParetoArchive:
     def entries(self) -> List[ParetoEntry]:
         if not self.entries_dir.exists():
             return []
-        result = [ParetoEntry.from_dict(json.loads(path.read_text(encoding="utf-8"))) for path in self.entries_dir.glob("M*.json")]
+        result = [
+            ParetoEntry.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            for path in self.entries_dir.glob("*.json")
+            if SEARCH_ID_PATTERN.fullmatch(path.stem)
+        ]
         return sorted(result, key=lambda item: item.candidate_id)
 
-    def update(self, candidate_id: str, evaluation: EvaluationResult) -> List[ParetoEntry]:
-        if not MODEL_ID_PATTERN.fullmatch(candidate_id):
+    def update(
+        self,
+        candidate_id: str,
+        evaluation: EvaluationResult,
+        objectives: Sequence[ObjectiveSpec] = (),
+    ) -> List[ParetoEntry]:
+        if not SEARCH_ID_PATTERN.fullmatch(candidate_id):
             raise ValueError("invalid model candidate id %r" % candidate_id)
         self.entries_dir.mkdir(parents=True, exist_ok=True)
-        entry = ParetoEntry(candidate_id, evaluation)
+        entry = ParetoEntry(candidate_id, evaluation, tuple(objectives))
         path = self.entries_dir / (candidate_id + ".json")
         with path.open("x", encoding="utf-8") as handle:
             json.dump(entry.to_dict(), handle, ensure_ascii=False, indent=2, sort_keys=True)
@@ -81,7 +123,18 @@ class ParetoArchive:
             handle.flush()
             os.fsync(handle.fileno())
         all_entries = self.entries()
-        front = [item for item in all_entries if not any(other.candidate_id != item.candidate_id and dominates(other.evaluation, item.evaluation) for other in all_entries)]
+        comparison_objectives = tuple(objectives) or next(
+            (item.objectives for item in all_entries if item.objectives), DEFAULT_OBJECTIVES
+        )
+        front = [
+            item
+            for item in all_entries
+            if not any(
+                other.candidate_id != item.candidate_id
+                and dominates(other.evaluation, item.evaluation, comparison_objectives)
+                for other in all_entries
+            )
+        ]
         self._write_front([item.candidate_id for item in front])
         return front
 

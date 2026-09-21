@@ -1,0 +1,80 @@
+name: GPU contract
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Verified device profile on the self-hosted GPU runner"
+        required: true
+        default: configs/devices/l40x4-server.yaml
+      parent_checkpoint:
+        description: "Authentic MiniMax-H3 safetensors checkpoint on the runner"
+        required: true
+      worker_config:
+        description: "Trusted real-H3 worker JSON on the runner"
+        required: true
+        default: configs/a1-worker.l40x4-rsi-staging.json
+      operator:
+        description: "Capability to validate in the device profile"
+        required: true
+        default: recovery_finetune
+
+jobs:
+  contract:
+    # This job is intentionally manual and requires a separately managed GPU
+    # runner. It validates the real interfaces but never starts a worker.
+    runs-on: [self-hosted, linux, x64, gpu]
+    timeout-minutes: 30
+    env:
+      PROFILE: ${{ inputs.profile }}
+      PARENT_CHECKPOINT: ${{ inputs.parent_checkpoint }}
+      WORKER_CONFIG: ${{ inputs.worker_config }}
+      OPERATOR: ${{ inputs.operator }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install contract dependencies
+        run: python -m pip install -e ".[test,training]"
+
+      - name: Import real adapter and inspect checkpoint manifest
+        run: |
+          python -c "from h3_training.adapters.real_h3 import RealMiniMaxH3Adapter; print(RealMiniMaxH3Adapter.__name__)"
+          python -m harness4h3.cli inspect --checkpoint "$PARENT_CHECKPOINT" --json
+
+      - name: Validate device profile and real worker prerequisites
+        run: |
+          python tools/device_preflight.py \
+            --profile "$PROFILE" \
+            --operator "$OPERATOR" \
+            --skip-services \
+            --result var/gpu-contract/device-preflight.json \
+            --json
+          python - "$PARENT_CHECKPOINT" "$WORKER_CONFIG" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          from tools.run_real_h3_gate import preflight
+
+          report = preflight(
+              Path(sys.argv[1]),
+              Path(sys.argv[2]),
+              require_gpu=True,
+              check_endpoint=False,
+          )
+          print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+          if not report["passed"]:
+              raise SystemExit(1)
+          PY
+
+      - name: Run benchmark and evaluation contract tests
+        run: |
+          python -m pytest -q \
+            tests/training/test_real_h3_adapter.py \
+            tests/unit/test_h3_benchmark.py \
+            tests/unit/test_evaluation_record.py \
+            tests/unit/test_remote_config.py
+
+      - name: Compile runtime sources
+        run: python -m compileall -q harness4h3 h3_training research tools

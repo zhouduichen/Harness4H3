@@ -226,6 +226,7 @@ class ModelEvolutionOperator:
     backend: ModelEvolutionBackend
     allowed_args: Mapping[str, Tuple[type, ...]]
     cost: CostEstimate
+    optional_args: Tuple[str, ...] = ()
 
     def schema(self) -> Mapping[str, Any]:
         return {key: "/".join(kind.__name__ for kind in kinds) for key, kinds in self.allowed_args.items()}
@@ -238,7 +239,7 @@ class ModelEvolutionOperator:
         unknown = sorted(set(args) - set(self.allowed_args))
         if unknown:
             raise OperatorValidationError("unsupported argument(s) for %s: %s" % (self.name, ", ".join(unknown)))
-        missing = sorted(set(self.allowed_args) - set(args))
+        missing = sorted(set(self.allowed_args) - set(args) - set(self.optional_args))
         if missing:
             raise OperatorValidationError("%s requires argument(s): %s" % (self.name, ", ".join(missing)))
         for key, value in args.items():
@@ -262,6 +263,24 @@ class ModelEvolutionOperator:
             steps = int(args["target_steps"])
             if steps <= 0 or (parent.sampling_steps is not None and steps >= parent.sampling_steps):
                 raise OperatorValidationError("step_distill.target_steps must be positive and below current steps")
+            lpl_target = args.get("lpl_target_steps")
+            if lpl_target is not None:
+                if isinstance(lpl_target, bool) or not isinstance(lpl_target, int):
+                    raise OperatorValidationError("step_distill.lpl_target_steps must be an integer")
+                if lpl_target <= 0 or lpl_target > steps:
+                    raise OperatorValidationError("step_distill.lpl_target_steps must be in [1, target_steps]")
+            merge_steps = args.get("tdtm_merge_steps")
+            if merge_steps is not None:
+                if isinstance(merge_steps, bool) or not isinstance(merge_steps, int):
+                    raise OperatorValidationError("step_distill.tdtm_merge_steps must be an integer")
+                if merge_steps < 0 or merge_steps > steps:
+                    raise OperatorValidationError("step_distill.tdtm_merge_steps must be in [0, target_steps]")
+            threshold = args.get("tdtm_similarity_threshold")
+            if threshold is not None:
+                if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+                    raise OperatorValidationError("step_distill.tdtm_similarity_threshold must be numeric")
+                if not 0.0 <= float(threshold) <= 1.0:
+                    raise OperatorValidationError("step_distill.tdtm_similarity_threshold must be in [0, 1]")
         elif self.name == "recovery_finetune" and int(args["training_steps"]) <= 0:
             raise OperatorValidationError("recovery_finetune.training_steps must be positive")
         elif self.name == "dmd2":
@@ -304,7 +323,16 @@ def build_model_evolution_registry(backend: Optional[ModelEvolutionBackend] = No
             {"dataset_fraction": (float,), "training_steps": (int,)},
             CostEstimate(2.0, 0.75),
         ),
-        "step_distill": ("Distill the sampling trajectory to fewer steps", {"target_steps": (int,)}, CostEstimate(2.5, 1.0)),
+        "step_distill": (
+            "Distill the sampling trajectory to fewer steps; optionally attach verified H3 LPL/TDTM inference controls",
+            {
+                "target_steps": (int,),
+                "lpl_target_steps": (int,),
+                "tdtm_merge_steps": (int,),
+                "tdtm_similarity_threshold": (float,),
+            },
+            CostEstimate(2.5, 1.0),
+        ),
         "recovery_finetune": (
             "Recover quality after structural change with short fine-tuning",
             {"training_steps": (int,)},
@@ -318,7 +346,12 @@ def build_model_evolution_registry(backend: Optional[ModelEvolutionBackend] = No
         "quantize": ("Quantize model weights to a lower precision", {"bits": (int,)}, CostEstimate(0.8, 0.2)),
     }
     for name, (description, args, cost) in definitions.items():
-        registry.register(ModelEvolutionOperator(name, description, backend, args, cost))
+        optional_args = (
+            "lpl_target_steps",
+            "tdtm_merge_steps",
+            "tdtm_similarity_threshold",
+        ) if name == "step_distill" else ()
+        registry.register(ModelEvolutionOperator(name, description, backend, args, cost, optional_args))
     return registry
 
 
@@ -326,6 +359,7 @@ def build_external_model_evolution_registry(
     command: Sequence[str],
     executor: Optional[LocalProcessExecutor] = None,
     timeout_s: float = 3600.0,
+    allowed_operators: Optional[Sequence[str]] = None,
 ) -> OperatorRegistry:
     """Register real training workers using the existing safe external contract.
 
@@ -359,6 +393,12 @@ def build_external_model_evolution_registry(
         ),
         "quantize": ("Quantize H3 weights with a real worker", {"bits": (int,)}, CostEstimate(1800.0, 1.0)),
     }
+    if allowed_operators is not None:
+        selected = {str(name) for name in allowed_operators}
+        unknown = sorted(selected - set(definitions))
+        if unknown:
+            raise OperatorValidationError("unknown external operator(s): %s" % ", ".join(unknown))
+        definitions = {name: value for name, value in definitions.items() if name in selected}
     registry = OperatorRegistry()
     for name, (description, allowed_args, cost) in definitions.items():
         registry.register(ExternalScriptOperator(name, description, command, allowed_args, executor, cost, timeout_s))

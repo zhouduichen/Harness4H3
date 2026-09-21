@@ -47,7 +47,7 @@ def test_a0_creates_model_lineage_and_records_fidelity(tmp_path):
     assert result.report["offline_simulation"] is True
     assert result.report["total_experiments"] == 4
     assert len(result.report["model_lineage"]) >= 2
-    assert all(item["harness_version"] == "Harness4H3-v1.0" for item in result.report["full_autonomous_experiment_sequence"])
+    assert all(item["harness_version"] == "Harness4H3-v0.4" for item in result.report["full_autonomous_experiment_sequence"])
     assert any(item["fidelity_tier"] in {1, 2, 3} for item in result.report["full_autonomous_experiment_sequence"])
 
 
@@ -121,7 +121,7 @@ def test_research_report_preserves_sequence_and_counts():
     report = build_a0_report(
         {
             "campaign_id": "A0",
-            "harness": {"version": "Harness4H3-v1.0"},
+            "harness": {"version": "Harness4H3-v0.4"},
             "target_profile_id": "rtx",
             "status": "completed",
             "target_satisfied": True,

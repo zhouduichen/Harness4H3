@@ -2,13 +2,101 @@
 
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 import subprocess
 import time
+from pathlib import Path
 from typing import Sequence
 
 
 class GPUResourceUnavailable(RuntimeError):
     """Raised when no GPU satisfies the requested free-memory budget."""
+
+
+def _atomic_json(path: Path, value: dict) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".part", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def acquire_controller_handoff(
+    hold_file: str | None,
+    release_file: str | None,
+    worker_lease_file: str | None,
+) -> None:
+    """Ask the server-local Controller launcher to yield all GPUs.
+
+    The marker protocol is intentionally file based because the LLM server and
+    the training worker are sibling detached processes on the remote host.
+    ``hold_file`` prevents the launcher from starting a replacement while the
+    worker owns the cards; the release marker makes an already-running vLLM
+    child terminate promptly.
+    """
+
+    if hold_file:
+        _atomic_json(Path(hold_file), {"owner_pid": os.getpid(), "state": "worker_handoff"})
+    if release_file:
+        _atomic_json(Path(release_file), {"owner_pid": os.getpid(), "state": "release_controller"})
+    if worker_lease_file:
+        _atomic_json(
+            Path(worker_lease_file),
+            {
+                "allocated_gpus": [],
+                "created_at": time.time(),
+                "expires_at": time.time() + 86400.0,
+                "owner_pid": os.getpid(),
+                "state": "acquiring",
+            },
+        )
+
+
+def publish_worker_gpu_lease(worker_lease_file: str | None, devices: Sequence[str]) -> None:
+    if not worker_lease_file:
+        return
+    gpu_ids = []
+    for device in devices:
+        value = str(device)
+        if not value.startswith("cuda:"):
+            raise ValueError("worker lease device must be cuda:N: %s" % value)
+        gpu_ids.append(int(value.split(":", 1)[1]))
+    now = time.time()
+    _atomic_json(
+        Path(worker_lease_file),
+        {
+            "allocated_gpus": gpu_ids,
+            "created_at": now,
+            "expires_at": now + 86400.0,
+            "owner_pid": os.getpid(),
+            "state": "allocated",
+        },
+    )
+
+
+def release_controller_handoff(
+    hold_file: str | None,
+    release_file: str | None,
+    worker_lease_file: str | None,
+) -> None:
+    for value in (hold_file, release_file, worker_lease_file):
+        if value:
+            try:
+                Path(value).unlink()
+            except FileNotFoundError:
+                pass
 
 
 def select_free_cuda_device(min_free_memory_gb: float, wait_s: int) -> str:
@@ -69,4 +157,11 @@ def select_free_cuda_devices(min_free_memory_gb: Sequence[float], wait_s: int) -
         time.sleep(min(30.0, max(1.0, deadline - time.monotonic())))
 
 
-__all__ = ["GPUResourceUnavailable", "select_free_cuda_device", "select_free_cuda_devices"]
+__all__ = [
+    "GPUResourceUnavailable",
+    "acquire_controller_handoff",
+    "publish_worker_gpu_lease",
+    "release_controller_handoff",
+    "select_free_cuda_device",
+    "select_free_cuda_devices",
+]

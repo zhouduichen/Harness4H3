@@ -49,6 +49,10 @@ def _capability_reasons(worker: Mapping[str, Any], capabilities: Mapping[str, An
         capability = _mapping(capabilities.get(name))
         if capability.get("safe_to_plan") is not True:
             reasons.append("capability_unverified:%s" % name)
+            continue
+        contract = _mapping(capability.get("execution_contract"))
+        if not contract.get("workflow_hook") or contract.get("creates_checkpoint") is not False:
+            reasons.append("capability_contract_missing:%s" % name)
     return tuple(reasons)
 
 

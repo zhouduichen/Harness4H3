@@ -1,0 +1,23 @@
+{
+  "operator": "recovery_finetune",
+  "parent": {
+    "id": "M0000",
+    "parent_id": null,
+    "generation": 0,
+    "checkpoint_path": "/data/models/MiniMax-H3/diffusion_models/minimax_h3_fl2va_bf16.safetensors",
+    "state": {
+      "model_id": "M0000",
+      "parent_model_id": null,
+      "checkpoint_path": "/data/models/MiniMax-H3/diffusion_models/minimax_h3_fl2va_bf16.safetensors",
+      "architecture_name": "MiniMax-H3",
+      "provenance": {"real_h3": true, "offline_simulation": false}
+    }
+  },
+  "parent_system": null,
+  "child_model_id": "M0100",
+  "child_system_id": "S0100",
+  "operator_args": {"training_steps": 10, "resource_pool": "gpu2-gpu3"},
+  "artifacts_dir": "/data/models/MiniMax-H3/harness4h3/real-rsi/two-gpu/exp-2gpu-long/artifacts",
+  "real_worker": true,
+  "offline_simulation": false
+}

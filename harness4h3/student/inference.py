@@ -185,6 +185,10 @@ def generate_video(
     if selected.type == "cuda" and not torch.cuda.is_available():
         raise StudentGenerationError("device_unavailable", "CUDA is not available")
     if selected.type == "cuda":
+        # Initialize the selected CUDA context before querying allocator
+        # statistics.  On a fresh worker, reset_peak_memory_stats(device)
+        # otherwise passes the raw index to an uninitialized CUDA runtime.
+        torch.cuda.set_device(selected)
         torch.cuda.reset_peak_memory_stats(selected)
     dtype = torch.bfloat16 if proposal.deployment.precision == "bf16" else torch.float16
     prompt = _load_prompt(cache_dir, target, selected, dtype)

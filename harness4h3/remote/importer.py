@@ -61,6 +61,12 @@ def normalize_trainer_result(
     metrics.update(_mapping(result.get("training_metrics")))
     training = dict(_mapping(result.get("training")))
     training.update(metrics)
+    cost = _mapping(result.get("cost"))
+    if cost:
+        # Keep measured worker cost with the durable training experience so a
+        # RoundPolicy can enforce its GPU-hour budget after a restart.  This
+        # is metadata only; it never affects checkpoint lineage.
+        training.setdefault("cost", dict(cost))
     algorithm_state = _mapping(output_state.get("algorithm_state"))
     operator = result.get("operator") or algorithm_state.get("operator") or request.get("operator")
     operator_args = dict(_mapping(request.get("operator_args")))

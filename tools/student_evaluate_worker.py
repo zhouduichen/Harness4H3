@@ -11,16 +11,18 @@ from typing import Any, Mapping
 
 try:
     from harness4h3.student.evaluator import StudentEvaluation, StudentEvaluator
-    from harness4h3.student.gpu import GPUResourceUnavailable, select_free_cuda_device
+    from harness4h3.student.gpu import GPUResourceUnavailable, release_controller_handoff, select_free_cuda_device
     from harness4h3.student.inference import StudentGenerationError, generate_video
+    from harness4h3.student.metrics import MetricVerifierBank
     from harness4h3.student.proposal import StudentProposal, StudentTarget
 except ModuleNotFoundError:  # direct invocation from the repository root
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from harness4h3.student.evaluator import StudentEvaluation, StudentEvaluator
-    from harness4h3.student.gpu import GPUResourceUnavailable, select_free_cuda_device
+    from harness4h3.student.gpu import GPUResourceUnavailable, release_controller_handoff, select_free_cuda_device
     from harness4h3.student.inference import StudentGenerationError, generate_video
+    from harness4h3.student.metrics import MetricVerifierBank
     from harness4h3.student.proposal import StudentProposal, StudentTarget
 
 
@@ -55,6 +57,11 @@ def main(argv=None) -> int:
     parser.add_argument("--min-free-memory-gb", type=float, default=8.0)
     parser.add_argument("--seed", type=int, default=20260920)
     parser.add_argument("--black-frame-ratio-threshold", type=float, default=0.0)
+    parser.add_argument("--energy-j", type=float, default=None, help="optional measured generation energy; never inferred")
+    parser.add_argument("--controller-hold-file", default="")
+    parser.add_argument("--controller-release-file", default="")
+    parser.add_argument("--controller-worker-lease-file", default="")
+    parser.add_argument("--release-controller-handoff", action="store_true")
     args = parser.parse_args(argv)
     output_dir = Path(args.output).resolve()
     result_path = Path(args.result).resolve()
@@ -95,6 +102,8 @@ def main(argv=None) -> int:
             "generation_wall_time_s": time.perf_counter() - started,
             "training_peak_memory_gb": training.get("peak_memory_gb"),
             "quantization": training.get("quantization"),
+            "model_size_gb": float(generation["checkpoint_bytes"]) / float(1024**3),
+            "energy_j": args.energy_j,
         }
         preliminary = evaluator.evaluate(video_path, hardware=hardware)
         sample_mean = float(preliminary.validity.get("sample_mean", 0.0))
@@ -106,7 +115,22 @@ def main(argv=None) -> int:
             "sample_mean": sample_mean,
             "black_frame_ratio": black_ratio,
         }
-        evaluation = evaluator.evaluate(video_path, quality=quality, hardware=hardware)
+        metric_evidence = MetricVerifierBank().evaluate(quality, hardware)
+        evaluation = evaluator.evaluate(
+            video_path,
+            quality=quality,
+            hardware=hardware,
+            metric_evidence=metric_evidence.to_dict(),
+        )
+        if evaluation.valid and metric_evidence.reward is None:
+            evaluation = StudentEvaluation(
+                **{
+                    **evaluation.to_dict(),
+                    "failure_code": "metric_evidence_missing",
+                    "message": "required continuous metric evidence is missing or invalid",
+                    "promotable": False,
+                }
+            )
     except GPUResourceUnavailable as exc:
         evaluation = _failure(video_path, "resource_unavailable", str(exc))
     except StudentGenerationError as exc:
@@ -114,6 +138,12 @@ def main(argv=None) -> int:
     except (OSError, KeyError, TypeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         evaluation = _failure(video_path, "student_evaluator_failed", str(exc))
     _write(result_path, evaluation.to_dict())
+    if args.release_controller_handoff:
+        release_controller_handoff(
+            args.controller_hold_file or None,
+            args.controller_release_file or None,
+            args.controller_worker_lease_file or None,
+        )
     return 0 if evaluation.promotable else 1
 
 

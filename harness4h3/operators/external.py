@@ -78,9 +78,13 @@ class ExternalScriptOperator:
         request = {
             "operator": self.name,
             "parent": parent.to_dict(),
+            "parent_system": runtime.parent_system.to_dict() if runtime.parent_system is not None else None,
             "child_model_id": runtime.child_model_id,
+            "child_system_id": runtime.child_system_id,
             "operator_args": dict(args),
             "artifacts_dir": str(artifacts_dir),
+            "real_worker": True,
+            "offline_simulation": False,
         }
         request_path.write_text(json.dumps(request, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         parent_path = Path(parent.checkpoint_path).resolve() if "://" not in parent.checkpoint_path else None

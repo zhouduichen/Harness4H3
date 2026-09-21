@@ -17,6 +17,7 @@ from harness4h3.evaluator.quality import FakeQualityEvaluator
 from harness4h3.h3.state import ModelState
 from harness4h3.memory.experiment_store import ExperimentStore
 from harness4h3.operators.fake import FakeOperatorBackend, build_fake_registry
+from harness4h3.operators.runtime_memory import build_runtime_registry
 from harness4h3.target.profile import TargetProfile
 
 
@@ -37,11 +38,15 @@ def baseline():
     return ModelCandidate("M0000", None, 0, state.checkpoint_path, state, None, "baseline")
 
 
-def make_loop(tmp_path, controller=None, backend=None):
+def make_loop(tmp_path, controller=None, backend=None, include_runtime=False):
     root = tmp_path / "session"
     return OptimizationLoop(
         controller=controller or RuleBasedMockController(),
-        operators=build_fake_registry(backend or FakeOperatorBackend()),
+        operators=(
+            build_runtime_registry(backend or FakeOperatorBackend())
+            if include_runtime
+            else build_fake_registry(backend or FakeOperatorBackend())
+        ),
         evaluator=CompositeEvaluator(FakeQualityEvaluator(), FakeHardwareEvaluator(), ConstraintEvaluator()),
         models=ModelStore(root / "models"),
         pareto=ParetoArchive(root / "pareto"),
@@ -82,6 +87,25 @@ def valid_plan(context, operator="quantize", args=None):
         {"max_quality_drop": 0.05},
         {"critical_regression": True},
         "bounded offline experiment",
+    )
+
+
+def runtime_plan(context):
+    return ExperimentPlan(
+        "exp_%04d" % (context.budget_state.used_iterations + 1),
+        context.current_model_state.model_id,
+        "residual memory",
+        "reduce runtime memory",
+        "runtime offload reduces residency without changing model weights",
+        "runtime_offload",
+        {"mode": "aggressive"},
+        {"peak_memory_gb": "decrease"},
+        ["backend support"],
+        {"wall_time_s": 0.05},
+        {"max_quality_drop": 0.05},
+        {"critical_regression": True},
+        "bounded runtime experiment",
+        parent_system_id=context.current_system["id"],
     )
 
 
@@ -175,3 +199,13 @@ def test_initial_target_reached_stops_without_controller_call(tmp_path):
     assert result.status == "target_satisfied"
     assert result.budget.used_controller_calls == 0
     assert list(loop.experiments.read()) == []
+
+
+def test_closed_loop_keeps_runtime_intervention_out_of_model_lineage(tmp_path):
+    loop = make_loop(tmp_path, StaticController(runtime_plan), include_runtime=True)
+    result = loop.run("pair-session", mobile_target(), budget(max_iterations=1), baseline())
+    assert result.current_system_id == "S0001"
+    assert [item.id for item in loop.models.lineage()] == ["M0000"]
+    assert [item.id for item in loop.systems.lineage()] == ["S0000", "S0001"]
+    assert loop.systems.get("S0001").model_ref == "M0000"
+    assert loop.experiments.read().__next__().child_model_id is None

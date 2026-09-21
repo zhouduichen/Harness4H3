@@ -118,6 +118,7 @@ class DigestLimits:
     max_operator_findings: int = 2
     max_frontier: int = 4
     max_failures: int = 16
+    max_observation_ids: int = 24
     max_item_chars: int = 2048
 
     def __post_init__(self) -> None:
@@ -178,13 +179,18 @@ class DiscoveryDigest:
                 failures[failure] = failures.get(failure, 0) + 1
         failure_counts = dict(sorted(failures.items(), key=lambda pair: (-pair[1], pair[0]))[: limits.max_failures])
 
-        observation_ids = []
+        all_observation_ids = []
         for item in observations:
             if not isinstance(item, Mapping):
                 continue
             value = item.get("observation_id")
-            if value and str(value) not in observation_ids:
-                observation_ids.append(str(value))
+            if value and str(value) not in all_observation_ids:
+                all_observation_ids.append(str(value))
+        # The complete observation JSONL remains durable source memory.  The
+        # digest is a prompt-facing view, so keep only the newest IDs here;
+        # embedding every historical identifier made long RSI runs grow even
+        # when every recipe/evaluation payload was already compacted.
+        observation_ids = all_observation_ids[-limits.max_observation_ids :]
         frontier = tuple(_fit(item, limits.max_item_chars) for item in list(pareto)[-limits.max_frontier :])
         telemetry_values = list(telemetry)
         bounded_telemetry = _fit(telemetry_values[-limits.max_frontier :], limits.max_item_chars)

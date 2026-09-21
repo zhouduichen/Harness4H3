@@ -1,27 +1,45 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from .. import Harness4H3Error
+from ..controller.schemas import EvaluationRecord, HardwareMetrics
 
 
 class EvaluatorError(Harness4H3Error):
     pass
 
 
-@dataclass(frozen=True)
-class EvaluationResult:
-    score: float
-    metrics: Mapping[str, Any]
-    critical_regression: bool = False
-    failure_type: Optional[str] = None
+def legacy_evaluator_result(
+    score: float,
+    metrics: Mapping[str, Any],
+    critical_regression: bool = False,
+    failure_type: Optional[str] = None,
+) -> EvaluationRecord:
+    """Build canonical evidence from the old score/metrics subprocess shape."""
+
+    return EvaluationRecord(
+        quality_score=float(score),
+        quality_metrics=dict(metrics),
+        hardware=HardwareMetrics(),
+        feasible=False,
+        critical_regression=bool(critical_regression),
+        failure_type=str(failure_type) if failure_type else None,
+    )
 
 
-def validate_result(raw: Any) -> EvaluationResult:
+# Existing benchmark integrations construct ``EvaluationResult(...)`` with
+# the legacy positional shape. Keep that spelling as a factory while using a
+# single canonical record internally.
+EvaluationResult = legacy_evaluator_result
+
+
+def validate_result(raw: Any) -> EvaluationRecord:
     if not isinstance(raw, Mapping):
         raise EvaluatorError("evaluator result must be a JSON object")
     try:
@@ -33,7 +51,7 @@ def validate_result(raw: Any) -> EvaluationResult:
     metrics = raw.get("metrics")
     if not isinstance(metrics, Mapping):
         raise EvaluatorError("evaluator result requires metrics object")
-    return EvaluationResult(
+    return legacy_evaluator_result(
         score=score,
         metrics=dict(metrics),
         critical_regression=bool(raw.get("critical_regression", False)),
@@ -46,7 +64,27 @@ class SubprocessEvaluator:
         self.command = tuple(command) or (sys.executable, "-m", "harness4h3.evaluator.worker")
         self.timeout_s = timeout_s
 
-    def evaluate(self, request: Mapping[str, Any]) -> EvaluationResult:
+    @staticmethod
+    def _child_environment() -> Mapping[str, str]:
+        """Make the bundled evaluator importable from any working directory.
+
+        Remote campaigns launch from a tools directory and may use a system
+        Python for the controller while the evaluator package lives only in
+        the checked-out harness.  The evaluator is a trusted local child, so
+        add this repository root to the inherited import path instead of
+        relying on the caller's current directory or shell setup.
+        """
+
+        environment = os.environ.copy()
+        repository_root = str(Path(__file__).resolve().parents[2])
+        existing = environment.get("PYTHONPATH", "")
+        entries = [item for item in existing.split(os.pathsep) if item]
+        if repository_root not in entries:
+            entries.insert(0, repository_root)
+        environment["PYTHONPATH"] = os.pathsep.join(entries)
+        return environment
+
+    def evaluate(self, request: Mapping[str, Any]) -> EvaluationRecord:
         try:
             completed = subprocess.run(
                 self.command,
@@ -55,6 +93,7 @@ class SubprocessEvaluator:
                 capture_output=True,
                 timeout=self.timeout_s,
                 check=False,
+                env=self._child_environment(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise EvaluatorError("evaluator process failed: %s" % exc)
@@ -81,4 +120,3 @@ def make_request(
         "wall_time_s": float(wall_time_s),
         "backend_success": bool(backend_success),
     }
-

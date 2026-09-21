@@ -68,6 +68,12 @@ Validator 必须拒绝未知字段、改变 substrate/evaluator digest、未注�
 不是 `ExperimentPlan` 的替代品；它只限制下一轮搜索空间，执行仍使用现有
 `ExperimentPlan` validator。
 
+实现上，主 Controller 的 `ExperimentPlan` 可以携带一个严格的 `round_policy`。
+campaign 以当前 substrate/evaluator digest、registry 和 scheduler GPU 数再次验证，
+通过后原子写入 `active-round-policy.json` 并镜像到 campaign state。并行预取只能
+读取 active policy，不能改变它；没有该字段的旧计划继续按无 active policy 的兼容
+路径执行。
+
 ### DiscoveryDigest
 
 `DiscoveryDigest` 从 append-only `ExperimentRecord`、`ObservationRecord`、
@@ -113,13 +119,21 @@ trial:       elastic worker 2 GPUs
 并在训练期间提前完成下一轮 plan；当训练需要 4 卡时，plan 必须在拿 worker
 lease 之前生成并持久化，不能中途抢卡。
 
-评价与训练不允许修改已启动 torchrun 的 world size。未来的 2→3→4 扩容只能
+评价与训练不允许修改已启动 torchrun 的 world size。CPU-only 的剪枝/量化 worker
+运行期间，会并行提前生成一个经过 operator filter 的 GPU-fill successor，并以
+`parallel_prefetched_plan` 有界持久化；评价回调优先消费这个 plan，避免等主
+successor 返回后才开始第二次 LLM 请求。未来的 2→3→4 扩容只能
 在 checkpoint chunk、全 rank barrier 和新的完整 lease 边界发生。
+
+主 Controller 的 n-way 候选中若已经包含合法的 distributed GPU candidate，CPU-only
+主计划会直接复用该候选启动一个 sibling speculative worker，不再额外等待第二次
+LLM 请求；该 sibling 仍使用独立 child/lease/result，并且必须经过自己的评价门禁。
 
 所有阶段记录 `lane_allocation`、每卡 lease 时间、GPU utilization、power、
 memory、idle reason。评价完成后 ComfyUI 按 `idle_release` 调用 `/free`，确认
 队列为空和显存降到 waterline 后释放 lease；不需要时卸载模型/停止 campaign-owned
-worker。既有外部 ComfyUI daemon 不由本项目停止。
+worker。按需 launcher 还对 benchmark lease 设置有限 TTL，SSH/campaign 崩溃时
+自动退出并回收自己的子进程；既有外部 ComfyUI daemon 不由本项目停止。
 
 ## 持久化与重启
 
@@ -161,9 +175,18 @@ Codex 不承担持续监控责任。
 - 真实/测试 Controller prompt 只收到 digest，不收到 checkpoint bytes 或无限历史。
 - 评价期间事件顺序出现 `controller_plan_prefetch_started`、`lane_allocation`、
   `worker_started`，且 GPU lease 集合不相交。
+- CPU-only worker 期间出现 `controller_plan_parallel_prefetch_armed`，并在评价
+  开始时复用同一个 `parallel_prefetched_plan`；没有安全两卡 lease 时记录等待
+  原因而不虚报满载。
 - ComfyUI `/free`、lease release、worker completion 和 retention 的异常路径均
   fail-closed，不会杀外部任务。
 - 远程短窗口运行报告每卡 lane、utilization、power、memory、idle reason；若
   外部进程占卡，campaign 等待而不是声称 4 卡满载。
+- `tools/remote-validation-window.sh --start` 是唯一的有界实测入口：默认只读，
+  需要显式解除 operator pause，达到迭代/时间上限后 graceful pause，并由
+  `summarize_remote_validation.py` 输出不含模型字节的 JSON/Markdown 证据。
+- `DiscoveryDigest` 同时携带最近有界 `pipeline_telemetry`；provider 只保留
+  lane、underutilized GPU、prefetch 等摘要和 per-GPU power/utilization，不能把
+  原始 telemetry 或 checkpoint 内容放进 LLM context。
 - 现有 remote orchestration、checkpoint、ComfyUI 和 worker contract 测试保持
   全部通过。

@@ -35,4 +35,4 @@ def test_optimize_cli_reaches_fake_target_and_exposes_lineage(tmp_path):
     lineage = run_cli("lineage", "--session-dir", str(session))
     assert json.loads(lineage.stdout)["active"] == "M0002"
     pareto = run_cli("pareto", "--session-dir", str(session))
-    assert json.loads(pareto.stdout)["pareto_front"][0]["candidate_id"] == "M0002"
+    assert json.loads(pareto.stdout)["pareto_front"][0]["candidate_id"] == "S0002"

@@ -21,6 +21,18 @@ from .. import Harness4H3Error
 
 
 _MAX_METADATA_BYTES = 8 * 1024 * 1024
+_SSH_CONNECTION_OPTIONS = (
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=15",
+    "-o",
+    "ServerAliveInterval=30",
+    "-o",
+    "ServerAliveCountMax=3",
+    "-o",
+    "TCPKeepAlive=yes",
+)
 
 
 class RemoteError(Harness4H3Error):
@@ -64,10 +76,13 @@ class RemoteConfig:
     deployment_dir: Optional[str] = None
     campaign_root: Optional[str] = None
     training_python: Optional[str] = None
+    ssh_port: int = 22
 
     def __post_init__(self) -> None:
         if not str(self.host).strip():
             raise ValueError("remote host must not be empty")
+        if isinstance(self.ssh_port, bool) or not 1 <= int(self.ssh_port) <= 65535:
+            raise ValueError("ssh_port must be between 1 and 65535")
         if int(self.comfyui_port) <= 0 or int(self.comfyui_port) > 65535:
             raise ValueError("comfyui_port must be between 1 and 65535")
         for name in ("harness_root", "model_root", "comfyui_root"):
@@ -116,6 +131,13 @@ class SSHClient:
         self.config = config
         self.runner = runner or subprocess.run
         self.command_timeout_s = float(command_timeout_s)
+        self.last_model_link_action: Optional[str] = None
+
+    @property
+    def is_local(self) -> bool:
+        """Whether commands execute on this process' host without SSH."""
+
+        return False
 
     def _path(self, value: str, *, allow_deployment: bool = False) -> str:
         if not isinstance(value, str) or not value.strip():
@@ -140,7 +162,14 @@ class SSHClient:
         if not argv:
             raise ValueError("remote command must not be empty")
         remote_command = self._command_string(argv)
-        local_argv = ("ssh", self.config.host, remote_command)
+        local_argv = (
+            "ssh",
+            *_SSH_CONNECTION_OPTIONS,
+            "-p",
+            str(int(self.config.ssh_port)),
+            self.config.host,
+            remote_command,
+        )
         result = self.runner(
             local_argv,
             shell=False,
@@ -224,21 +253,193 @@ class SSHClient:
         return value[0].lower()
 
     def ensure_model_link(self, model_path: str, model_id: str) -> str:
+        """Make the deployment link point at the requested immutable checkpoint.
+
+        A campaign can be resumed after an interrupted run that used the same
+        child id but a different staging directory.  In that case the old
+        deployment entry is still a symlink to another checkpoint.  Replacing
+        that *validated symlink* is safe and idempotent; regular files and
+        links outside the configured roots remain hard conflicts.
+        """
+
+        self.last_model_link_action = None
         source = self._path(model_path)
         if not model_id or "/" in model_id or "\\" in model_id or model_id in {".", ".."}:
             raise RemotePathError("invalid model id: %s" % model_id)
         target = self._path(str(PurePosixPath(self.config.resolved_deployment_dir) / (model_id + ".safetensors")), allow_deployment=True)
         source_real = str(getattr(self.run(("readlink", "-f", source)), "stdout", "")).strip() or source
         exists = self.run(("test", "-e", target), check=False)
-        if int(getattr(exists, "returncode", 1)) == 0:
+        link = self.run(("test", "-L", target), check=False)
+        target_exists = int(getattr(exists, "returncode", 1)) == 0
+        target_is_link = int(getattr(link, "returncode", 1)) == 0
+        if target_exists or target_is_link:
+            if not target_is_link:
+                raise RemoteLinkConflict("deployment target is not a symlink: %s" % target)
             existing = self.run(("readlink", "-f", target), check=False)
             existing_real = str(getattr(existing, "stdout", "")).strip()
-            if not existing_real:
-                raise RemoteLinkConflict("deployment target is not a symlink: %s" % target)
-            link_action(existing_real, source_real)
+            if existing_real and os.path.normpath(existing_real) == os.path.normpath(source_real):
+                self.last_model_link_action = "keep"
+                return target
+            if existing_real:
+                try:
+                    self._path(existing_real)
+                except RemotePathError as exc:
+                    raise RemoteLinkConflict(
+                        "refusing to replace model link outside configured roots %s with %s" % (existing_real, source_real)
+                    ) from exc
+            # The target is a symlink under the deployment root and its old
+            # target is either another configured artifact or a broken link.
+            # Replace the link itself, never a regular file and never the
+            # resolved checkpoint.
+            self.run(("ln", "-sfn", source, target))
+            self.last_model_link_action = "replaced_stale_symlink"
             return target
         self.run(("ln", "-s", source, target))
+        self.last_model_link_action = "created"
         return target
+
+    def remove_file(self, path: str) -> Mapping[str, Any]:
+        """Safely unlink one validated remote regular file.
+
+        The operation is intentionally narrower than a general remote shell
+        delete: the path must pass the configured-root check, symlinks and
+        directories are refused, and the remote side reports an explicit
+        result for auditability.
+        """
+
+        checked = self._path(path)
+        script = (
+            "import json,pathlib,sys\n"
+            "p=pathlib.Path(sys.argv[1])\n"
+            "if p.is_symlink(): result={'status':'refused','reason':'symlink'}\n"
+            "elif not p.exists(): result={'status':'missing'}\n"
+            "elif not p.is_file(): result={'status':'refused','reason':'not_file'}\n"
+            "else:\n"
+            "    p.unlink()\n"
+            "    result={'status':'deleted'}\n"
+            "print(json.dumps(result,separators=(',',':')))\n"
+        )
+        result = self.run((self.config.python, "-c", script, checked))
+        try:
+            value = json.loads(str(getattr(result, "stdout", "")).strip())
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RemoteError("invalid remote file removal response for %s: %s" % (checked, exc))
+        if not isinstance(value, Mapping):
+            raise RemoteError("invalid remote file removal response for %s" % checked)
+        return dict(value)
+
+
+class LocalCommandClient(SSHClient):
+    """Run the trusted remote operations directly on the training server.
+
+    The campaign still uses the absolute paths and fixed command construction
+    from :class:`SSHClient`; only the transport changes.  This lets the
+    autonomous runner execute on the server itself without nested SSH.
+    """
+
+    @property
+    def is_local(self) -> bool:
+        return True
+
+    def run(self, argv: Sequence[str], *, check: bool = True, timeout_s: Optional[float] = None) -> Any:
+        if not argv:
+            raise ValueError("local command must not be empty")
+        local_argv = tuple(str(item) for item in argv)
+        result = self.runner(
+            local_argv,
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=self.command_timeout_s if timeout_s is None else float(timeout_s),
+        )
+        if result is None:
+            raise RemoteCommandError(local_argv, 1, "runner returned no result")
+        if check and int(getattr(result, "returncode", 0)) != 0:
+            raise RemoteCommandError(local_argv, int(result.returncode), str(getattr(result, "stderr", "")))
+        return result
+
+
+class RemotePortForward:
+    """Forward a remote loopback service to a local ephemeral port."""
+
+    def __init__(
+        self,
+        client: SSHClient,
+        remote_port: int,
+        remote_host: str = "127.0.0.1",
+        connect_timeout_s: float = 10.0,
+    ):
+        if int(remote_port) <= 0 or int(remote_port) > 65535:
+            raise ValueError("remote_port must be between 1 and 65535")
+        self.client = client
+        self.remote_port = int(remote_port)
+        self.remote_host = str(remote_host)
+        self.connect_timeout_s = float(connect_timeout_s)
+        self.process: Optional[subprocess.Popen] = None
+        self.local_port: Optional[int] = None
+
+    @property
+    def base_url(self) -> str:
+        if self.local_port is None:
+            raise RemoteError("remote port forward is not running")
+        return "http://127.0.0.1:%d" % self.local_port
+
+    def __enter__(self) -> "RemotePortForward":
+        if bool(getattr(self.client, "is_local", False)):
+            self.local_port = self.remote_port
+            return self
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("127.0.0.1", 0))
+            self.local_port = int(sock.getsockname()[1])
+        finally:
+            sock.close()
+        argv = [
+            "ssh",
+            *_SSH_CONNECTION_OPTIONS,
+            "-p",
+            str(int(self.client.config.ssh_port)),
+            "-N",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-L",
+            "%d:%s:%d" % (self.local_port, self.remote_host, self.remote_port),
+            self.client.config.host,
+        ]
+        self.process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.monotonic() + self.connect_timeout_s
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                stderr = ""
+                if self.process.stderr is not None:
+                    try:
+                        stderr = self.process.stderr.read().decode("utf-8", errors="replace").strip()
+                    except (AttributeError, OSError):
+                        stderr = ""
+                raise RemoteError("remote port forward exited with code %s%s" % (self.process.returncode, (": " + stderr) if stderr else ""))
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.settimeout(0.2)
+            try:
+                if probe.connect_ex(("127.0.0.1", self.local_port)) == 0:
+                    return self
+            finally:
+                probe.close()
+            time.sleep(0.05)
+        self.__exit__(None, None, None)
+        raise RemoteError("timed out waiting for remote port forward")
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        process, self.process = self.process, None
+        if process is None:
+            return
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2.0)
 
 
 class ComfyUITunnel:
@@ -257,6 +458,9 @@ class ComfyUITunnel:
         return "http://127.0.0.1:%d" % self.local_port
 
     def __enter__(self) -> "ComfyUITunnel":
+        if bool(getattr(self.client, "is_local", False)):
+            self.local_port = int(self.client.config.comfyui_port)
+            return self
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.bind(("127.0.0.1", 0))
@@ -265,13 +469,12 @@ class ComfyUITunnel:
             sock.close()
         argv = [
             "ssh",
+            *_SSH_CONNECTION_OPTIONS,
+            "-p",
+            str(int(self.client.config.ssh_port)),
             "-N",
             "-o",
             "ExitOnForwardFailure=yes",
-            "-o",
-            "ServerAliveInterval=30",
-            "-o",
-            "ServerAliveCountMax=10",
             "-L",
             "%d:127.0.0.1:%d" % (self.local_port, int(self.client.config.comfyui_port)),
             self.client.config.host,

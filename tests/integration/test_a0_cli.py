@@ -27,4 +27,4 @@ def test_a0_cli_runs_offline_campaign(tmp_path, capsys):
     assert summary["offline_simulation"] is True
     report = json.loads((output_root / "report.json").read_text(encoding="utf-8"))
     assert report["human_intervention_count"] == 0
-    assert report["harness_version"] == "Harness4H3-v1.0"
+    assert report["harness_version"] == "Harness4H3-v0.4"

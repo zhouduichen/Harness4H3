@@ -8,7 +8,7 @@
 
 ## Current gap
 
-当前 controller 已经具备结构化 ExperimentPlan、事件记录、远端资源调度、真实训练 worker 和独立 benchmark/evaluator，但远端 campaign 的主循环在一个实验完成后才调用一次 `controller.plan()`。训练、checkpoint I/O 和 benchmark 运行期间，LLM 没有可执行的评审入口，因此 GPU1 上的 LLM 服务大部分时间空闲。
+当前 controller 已经具备结构化 ExperimentPlan、事件记录、远端资源调度、真实训练 worker 和独立 benchmark/evaluator，但远端 campaign 的主循环在一个实验完成后才调用一次 `controller.plan()`。训练、checkpoint I/O 和 benchmark 运行期间，LLM 没有可执行的评审入口，因此控制服务与训练资源之间缺少可验证的动态边界。
 
 ## Chosen approach
 
@@ -52,7 +52,7 @@ reviewer 可以建议下一步，但不能：
 - 伪造训练/benchmark/evaluation 证据；
 - 生成 shell 命令或绕过注册 operator；
 - 直接批准一个候选模型；
-- 抢占 GPU0 上的 ComfyUI 或 GPU1 上的 LLM。
+- 抢占任何已有的 ComfyUI、LLM 或其他 GPU 进程。
 
 ## Runtime flow
 
@@ -88,7 +88,13 @@ heartbeat 采用独立的 reviewer prompt 和较小输出上限。60 秒是默�
 
 ## GPU and resource isolation
 
-reviewer 请求通过现有单卡 vLLM 服务运行在 GPU1。资源 scheduler 继续把 GPU0 作为 ComfyUI 保留卡，训练只从其余空闲卡中按 ExperimentPlan 的 `min_gpu_count`/`max_gpu_count` 动态选择。reviewer 本身不参与训练 GPU 的分配，也不把两个 GPU 的 LLM 推理作为默认配置。
+reviewer 请求通过现有 vLLM 服务运行；服务启动器按实时显存和显卡利用率选择 1/2/4 张卡，不把控制服务固定绑定到 GPU1。资源 scheduler 只根据实时 `nvidia-smi` 水位和 ComfyUI 租约选择训练卡，因此控制服务占用的卡会自动被排除，ComfyUI 空闲时 GPU0 可在安全释放后重新加入 2–4 卡训练。reviewer 本身不参与正在运行的训练作业，也不抢占或终止已有进程。
+
+当 runner 在训练服务器本机启动时，`LocalCommandClient` 直接执行受信任命令，vLLM 和 ComfyUI 使用本机 loopback；这样整个 LLM → worker → benchmark → evaluator → 下一轮的循环不依赖 Codex 长连接。远程 SSH 模式仍保留用于从开发机发起任务。
+
+## Autonomous optimization and checkpoint policy
+
+连续 runner 每轮重新调用真实 LLM，允许配置的 `prune_blocks`、`quantize`、`distill`、`step_distill`、`dmd2` 和 `recovery_finetune` 通过固定 worker 映射执行。每轮评估完成后才分类：accepted 或 Pareto-eligible exploratory child 的权重作为后续父模型保留；被拒绝的 child 只删除 `results_root/continuous/Mxxxx/Mxxxx.safetensors`，失败任务只清理同一目录中已知的 child/`.part` 文件。证据 JSON、日志、哈希、benchmark recipe、ExperimentRecord、Observation 和 Experience 不删除，因此下一轮仍能看到上一轮的 operator、参数、指标、失败原因和 recipe。
 
 ## Failure and safety handling
 
@@ -114,7 +120,7 @@ reviewer 请求通过现有单卡 vLLM 服务运行在 GPU1。资源 scheduler �
 - heartbeat 在长任务期间按周期触发，并在 worker 完成事件时立即触发；
 - 同一事件不会产生重复有效评审；
 - 评审记录可从 `controller-events.jsonl` 重放；
-- reviewer 运行时 GPU 资源请求仍排除 GPU0/GPU1；
+- reviewer 运行时 GPU 资源请求依据 live snapshot 排除当前已占用/保留卡，而不是排除固定 GPU0/GPU1；
 - reviewer 建议 `replan` 后，下一次真实 LLM plan 会重新读取最新观察，而不是复用旧计划。
 
 真实验收标准：

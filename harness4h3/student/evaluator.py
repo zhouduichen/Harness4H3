@@ -23,6 +23,9 @@ class StudentEvaluation:
     quality_score: Optional[float] = None
     quality_metrics: Mapping[str, Any] = field(default_factory=dict)
     hardware: Mapping[str, Any] = field(default_factory=dict)
+    metric_evidence: Mapping[str, Any] = field(default_factory=dict)
+    reward: Optional[float] = None
+    reward_terms: Mapping[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -88,6 +91,7 @@ class StudentEvaluator:
         quality: Optional[Mapping[str, Any]] = None,
         hardware: Optional[Mapping[str, Any]] = None,
         baseline_quality: Optional[float] = None,
+        metric_evidence: Optional[Mapping[str, Any]] = None,
     ) -> StudentEvaluation:
         path = Path(video_path).resolve()
         quality = dict(quality or {})
@@ -172,6 +176,9 @@ class StudentEvaluator:
             quality_score=score,
             quality_metrics=quality,
             hardware=hardware,
+            metric_evidence=dict(metric_evidence or {}),
+            reward=(float(metric_evidence["reward"]) if metric_evidence and metric_evidence.get("reward") is not None else None),
+            reward_terms=dict(metric_evidence.get("reward_terms") or {}) if metric_evidence else {},
         )
 
 

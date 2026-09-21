@@ -1,0 +1,29 @@
+backend:
+  base_url: http://127.0.0.1:8188
+  request_timeout_s: 60
+  poll_interval_s: 2
+  task_timeout_s: 3600
+
+workflow:
+  template: ../examples/remote_linux_h3_workflow_api.json
+  prompt_target: {node_id: "139", input: prompt}
+  seed_target: {node_id: "137", input: noise_seed}
+  mutable:
+    steps: {node_id: "132", input: steps}
+    cfg: {node_id: "138", input: cfg}
+
+runtime:
+  output_dir: ../var/real-l40x4
+  trajectory_path: ../var/real-l40x4/trajectory.jsonl
+  archive_dir: ../var/real-l40x4/archive
+  tasks_path: ../examples/tasks.yaml
+
+evaluator:
+  command: []
+  timeout_s: 180
+
+evolution:
+  min_delta: 0.0
+  recurrence_threshold: 2
+  max_regressions: 0
+  low_score_threshold: 0.0

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from harness4h3.archive.model_candidate import ModelCandidate
+from harness4h3.archive.system_candidate import SystemCandidate
 from harness4h3.controller.schemas import CostEstimate
 from harness4h3.h3.state import ModelState
 from harness4h3.operators.base import ExecutionContext, OperatorValidationError
@@ -67,15 +68,56 @@ def test_runtime_registry_exposes_single_intervention_operators():
 def test_runtime_operator_clones_parent_and_records_policy(tmp_path, name, args, kind):
     registry = build_runtime_registry()
     parent = _parent()
-    result = registry.execute(name, parent, args, _target(), ExecutionContext(tmp_path, "M0002"))
+    parent_system = SystemCandidate.from_model_candidate("S0000", parent, status="baseline")
+    result = registry.execute(
+        name,
+        parent,
+        args,
+        _target(),
+        ExecutionContext(tmp_path, "M0002", child_system_id="S0001", parent_system=parent_system),
+    )
     assert result.ok
-    assert result.output_state.model_id == "M0002"
-    assert result.output_state.parent_model_id == "M0001"
-    assert result.output_state.checkpoint_path == parent.checkpoint_path
-    assert result.output_state.runtime_state["runtime_policy"]["kind"] == kind
-    assert result.output_state.runtime_state["runtime_policy"]["args"] == args
-    assert result.output_state.runtime_state["runtime_recipe"][-1]["kind"] == kind
+    assert result.output_state is None
+    assert result.output_system.id == "S0001"
+    assert result.output_system.model_ref == parent.id
+    assert result.output_system.runtime_state["runtime_policy"]["kind"] == kind
+    assert result.output_system.runtime_state["runtime_policy"]["args"] == args
+    assert result.output_system.runtime_state["runtime_recipe"][-1]["kind"] == kind
     assert parent.state.runtime_state == {"metrics_stale": False}
+
+
+def test_runtime_operator_requires_explicit_system_context(tmp_path):
+    result = build_runtime_registry().execute(
+        "vae_tiling",
+        _parent(),
+        {"tile_size": 256, "overlap": 32},
+        _target(),
+        ExecutionContext(tmp_path, "M0002"),
+    )
+    assert not result.ok
+    assert result.failure_type == "runtime_system_context_required"
+
+
+def test_runtime_operator_emits_system_child_without_model_child(tmp_path):
+    parent_model = _parent()
+    parent_system = SystemCandidate.from_model_candidate("S0000", parent_model, status="baseline")
+    result = build_runtime_registry().execute(
+        "vae_tiling",
+        parent_model,
+        {"tile_size": 256, "overlap": 32},
+        _target(),
+        ExecutionContext(
+            tmp_path,
+            "M0001",
+            child_system_id="S0001",
+            parent_system=parent_system,
+        ),
+    )
+    assert result.output_state is None
+    assert result.output_system is not None
+    assert result.output_system.id == "S0001"
+    assert result.output_system.model_ref == parent_model.id
+    assert result.output_system.runtime_state["runtime_policy"]["kind"] == "vae_tiling"
 
 
 def test_component_lifecycle_operator_materializes_explicit_runtime_state(tmp_path):
@@ -85,9 +127,18 @@ def test_component_lifecycle_operator_materializes_explicit_runtime_state(tmp_pa
         "free_cache_before_decode": True,
     }
     result = build_runtime_registry().execute(
-        "component_lifecycle_optimize", _parent(), args, _target(), ExecutionContext(tmp_path, "M0002")
+        "component_lifecycle_optimize",
+        _parent(),
+        args,
+        _target(),
+        ExecutionContext(
+            tmp_path,
+            "M0002",
+            child_system_id="S0001",
+            parent_system=SystemCandidate.from_model_candidate("S0000", _parent(), status="baseline"),
+        ),
     )
-    lifecycle = result.output_state.runtime_state["component_lifecycle"]
+    lifecycle = result.output_system.runtime_state["component_lifecycle"]
     assert lifecycle["text_encoder_loaded"] is False
     assert lifecycle["vae_loaded"] is False
     assert lifecycle["cache_state"] == "release_before_decode"

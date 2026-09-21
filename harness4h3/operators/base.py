@@ -19,6 +19,9 @@ class ExecutionContext:
     experiment_dir: Path
     child_model_id: str
     model_store: Optional[Any] = None
+    child_system_id: Optional[str] = None
+    parent_system: Optional[Any] = None
+    system_store: Optional[Any] = None
 
 
 class Operator(Protocol):

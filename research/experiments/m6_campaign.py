@@ -78,18 +78,80 @@ def build_research_report(
     accepted = [item for item in iterations if item.get("outcome") == "accepted_candidate"]
     rejected = [item for item in iterations if item.get("outcome") == "rejected_candidate"]
     failed = [item for item in iterations if item.get("outcome") == "failed_experiment"]
+    executed = [item for item in iterations if item.get("operator_executed")]
+    completed_evaluations = [
+        item
+        for item in executed
+        if item.get("split_results") and not item.get("split_errors")
+    ]
+    infrastructure_failure_types = {
+        "backend_request",
+        "backend_unreachable",
+        "infrastructure_failure",
+        "timeout",
+    }
+    policy_block_types = {
+        "duplicate_experiment_fingerprint",
+        "same_operator_requires_prior_evidence",
+    }
+    infrastructure_failures = [
+        item
+        for item in iterations
+        if item.get("failure_type") in infrastructure_failure_types
+    ]
+    controller_failures = [
+        item for item in iterations if item.get("failure_type") == "controller_failure"
+    ]
+    policy_blocked = [
+        item for item in iterations if item.get("failure_type") in policy_block_types
+    ]
+    execution_failures = [
+        item
+        for item in failed
+        if item not in infrastructure_failures
+        and item not in controller_failures
+        and item not in policy_blocked
+    ]
+    if payload.get("campaign_classification"):
+        campaign_classification = str(payload["campaign_classification"])
+    elif not completed_evaluations and infrastructure_failures:
+        campaign_classification = "infrastructure_censored"
+    else:
+        campaign_classification = str(payload.get("status", "unknown"))
+    optimization_conclusion = (
+        "inconclusive_no_optimization_conclusion"
+        if campaign_classification == "infrastructure_censored" and not completed_evaluations
+        else "evaluated"
+    )
     archive_candidates = list(payload.get("system_candidates") or [])
-    pareto_candidates = [item for item in archive_candidates if item.get("status") != "failed"]
+    pareto_candidates = [
+        item for item in archive_candidates if item.get("status") in {"baseline", "accepted"}
+    ]
     operators = [str(item.get("operator")) for item in iterations if item.get("operator")]
     return {
         "harness_version": payload["harness"]["version"],
         "target_profile_id": payload["target_profile_id"],
+        "campaign_id": payload.get("campaign_id"),
+        "campaign_classification": campaign_classification,
+        "optimization_conclusion": optimization_conclusion,
         "termination_reason": payload.get("termination_reason"),
         "target_satisfied": payload.get("status") == "accepted",
         "full_autonomous_experiment_sequence": iterations,
         "accepted_experiments": accepted,
         "rejected_experiments": rejected,
         "failed_experiments": failed,
+        "controller_attempts": len(iterations),
+        "executed_experiments": len(executed),
+        "completed_evaluations": len(completed_evaluations),
+        "clean_rejections": len(rejected),
+        "accepted_candidates": len(accepted),
+        "failure_taxonomy": {
+            "optimization_rejections": len(rejected),
+            "infrastructure_failures": len(infrastructure_failures),
+            "controller_failures": len(controller_failures),
+            "execution_failures": len(execution_failures),
+            "policy_blocked_proposals": len(policy_blocked),
+        },
         "final_pareto_candidates": pareto_candidates,
         "final_archive_candidates": archive_candidates,
         "total_experiments": len(iterations),
@@ -108,6 +170,8 @@ def build_research_report(
         and (len(set(operators)) > 1 or operators[0] != "vae_tiling"),
         "final_optimization_recipe": payload.get("accepted_recipe"),
         "experience_influence_evidence": payload.get("experience_influence_evidence", []),
+        "prior_campaigns": payload.get("prior_campaigns", []),
+        "preflight": payload.get("preflight"),
         "started_at": started_at,
         "ended_at": ended_at,
     }

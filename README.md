@@ -9,9 +9,10 @@ optimization experiments. It studies one bounded question:
 
 The repository provides the experiment protocol, constrained operator
 execution, model/system lineage, independent evaluation, Pareto archive, and
-append-only trajectory. It also includes a real PyTorch TinyH3 reference
-trainer for validating those contracts. It does **not** currently provide a
-working MiniMax-H3 fine-tuning, pruning, or distillation backend.
+append-only trajectory. It includes a real PyTorch TinyH3 reference trainer
+for validating contracts and a fail-closed Real MiniMax-H3 adapter/worker
+path. The real path still requires the declared GPU host, ComfyUI service, and
+an authentic A1-T0 run before any MiniMax-H3 optimization claim is made.
 
 ## Capability status
 
@@ -25,16 +26,19 @@ working MiniMax-H3 fine-tuning, pruning, or distillation backend.
 | TinyH3 training loop | Real PyTorch weights, gradients, resume, and lineage | Available for CPU contract testing |
 | Recovery / progressive distillation | Real TinyH3 algorithm tests | Reference implementation |
 | DMD2 multi-role trainer | Real TinyH3 gradients, alternating updates, EMA, and resume | Reference skeleton |
-| Model-changing fine-tuning | Source-reconnaissance only | Blocked by memory/implementation |
-| Real MiniMax-H3 pruning/distillation | Fail-closed adapter contract | Not implemented |
+| Real MiniMax-H3 adapter | Source-grounded execution path | Implemented; host capability gate is enforced |
+| Real MiniMax-H3 recovery / step distillation | Remote FSDP worker evidence | Measured on the remote L40 host; benchmark-gated |
+| Real MiniMax-H3 pruning / quantization | Trusted remote workers | Implemented; every child remains benchmark-gated |
 
 ## Current gate
 
-The current milestone is **Phase 0 — Algorithm & Harness Pre-GPU Validation**.
-It is complete only when the TinyH3 CPU reference proves real gradients,
-optimizer updates, immutable parent/child evidence, exact resume, stable
-failures, and the worker-to-evaluator closed loop. This is mechanism evidence,
-not MiniMax-H3 training or quality evidence.
+The CPU TinyH3 gate remains a contract test suite, not the current research
+milestone. The active milestone is **Phase I — real H3 closed-loop validation**:
+the remote LLM must repeatedly choose a trusted operator, produce real
+forward/backward or structural checkpoint evidence, receive an independent
+ComfyUI measurement, and continue from the persisted Model/System lineage.
+Passing this gate is evidence that the loop runs; it is not by itself a claim
+that the target profile has been improved.
 
 ```bash
 .venv/bin/python -m pytest -q
@@ -46,11 +50,20 @@ not MiniMax-H3 training or quality evidence.
 See the [Phase 0 validation evidence](research/evidence/phase0-validation-2026-09-13.md)
 and the [validation plan](docs/validation-plan.md).
 
-The current execution priority is device migration, measured preflight, and a
-real ComfyUI baseline on the target host. M6 runtime-memory work is optional
-and does not replace the missing real H3 trainer. Until a source-grounded
-trainer passes A1-T0, model-changing capabilities remain disabled and no
-M0001 or autonomous real model-evolution claim is allowed.
+The current execution priority is the detached remote campaign: a local
+Qwen/vLLM Controller selects the next trusted model or runtime intervention,
+the scheduler allocates whatever 2–4 GPUs are safe at that boundary, and
+ComfyUI is leased only for measurement before its cache is released. The
+campaign records failures as experience and retries from the last valid parent;
+it never falls back to RuleBased control. M6 runtime-memory work remains an
+optional branch, while real H3 training and measured target feasibility are the
+primary open questions.
+
+The resident Controller normally uses the smallest feasible vLLM tensor-parallel
+group (TP=1, one dynamically selected card), leaving the other cards to the
+worker. It is not pinned to a GPU index: a restart re-scans live free memory and
+can select another card or a larger TP group. A short-lived worker GPU lease is
+shared with the launcher so a Controller restart cannot race an elastic worker.
 
 Engineering completeness is not presented as a new optimization algorithm.
 The research contribution under test is the evidence-grounded, device-aware
@@ -60,7 +73,7 @@ variables, experiments, negative results, and limitations.
 ## System under study
 
 ```text
-DeviceProfile + TargetProfile + ModelState + Budget
+DeviceProfile + TargetProfile + Model/System state + Budget
                          ↓
               fixed/manual Controller
                          ↓
@@ -68,9 +81,9 @@ DeviceProfile + TargetProfile + ModelState + Budget
                          ↓
  schema → policy → budget → registered-operator validation
                          ↓
-            model or runtime candidate
+            ModelCandidate or SystemCandidate
                          ↓
-         ComfyUI benchmark + independent evaluator
+      benchmark + canonical EvaluationRecord
                          ↓
   accept/reject/fail → archive + trajectory → next plan
 ```
@@ -145,10 +158,36 @@ ComfyUI API. It does not train or modify the checkpoint.
 Failures, rejected candidates, and unmet constraints are research outcomes and
 must not be rewritten as accepted results.
 
+## Real MiniMax-H3 closed-loop gate
+
+Run this only on the host that owns the checkpoint, ComfyUI installation, and
+four CUDA devices. The gate writes a JSON decision even when blocked; it never
+falls back to TinyH3 or fake metrics:
+
+```bash
+.venv/bin/python tools/run_real_h3_gate.py \
+  --parent-checkpoint /data/models/MiniMax-H3/diffusion_models/minimax_h3_fl2va_bf16.safetensors \
+  --worker-config configs/a1-worker.l40x4-distill4.json \
+  --config configs/default.yaml \
+  --target configs/targets/l40x4_h3_example.yaml \
+  --tasks examples/tasks.yaml \
+  --base-url http://127.0.0.1:8188 \
+  --output-root var/a1-real-gate \
+  --baseline-quality <measured-quality> \
+  --baseline-model-size-gb <measured-size-gb> \
+  --baseline-latency-s <measured-latency-s> \
+  --baseline-peak-memory-gb <measured-vram-gb>
+```
+
+The gate is passed only when the real worker produces `M0001` evidence and a
+second Controller plan (`exp_0002`) is recorded after independent benchmark
+evaluation. A local CPU run is expected to be blocked by the CUDA and host
+preflight checks.
+
 ## Repository map
 
 ```text
-harness4h3/          frozen reusable harness implementation
+harness4h3/          reusable research-preview harness implementation
 tools/               device-side worker adapter and read-only preflight
 configs/devices/     measured device facts and capability declarations
 configs/targets/     immutable optimization objectives and hard constraints
@@ -171,7 +210,12 @@ var/                 ignored local run artifacts
 - [Validation plan](docs/validation-plan.md)
 - [Research questions, evidence, and limitations](research/README.md)
 
-Harness behavior is frozen as `Harness4H3-v1.0`; only correctness and security
-fixes belong in the core. New research should add an experiment, operator
-backend, device profile, or evidence record without changing the acceptance
-rules after results are observed.
+The current package is `Harness4H3-v0.4` research-preview. The pair lineage,
+canonical evaluation boundary, real worker contract, and fail-closed A1 gate
+are active protocol code; host-specific real evidence must still be produced
+on the declared GPU device.
+
+The repository also contains a manual-only [GPU contract workflow](.github/workflows/gpu-contract.yml).
+It validates the real adapter, checkpoint manifest, device profile, worker
+prerequisites, and benchmark schema on a self-hosted GPU runner without
+starting a training worker or claiming an optimization result.

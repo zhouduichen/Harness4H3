@@ -573,6 +573,7 @@ def cmd_student_run(args: argparse.Namespace) -> int:
         output_root=config.local_output_root,
         experience_path=config.experience_path,
         max_failures=config.max_failures,
+        min_rounds_before_success=config.min_rounds_before_success,
         retention_handler=RemoteStudentRetention(config, client).retain,
     )
     result = campaign.run(max_rounds=args.max_rounds or config.max_rounds)

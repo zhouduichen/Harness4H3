@@ -37,3 +37,13 @@ def test_digest_records_observation_ids_and_failure_counts():
     assert context["source_observation_ids"] == ["obs-1", "obs-2"]
     assert context["failure_counts"] == {"worker_oom": 1}
     assert context["operator_findings"]["quantize"][0]["experiment_id"] == "e1"
+
+
+def test_digest_bounds_observation_id_history():
+    observations = [{"observation_id": "obs-%02d" % index} for index in range(40)]
+
+    context = DiscoveryDigest.build([], observations=observations).to_context()
+
+    assert len(context["source_observation_ids"]) == 24
+    assert context["source_observation_ids"][0] == "obs-16"
+    assert context["source_observation_ids"][-1] == "obs-39"

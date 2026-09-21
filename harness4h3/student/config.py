@@ -82,6 +82,12 @@ class StudentCampaignConfig:
     max_rounds: int
     max_failures: int
     max_steps: int
+    min_rounds_before_success: int = 1
+    teacher_world_size: int = 3
+    teacher_rank_min_free_memory_gb: float = 20.0
+    controller_hold_file: Optional[str] = None
+    controller_release_file: Optional[str] = None
+    controller_worker_lease_file: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -206,10 +212,37 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         max_rounds = int(student.get("max_rounds", 4))
         max_failures = int(student.get("max_failures", 4))
         max_steps = int(student.get("max_steps", 32))
+        min_rounds_before_success = int(student.get("min_rounds_before_success", 1))
     except (TypeError, ValueError) as exc:
         raise StudentConfigError("student round limits must be integers") from exc
-    if max_rounds <= 0 or max_failures < 0 or max_steps <= 0:
+    if (
+        max_rounds <= 0
+        or max_failures < 0
+        or max_steps <= 0
+        or min_rounds_before_success <= 0
+        or min_rounds_before_success > max_rounds
+    ):
         raise StudentConfigError("student round limits are invalid")
+    try:
+        teacher_world_size = int(student.get("teacher_world_size", 3))
+        teacher_rank_min_free_memory_gb = float(student.get("teacher_rank_min_free_memory_gb", 20.0))
+    except (TypeError, ValueError) as exc:
+        raise StudentConfigError("student distributed teacher limits are invalid") from exc
+    if teacher_world_size < 2 or teacher_world_size > 3 or teacher_rank_min_free_memory_gb <= 0:
+        raise StudentConfigError("student distributed teacher limits are invalid")
+    handoff_raw = _mapping(student.get("controller_handoff", {}), "student.controller_handoff")
+    controller_hold_file = handoff_raw.get("hold_file")
+    controller_release_file = handoff_raw.get("release_file")
+    controller_worker_lease_file = handoff_raw.get("worker_lease_file")
+    handoff_values = {
+        "student.controller_handoff.hold_file": controller_hold_file,
+        "student.controller_handoff.release_file": controller_release_file,
+        "student.controller_handoff.worker_lease_file": controller_worker_lease_file,
+    }
+    for name, value in handoff_values.items():
+        if value is not None:
+            if not isinstance(value, str) or not value.strip() or not PurePosixPath(value).is_absolute():
+                raise StudentConfigError("%s must be an absolute remote path" % name)
     local_output_root = _local_path(path.parent, student.get("local_output_root", "var/student-campaign"), "student.local_output_root")
     experience_path = _local_path(path.parent, student.get("experience_path", "var/student-campaign/experience.jsonl"), "student.experience_path")
     return StudentCampaignConfig(
@@ -234,6 +267,12 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         max_rounds=max_rounds,
         max_failures=max_failures,
         max_steps=max_steps,
+        min_rounds_before_success=min_rounds_before_success,
+        teacher_world_size=teacher_world_size,
+        teacher_rank_min_free_memory_gb=teacher_rank_min_free_memory_gb,
+        controller_hold_file=str(controller_hold_file) if controller_hold_file else None,
+        controller_release_file=str(controller_release_file) if controller_release_file else None,
+        controller_worker_lease_file=str(controller_worker_lease_file) if controller_worker_lease_file else None,
     )
 
 

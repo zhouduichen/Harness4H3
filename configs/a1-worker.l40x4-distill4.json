@@ -1,0 +1,34 @@
+{
+  "trainer_command": [
+    "/home/intern/miniconda3/envs/comfy/bin/torchrun",
+    "--standalone",
+    "--nproc_per_node=4",
+    "/home/intern/huangjiahao/Harness4H3/tools/h3_real_train_worker.py",
+    "--config",
+    "/home/intern/huangjiahao/Harness4H3/configs/a1-worker.l40x4-distill4.json"
+  ],
+  "trainer_timeout_s": 10800,
+  "deploy_model_dir": "/data/models/MiniMax-H3/diffusion_models",
+  "deploy_mode": "symlink",
+  "comfyui_root": "/home/intern/huangjiahao/ComfyUI",
+  "model_checkpoint": "/data/models/MiniMax-H3/diffusion_models/minimax_h3_fl2va_bf16.safetensors",
+  "source_parent_checkpoint": "/data/models/MiniMax-H3/diffusion_models/minimax_h3_fl2va_bf16.safetensors",
+  "cache_dir": "/data/models/MiniMax-H3/harness4h3/cache",
+  "checkpoint_stage_dir": "/data/models/MiniMax-H3/harness4h3/staged-checkpoints",
+  "rank0_only_load": false,
+  "output_dir": "/data/models/MiniMax-H3/harness4h3/continuous",
+  "quantized_variants": {
+    "8": "/data/models/MiniMax-H3/diffusion_models/minimax_h3_fl2va_int8_convrot.safetensors"
+  },
+  "world_size": 4,
+  "distributed_timeout_s": 180,
+  "parent_hash_timeout_s": 3600,
+  "max_steps": 1,
+  "full_frozen_scan": false,
+  "source_steps": 32,
+  "target_steps": 16,
+  "learning_rate": 0.000001,
+  "critic_learning_rate": 0.000001,
+  "seed": 20260913,
+  "sigma": 0.5
+}

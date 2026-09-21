@@ -82,7 +82,10 @@ class TimestepProjector(nn.Module):
         self.projection = nn.Linear(1, 6 * hidden_size, device=device)
 
     def forward(self, value: Tensor) -> Tensor:
-        return self.projection(value.reshape(-1, 1))
+        # Runtime callers intentionally keep timesteps in float32 for the
+        # scheduler contract, while the Student weights are normally bf16.
+        # Linear requires matching input/weight dtypes.
+        return self.projection(value.reshape(-1, 1).to(dtype=self.projection.weight.dtype))
 
 
 class _DiTBlock(nn.Module):

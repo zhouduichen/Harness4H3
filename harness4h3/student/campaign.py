@@ -338,6 +338,7 @@ class StudentCampaign:
         output_root: Path,
         experience_path: Optional[Path] = None,
         max_failures: int = 4,
+        min_rounds_before_success: int = 1,
         retention_handler: Optional[Callable[[TrainingResult, StudentEvaluation, str, str], None]] = None,
     ):
         self.provider = provider
@@ -349,9 +350,12 @@ class StudentCampaign:
         self.output_root = Path(output_root).resolve()
         self.experience_path = Path(experience_path or self.output_root / "experience.jsonl").resolve()
         self.max_failures = int(max_failures)
+        self.min_rounds_before_success = int(min_rounds_before_success)
         self.retention_handler = retention_handler
         if self.max_failures < 0:
             raise ValueError("max_failures must be non-negative")
+        if self.min_rounds_before_success <= 0:
+            raise ValueError("min_rounds_before_success must be positive")
         self.events_path = self.output_root / "campaign-events.jsonl"
         self.resume_path = self.output_root / "resume.json"
 
@@ -363,7 +367,13 @@ class StudentCampaign:
             handle.flush()
             os.fsync(handle.fileno())
 
-    def _context(self, round_index: int, failures: Sequence[Mapping[str, Any]], seen: Sequence[str]) -> Mapping[str, Any]:
+    def _context(
+        self,
+        round_index: int,
+        failures: Sequence[Mapping[str, Any]],
+        seen: Sequence[str],
+        prior_rounds: Sequence[Mapping[str, Any]] = (),
+    ) -> Mapping[str, Any]:
         bounded_failures = [dict(item) for item in failures[-8:]]
         return {
             "goal": self.goal,
@@ -372,6 +382,7 @@ class StudentCampaign:
             "provider": {"name": self.provider.provider_name, "model": self.provider.model_name},
             "seen_proposal_digests": list(seen[-8:]),
             "failures": bounded_failures,
+            "prior_rounds": [dict(item) for item in prior_rounds[-4:]],
         }
 
     def _persist_resume(self, next_round: int, status: str, failures: Sequence[Mapping[str, Any]], seen: Sequence[str]) -> None:
@@ -453,8 +464,9 @@ class StudentCampaign:
         rounds: list[CampaignRound] = []
         failure_count = 0
         last_failure: Optional[str] = None
+        prior_rounds: list[Mapping[str, Any]] = []
         for round_index in range(start_round, int(max_rounds) + 1):
-            context = self._context(round_index, failures, seen)
+            context = self._context(round_index, failures, seen, prior_rounds)
             self._persist_resume(round_index, "running", failures, seen)
             proposal = None
             compile_manifest = None
@@ -526,9 +538,36 @@ class StudentCampaign:
                                     apply_retention(decision)
                             if evaluation.promotable:
                                 rounds.append(CampaignRound(round_index, proposal, compile_manifest, training, evaluation, None, message))
-                                self._append_event({"round": round_index, "status": "success", "failure_code": None, "proposal_digest": proposal.digest, "llm_context": context})
-                                self._persist_resume(round_index + 1, "success", failures, seen)
-                                return CampaignResult("success", round_index, tuple(rounds), None, "student accepted")
+                                prior_rounds.append(
+                                    {
+                                        "round": round_index,
+                                        "status": "accepted",
+                                        "proposal_digest": proposal.digest,
+                                        "training": {
+                                            "optimizer_steps": training.optimizer_steps,
+                                            "final_loss": training.final_loss,
+                                            "peak_memory_gb": training.peak_memory_gb,
+                                        },
+                                        "evaluation": {
+                                            "quality_score": evaluation.quality_score,
+                                            "reward": evaluation.reward,
+                                            "failure_code": evaluation.failure_code,
+                                            "message": evaluation.message,
+                                            "metrics": {
+                                                name: value.get("value")
+                                                for name, value in evaluation.metric_evidence.get("metrics", {}).items()
+                                                if isinstance(value, Mapping) and value.get("value") is not None
+                                            },
+                                        },
+                                    }
+                                )
+                                if round_index >= self.min_rounds_before_success:
+                                    self._append_event({"round": round_index, "status": "success", "failure_code": None, "proposal_digest": proposal.digest, "llm_context": context})
+                                    self._persist_resume(round_index + 1, "success", failures, seen)
+                                    return CampaignResult("success", round_index, tuple(rounds), None, "student accepted")
+                                self._append_event({"round": round_index, "status": "accepted_intermediate", "failure_code": None, "proposal_digest": proposal.digest, "llm_context": context})
+                                self._persist_resume(round_index + 1, "running", failures, seen)
+                                continue
             except (ValueError, CompileError, OSError, TypeError, KeyError) as exc:
                 failure_code = "proposal_invalid" if str(exc).startswith("proposal_invalid") else "campaign_error"
                 message = str(exc)

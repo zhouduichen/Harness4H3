@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - The reviewer cannot modify TargetProfile, evaluator hard gates, registered operators, or evidence records.
-- GPU0 remains reserved for ComfyUI and GPU1 remains reserved for the single-card vLLM controller; reviewer calls never request training GPUs.
+- The reviewer never requests training GPUs. The vLLM launcher chooses a feasible 1/2/4-GPU group from live free-memory and utilization samples; the ComfyUI lease reserves GPU0 only while it is needed, and the scheduler excludes all currently occupied or reserved cards.
 - Reviewer calls are separate from ExperimentPlan budget accounting and are capped by `max_review_calls`.
 - A reviewer failure is fail-safe: it records an unavailable/rejected event and leaves the active worker unchanged.
 - The reviewer never emits shell commands, paths, or executable training configuration.
@@ -83,7 +83,7 @@ The request must use `temperature=0`, `stream=false`, `enable_thinking=false`, a
 
 - [ ] **Step 4: Add provider unit coverage**
 
-Extend the existing HTTP test server to return a valid reviewer JSON response. Assert that the vLLM payload uses `json_schema.name == "controller_review"`, the action enum is present, the prompt contains `phase`, `trigger`, and the GPU0/GPU1 reservation rule, and malformed reviewer JSON raises `ControllerProviderError`.
+Extend the existing HTTP test server to return a valid reviewer JSON response. Assert that the vLLM payload uses `json_schema.name == "controller_review"`, the action enum is present, the prompt contains `phase`, `trigger`, and the live GPU-isolation rule, and malformed reviewer JSON raises `ControllerProviderError`.
 
 Run: `.venv/bin/pytest -q tests/unit/test_controller_reviewer.py tests/unit/test_controller_providers.py`
 
@@ -204,7 +204,7 @@ Expected: PASS.
 
 ---
 
-### Task 4: Run the real single-card vLLM reviewer smoke test
+### Task 4: Run the real dynamically placed vLLM reviewer smoke test
 
 **Files:**
 - Verify only: `var/remote-h3-controller-20260914/controller-events.jsonl`, `var/remote-h3-controller-20260914/overnight-result.json`
@@ -220,7 +220,7 @@ Expected: all selected tests pass.
 
 Run: `ssh Jiayu-intern "curl -fsS --max-time 3 http://127.0.0.1:8000/v1/models"`
 
-Expected: `qwen3.5-controller` is served; GPU1 remains the LLM card and GPU0 remains ComfyUI.
+Expected: `qwen3.5-controller` is served; the launcher-selected GPU group is visible in its log, with no preemption of ComfyUI or unrelated jobs.
 
 - [ ] **Step 3: Run a bounded real vLLM campaign**
 
@@ -235,7 +235,7 @@ Run:
   --resource-poll-interval-s 30
 ```
 
-Expected: the event stream contains `controller_review_input` and either `controller_review_completed` or a recorded unavailable/rejected event, while the existing real worker/evaluator evidence remains intact. A worker request must not include GPU0 or GPU1 in `allocated_gpus`.
+Expected: the event stream contains `controller_review_input` and either `controller_review_completed` or a recorded unavailable/rejected event, while the existing real worker/evaluator evidence remains intact. A worker request must contain only the scheduler's live allocation and must not overlap a still-occupied controller/ComfyUI card.
 
 - [ ] **Step 4: Inspect the final evidence**
 

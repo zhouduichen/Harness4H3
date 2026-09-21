@@ -8,6 +8,7 @@ the distributed L40 worker remains responsible for production-scale FSDP runs.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
@@ -110,15 +111,35 @@ class RealMiniMaxH3Adapter(DenoisingModelAdapter):
             raise TrainingFailure("checkpoint_corrupt", "H3 checkpoint config has no transformer section")
         api = self._load_api()
         try:
-            with torch.device("cpu"):
+            # Construct on meta and load safetensors directly on the teacher
+            # GPU. Constructing on CPU and then calling model.to(device) causes
+            # a full-model copy peak; the real H3 checkpoint leaves only a few
+            # hundred MiB free on a 48GB L40, so that transient copy OOMs.
+            with torch.device("meta"):
                 model = api["MiniMaxH3Model"](
                     **dict(raw_config["transformer"]),
                     dtype=self.dtype,
-                    device=torch.device("cpu"),
+                    device=torch.device("meta"),
                     operations=api["ops"].disable_weight_init,
                 )
-            state = load_file(str(path), device="cpu")
-            missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
+            state = load_file(str(path), device=str(self.device))
+            expected = set(model.state_dict().keys())
+            slots = {}
+            for module_name, module in model.named_modules():
+                prefix = (module_name + ".") if module_name else ""
+                slots.update({prefix + name: (module, "parameter", name) for name in module._parameters})
+                slots.update({prefix + name: (module, "buffer", name) for name in module._buffers})
+            missing = sorted(expected - set(state))
+            unexpected = sorted(set(state) - expected)
+            for name, value in state.items():
+                slot = slots.get(name)
+                if slot is None:
+                    continue
+                module, kind, local_name = slot
+                if kind == "parameter":
+                    module._parameters[local_name] = torch.nn.Parameter(value, requires_grad=False)
+                else:
+                    module._buffers[local_name] = value
         except (OSError, KeyError, RuntimeError, TypeError, ValueError) as exc:
             raise TrainingFailure("checkpoint_incompatible", "unable to load MiniMax-H3 weights: %s" % exc) from exc
         finally:
@@ -129,10 +150,6 @@ class RealMiniMaxH3Adapter(DenoisingModelAdapter):
                 "checkpoint_incompatible",
                 "H3 model key mismatch; missing=%s unexpected=%s" % (list(missing)[:3], list(unexpected)[:3]),
             )
-        try:
-            model.to(device=self.device)
-        except (RuntimeError, TypeError) as exc:
-            raise TrainingFailure("device_unavailable", "unable to move MiniMax-H3 model: %s" % exc) from exc
         return model, metadata, raw_config
 
     def load_role(self, path: Path, trainable: bool = False) -> ModelRole:
@@ -154,14 +171,30 @@ class RealMiniMaxH3Adapter(DenoisingModelAdapter):
         )
 
     @staticmethod
-    def _unpatch_video(rows: torch.Tensor, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        if rows.ndim != 2 or rows.shape[1] != 96 or rows.shape[0] % 64:
-            raise TrainingFailure("invalid_training_config", "H3 video cache must have shape [frames*64, 96]")
-        frames = rows.shape[0] // 64
+    def _unpatch_video(
+        rows: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+        latent_frames: int = 5,
+    ) -> torch.Tensor:
+        if rows.ndim != 2 or rows.shape[1] != 96:
+            raise TrainingFailure("invalid_training_config", "H3 video cache must have shape [rows, 96]")
+        if isinstance(latent_frames, bool) or not isinstance(latent_frames, int) or latent_frames <= 0:
+            raise TrainingFailure("invalid_training_config", "H3 latent_frames must be a positive integer")
+        if rows.shape[0] % latent_frames:
+            raise TrainingFailure("invalid_training_config", "H3 video rows are not divisible by latent_frames")
+        rows_per_frame = rows.shape[0] // latent_frames
+        patch_side = math.isqrt(rows_per_frame)
+        if patch_side * patch_side != rows_per_frame:
+            raise TrainingFailure(
+                "invalid_training_config",
+                "H3 video rows per frame must form a square patch grid",
+            )
+        frames = latent_frames
         return (
-            rows.reshape(frames, 8, 8, 24, 1, 2, 2)
+            rows.reshape(frames, patch_side, patch_side, 24, 1, 2, 2)
             .permute(3, 0, 4, 1, 5, 2, 6)
-            .reshape(1, 24, frames, 16, 16)
+            .reshape(1, 24, frames, patch_side * 2, patch_side * 2)
             .to(device=device, dtype=dtype)
         )
 
@@ -196,7 +229,13 @@ class RealMiniMaxH3Adapter(DenoisingModelAdapter):
         if missing:
             raise TrainingFailure("invalid_training_config", "H3 cache is missing: %s" % ", ".join(missing))
         source_device = self._generator_device(generator)
-        video = self._unpatch_video(torch.as_tensor(raw["video"]).float(), self.device, self.dtype)
+        latent_frames = raw.get("latent_frames", 5)
+        video = self._unpatch_video(
+            torch.as_tensor(raw["video"]).float(),
+            self.device,
+            self.dtype,
+            int(latent_frames) if isinstance(latent_frames, int) and not isinstance(latent_frames, bool) else latent_frames,
+        )
         audio = self._unpack_audio(torch.as_tensor(raw["audio"]).float(), self.device, self.dtype)
         prompt = torch.as_tensor(raw["prompt"]).to(device=self.device, dtype=self.dtype)
         if prompt.ndim != 2 or prompt.shape[1] != 5120:

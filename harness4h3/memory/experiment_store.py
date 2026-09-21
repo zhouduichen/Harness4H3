@@ -29,6 +29,11 @@ class ExperimentRecord:
     decision: Mapping[str, Any]
     pareto_update: Mapping[str, Any]
     created_at: str
+    parent_system_id: Optional[str] = None
+    child_system_id: Optional[str] = None
+    system_state_digest: str = ""
+    fingerprint: str = ""
+    repeat_for_statistics: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return redact(asdict(self))
@@ -53,6 +58,11 @@ class ExperimentRecord:
             decision=dict(raw.get("decision") or {}),
             pareto_update=dict(raw.get("pareto_update") or {}),
             created_at=str(raw.get("created_at", "")),
+            parent_system_id=str(raw["parent_system_id"]) if raw.get("parent_system_id") else None,
+            child_system_id=str(raw["child_system_id"]) if raw.get("child_system_id") else None,
+            system_state_digest=str(raw.get("system_state_digest", "")),
+            fingerprint=str(raw.get("fingerprint", "")),
+            repeat_for_statistics=bool(raw.get("repeat_for_statistics", False)),
         )
 
 

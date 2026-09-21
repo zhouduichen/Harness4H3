@@ -9,7 +9,9 @@ from ..h3.state import ModelState
 from .model_candidate import ModelCandidate, MODEL_ID_PATTERN
 
 
-SYSTEM_ID_PATTERN = re.compile(r"C[0-9]{4,}")
+# ``S`` is canonical. ``C`` remains accepted so archived Phase-I runs can be
+# replayed without rewriting their evidence.
+SYSTEM_ID_PATTERN = re.compile(r"(?:S|C)[0-9]{4,}")
 
 
 @dataclass(frozen=True)
@@ -17,7 +19,7 @@ class SystemCandidate:
     """Immutable composition of a model candidate and runtime/algorithm state.
 
     ``model_ref`` points at the immutable ``ModelCandidate`` checkpoint. A
-    runtime-only experiment therefore creates a new ``C…`` identity without
+    runtime-only experiment therefore creates a new ``S…`` identity without
     copying or pretending to change model weights.
     """
 
@@ -31,6 +33,27 @@ class SystemCandidate:
     created_by_experiment_id: Optional[str] = None
     status: str = "candidate"
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def system_id(self) -> str:
+        return self.id
+
+    @property
+    def model_id(self) -> str:
+        return self.model_ref
+
+    @property
+    def device_id(self) -> Optional[str]:
+        for source in (self.runtime_state, self.metadata):
+            value = source.get("device_id") if isinstance(source, Mapping) else None
+            if value:
+                return str(value)
+        return None
+
+    @property
+    def sampling_steps(self) -> Optional[int]:
+        value = self.runtime_state.get("sampling_steps") if isinstance(self.runtime_state, Mapping) else None
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
 
     def __post_init__(self) -> None:
         if not SYSTEM_ID_PATTERN.fullmatch(self.id):

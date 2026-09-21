@@ -12,9 +12,10 @@ from statistics import mean
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..backends.comfyui import BackendError, MiniMaxH3Adapter
+from ..archive.system_candidate import SystemCandidate
 from ..config import WorkflowConfig
-from ..controller.schemas import HardwareMetrics
-from ..evaluator.evaluator import EvaluationResult, EvaluatorError, SubprocessEvaluator, make_request
+from ..controller.schemas import EvaluationRecord, HardwareMetrics
+from ..evaluator.evaluator import EvaluatorError, SubprocessEvaluator, make_request
 from ..h3.state import ModelState
 from ..harness.context import _render_prompt, _set_target
 from ..harness.state import Task
@@ -56,6 +57,11 @@ class BenchmarkSummary:
     efficiency_improvements: Mapping[str, Any] = field(default_factory=dict)
     hard_gates: Mapping[str, Any] = field(default_factory=dict)
     accepted: Optional[bool] = None
+    system_id: Optional[str] = None
+    device_id: Optional[str] = None
+    task_split: Optional[str] = None
+    benchmark_recipe: Mapping[str, Any] = field(default_factory=dict)
+    evaluator_version: str = "unknown"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -171,6 +177,61 @@ class H3BenchmarkRunner:
             inputs["unet_name"] = checkpoint_name
             workflow[model_node_id] = model_node
         runtime_state = state.runtime_state if isinstance(state.runtime_state, Mapping) else {}
+        h3_optimizations = runtime_state.get("h3_optimizations")
+        if isinstance(h3_optimizations, Mapping):
+            # These nodes are installed only after the remote capability probe
+            # has verified the H3 extension.  Keeping the graph rewrite here
+            # makes the recipe part of the measured SystemCandidate instead
+            # of hiding it in a process-wide ComfyUI setting.
+            lpl = h3_optimizations.get("lpl")
+            scheduler_node = workflow.get("132")
+            if isinstance(lpl, Mapping) and isinstance(scheduler_node, Mapping):
+                target_steps = lpl.get("target_steps")
+                if isinstance(target_steps, int) and not isinstance(target_steps, bool):
+                    scheduler_node = dict(scheduler_node)
+                    scheduler_node["class_type"] = "H3LPLScheduler"
+                    scheduler_inputs = dict(scheduler_node.get("inputs") or {})
+                    scheduler_inputs["target_steps"] = int(target_steps)
+                    scheduler_node["inputs"] = scheduler_inputs
+                    workflow["132"] = scheduler_node
+
+            tdtm = h3_optimizations.get("tdtm")
+            if isinstance(tdtm, Mapping):
+                merge_steps = tdtm.get("merge_steps", 0)
+                threshold = tdtm.get("similarity_threshold", 0.985)
+                if (
+                    isinstance(merge_steps, int)
+                    and not isinstance(merge_steps, bool)
+                    and isinstance(threshold, (int, float))
+                    and not isinstance(threshold, bool)
+                    and int(merge_steps) > 0
+                ):
+                    model_patch_id = "141"
+                    workflow[model_patch_id] = {
+                        "class_type": "H3OptimizationConfig",
+                        "inputs": {
+                            "model": [str(model_node_id), 0],
+                            "merge_steps": int(merge_steps),
+                            "similarity_threshold": float(threshold),
+                        },
+                    }
+                    # The H3 model output must flow through the clone before
+                    # both scheduler and guider consume it.  Only rewrite
+                    # exact model links; latent/conditioning links remain
+                    # untouched.
+                    for node_id, node in list(workflow.items()):
+                        if node_id == model_patch_id or not isinstance(node, Mapping):
+                            continue
+                        updated = dict(node)
+                        inputs = dict(updated.get("inputs") or {})
+                        changed = False
+                        for input_name, value in list(inputs.items()):
+                            if value == [str(model_node_id), 0]:
+                                inputs[input_name] = [model_patch_id, 0]
+                                changed = True
+                        if changed:
+                            updated["inputs"] = inputs
+                            workflow[node_id] = updated
         runtime_recipe = runtime_state.get("runtime_recipe")
         if isinstance(runtime_recipe, (list, tuple)):
             for runtime_policy in runtime_recipe:
@@ -210,9 +271,20 @@ class H3BenchmarkRunner:
         black_frame_rate_threshold: float = 0.0,
         reset_backend_before_run: bool = False,
         power_sampler: Any = None,
+        system: Optional[SystemCandidate] = None,
+        device_id: Optional[str] = None,
+        task_split: Optional[str] = None,
+        benchmark_recipe: Optional[Mapping[str, Any]] = None,
     ) -> BenchmarkSummary:
         if not 0.0 <= float(black_frame_rate_threshold) <= 1.0:
             raise ValueError("black_frame_rate_threshold must be between 0 and 1")
+        if system is not None:
+            if system.model_ref != state.model_id:
+                raise ValueError(
+                    "system %s references %s, but benchmark received model %s"
+                    % (system.id, system.model_ref, state.model_id)
+                )
+            state = system.evaluation_state(state)
         runs: List[BenchmarkTaskResult] = []
         release_each_task = self._requires_task_cache_release(state)
         reset = getattr(self.backend, "free", None)
@@ -233,7 +305,7 @@ class H3BenchmarkRunner:
                             reset()
                         result = self.backend.run(self._workflow(state, task), self.output_root / state.model_id / task.id)
                         artifacts = tuple(str(path.resolve()) for path in result.artifacts)
-                        evaluation: EvaluationResult = self.evaluator.evaluate(
+                        evaluation: EvaluationRecord = self.evaluator.evaluate(
                             make_request(task.id, task.expected, artifacts, result.wall_time_s, backend_success=True)
                         )
                         metrics = dict(evaluation.metrics)
@@ -300,7 +372,10 @@ class H3BenchmarkRunner:
             "artifact_generation_success_tasks": sum(1 for run in runs if run.artifact_generation_success),
             "semantic_generation_valid_tasks": sum(1 for run in runs if run.semantic_generation_valid),
             "failure_types": {run.task_id: run.failure_type for run in runs if run.failure_type},
+            "raw_task_metrics": {run.task_id: dict(run.quality_metrics) for run in runs},
         }
+        evaluator_version = str(getattr(self.evaluator, "version", "unknown"))
+        quality_metrics["evaluator_version"] = evaluator_version
         latencies = [run.wall_time_s for run in successful]
         measured = state.measured_metrics
         model_size = measured.get("model_size_gb")
@@ -396,6 +471,14 @@ class H3BenchmarkRunner:
         if efficiency_gate is not None:
             gate_values.append(bool(efficiency_gate))
         accepted = bool(all(gate_values)) if baseline_hardware is not None and baseline_quality is not None else None
+        recipe = dict(
+            benchmark_recipe
+            or {
+                "sampling_steps": state.sampling_steps,
+                "runtime_state": dict(state.runtime_state),
+                "task_ids": [task.id for task in tasks],
+            }
+        )
         return BenchmarkSummary(
             state.model_id,
             len(runs),
@@ -410,4 +493,9 @@ class H3BenchmarkRunner:
             efficiency_improvements,
             hard_gates,
             accepted,
+            system.id if system is not None else None,
+            device_id,
+            task_split or (tasks[0].split if tasks and all(task.split == tasks[0].split for task in tasks) else None),
+            recipe,
+            evaluator_version,
         )

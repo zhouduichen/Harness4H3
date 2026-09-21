@@ -43,6 +43,7 @@ def main(argv=None) -> int:
         output_root=output_root,
         experience_path=output_root / "experience.jsonl",
         max_failures=config.max_failures,
+        min_rounds_before_success=config.min_rounds_before_success,
         retention_handler=RemoteStudentRetention(config, client).retain,
     )
     result_path = output_root / "campaign-result.json"

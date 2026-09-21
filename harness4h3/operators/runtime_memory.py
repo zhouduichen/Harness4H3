@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Tuple
 
 from ..archive.model_candidate import ModelCandidate
+from ..archive.system_candidate import SystemCandidate
 from ..controller.schemas import CostEstimate, OperatorResult
 from ..h3.state import ModelState
 from ..target.profile import TargetProfile
@@ -72,8 +73,29 @@ class RuntimeMemoryOperator:
     def execute(self, parent: ModelCandidate, args: Mapping[str, Any], runtime: ExecutionContext) -> OperatorResult:
         try:
             self.validate(parent.state, args, TargetProfile("runtime", "unknown", "unknown"))
+            # Runtime changes belong to a SystemCandidate.  Without the
+            # parent system and the allocated child system id there is no
+            # safe identity to attach the policy to; never manufacture a
+            # model child just to preserve the legacy operator return shape.
+            if runtime.parent_system is None or not runtime.child_system_id:
+                return OperatorResult(
+                    "failed",
+                    None,
+                    CostEstimate(),
+                    failure_type="runtime_system_context_required",
+                    message="runtime operators require parent_system and child_system_id",
+                )
+            if runtime.parent_system.model_ref != parent.id:
+                return OperatorResult(
+                    "failed",
+                    None,
+                    CostEstimate(),
+                    failure_type="runtime_system_parent_mismatch",
+                    message="parent_system must reference the parent model",
+                )
             policy = {"kind": self.policy_kind, "args": copy.deepcopy(dict(args))}
-            runtime_state = copy.deepcopy(dict(parent.state.runtime_state))
+            base_runtime_state = runtime.parent_system.runtime_state
+            runtime_state = copy.deepcopy(dict(base_runtime_state))
             lifecycle = copy.deepcopy(dict(runtime_state.get("component_lifecycle") or {}))
             lifecycle.setdefault("denoiser_loaded", True)
             lifecycle.setdefault("text_encoder_loaded", True)
@@ -109,14 +131,20 @@ class RuntimeMemoryOperator:
             )
             provenance = copy.deepcopy(dict(parent.state.provenance))
             provenance.update({"operator": self.name, "parent_model_id": parent.id, "runtime_policy": policy})
-            state = parent.state.derive(
-                runtime.child_model_id,
-                checkpoint_path=parent.state.checkpoint_path,
+            system = SystemCandidate(
+                id=runtime.child_system_id,
+                parent_id=runtime.parent_system.id,
+                generation=runtime.parent_system.generation + 1,
+                model_ref=runtime.parent_system.model_ref,
+                algorithm_state=copy.deepcopy(dict(runtime.parent_system.algorithm_state)),
                 runtime_state=runtime_state,
-                measured_metrics=copy.deepcopy(dict(parent.state.measured_metrics)),
-                provenance=provenance,
+                created_by_experiment_id=runtime.experiment_dir.name,
+                status="candidate",
+                metadata={"operator": self.name, "parent_model_id": parent.id},
             )
-            return OperatorResult("success", state, self.cost, metrics={"runtime_policy": policy})
+            return OperatorResult(
+                "success", None, self.cost, metrics={"runtime_policy": policy}, output_system=system
+            )
         except (TypeError, ValueError, OperatorValidationError) as exc:
             return OperatorResult("failed", None, CostEstimate(), failure_type="runtime_policy_invalid", message=str(exc))
 

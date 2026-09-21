@@ -49,7 +49,7 @@ def test_system_store_enforces_c_lineage_and_atomic_persistence(tmp_path):
         status="rejected",
     )
     store.create(child)
-    assert store.next_id() == "C0002"
+    assert store.next_id() == "S0002"
     assert store.children("C0000")[0].id == "C0001"
     assert json.loads((tmp_path / "candidates" / "C0001.json").read_text())[
         "runtime_state"

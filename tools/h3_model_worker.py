@@ -61,6 +61,9 @@ REQUIRED_TRAINING_METRICS = frozenset(
         "changed_trainable_tensors",
         "unchanged_frozen_tensors",
         "child_reloaded",
+        "peak_vram_per_rank",
+        "gpu_time_s_per_rank",
+        "wall_time_s",
     }
 )
 
@@ -180,12 +183,23 @@ def _stage_child(raw_state: Mapping[str, Any], request: Mapping[str, Any], artif
         raise ValueError("trainer child checkpoint does not exist: %s" % source)
     suffix = source.suffix.lower() if source.suffix.lower() in {".safetensors", ".gguf", ".ckpt", ".pt"} else ".safetensors"
     staged = (artifacts_dir / (child_id + suffix)).resolve()
-    shutil.copy2(source, staged)
+    if source != staged:
+        if staged.exists():
+            raise ValueError("staged child already exists: %s" % staged)
+        if source.parent == artifacts_dir:
+            # The real trainer may already have written into the isolated
+            # experiment directory. Rename in place instead of making a
+            # second full checkpoint copy.
+            source.replace(staged)
+        else:
+            shutil.copy2(source, staged)
     staged_evidence = None
-    source_evidence = source.with_suffix(source.suffix + ".evidence.json")
-    if source_evidence.is_file():
-        manifest = dict(_read_json(source_evidence))
-        if manifest.get("child_sha256") != _sha256_file(source):
+    evidence_source = staged.with_suffix(staged.suffix + ".evidence.json")
+    if not evidence_source.is_file():
+        evidence_source = source.with_suffix(source.suffix + ".evidence.json")
+    if evidence_source.is_file():
+        manifest = dict(_read_json(evidence_source))
+        if manifest.get("child_sha256") != _sha256_file(staged):
             raise ValueError("trainer evidence manifest does not match child checkpoint")
         staged_evidence = staged.with_suffix(staged.suffix + ".evidence.json")
         manifest["path"] = str(staged)
@@ -199,8 +213,21 @@ def _stage_child(raw_state: Mapping[str, Any], request: Mapping[str, Any], artif
         deployed = deploy_dir / staged.name
         if parent_value and "://" not in str(parent_value) and deployed == Path(str(parent_value)).resolve():
             raise ValueError("deployment path would overwrite parent checkpoint")
-        shutil.copy2(staged, deployed)
-        deployment = {"deployed": True, "path": str(deployed)}
+        deploy_mode = str(config.get("deploy_mode", "copy")).lower()
+        if deploy_mode not in {"copy", "symlink"}:
+            raise ValueError("deploy_mode must be copy or symlink")
+        if deployed.exists() or deployed.is_symlink():
+            if deployed.is_symlink() and deployed.resolve() == staged:
+                pass
+            elif deployed.is_file() and _sha256_file(deployed) == _sha256_file(staged):
+                pass
+            else:
+                raise ValueError("deployment target already exists: %s" % deployed)
+        elif deploy_mode == "symlink":
+            deployed.symlink_to(staged)
+        else:
+            shutil.copy2(staged, deployed)
+        deployment = {"deployed": True, "path": str(deployed), "mode": deploy_mode, "source": str(staged)}
     state["model_id"] = child_id
     state["parent_model_id"] = str(request["parent"]["id"])
     state["checkpoint_path"] = str(staged)
@@ -275,6 +302,20 @@ def _validate_training_evidence(
         raise ValueError("training metric unchanged_frozen_tensors must be a non-negative integer")
     if metrics["child_reloaded"] is not True:
         raise ValueError("training result did not prove child reload")
+    peak_vram = metrics["peak_vram_per_rank"]
+    if not isinstance(peak_vram, Mapping) or not peak_vram:
+        raise ValueError("training metric peak_vram_per_rank must be a non-empty mapping")
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 for value in peak_vram.values()):
+        raise ValueError("training metric peak_vram_per_rank must contain non-negative numbers")
+    gpu_time = metrics["gpu_time_s_per_rank"]
+    if not isinstance(gpu_time, (list, tuple)) or not gpu_time:
+        raise ValueError("training metric gpu_time_s_per_rank must be a non-empty list")
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 for value in gpu_time):
+        raise ValueError("training metric gpu_time_s_per_rank must contain non-negative numbers")
+    if isinstance(metrics["wall_time_s"], bool) or not isinstance(metrics["wall_time_s"], (int, float)):
+        raise ValueError("training metric wall_time_s must be numeric")
+    if not math.isfinite(float(metrics["wall_time_s"])) or float(metrics["wall_time_s"]) <= 0:
+        raise ValueError("training metric wall_time_s must be positive and finite")
     for name in ("parent_sha256", "child_sha256"):
         value = metrics[name]
         if not isinstance(value, str) or len(value) != 64:

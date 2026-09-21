@@ -1,0 +1,8 @@
+{
+  "/data/models/MiniMax-H3/diffusion_models/minimax_h3_fl2va_bf16.safetensors": {
+    "sha256": "907d4add438438ec1544f5240c3b38532ed934fe6be75677a6bbda2a6fdd6182",
+    "size": 66280487368,
+    "mtime_ns": 1786119605557695823,
+    "source": "prior_full_real_h3_evidence"
+  }
+}

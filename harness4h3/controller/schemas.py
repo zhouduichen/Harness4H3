@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -113,12 +115,39 @@ class ExperimentPlan:
     acceptance: Mapping[str, Any]
     stop_conditions: Mapping[str, Any]
     rationale: str
+    consumed_observation_ids: List[str] = field(default_factory=list)
+    diagnosis_evidence: List[str] = field(default_factory=list)
+    resource_request: Mapping[str, Any] = field(default_factory=dict)
+    parent_system_id: Optional[str] = None
+    repeat_for_statistics: bool = False
+    # A primary planning call may carry the bounded policy for the next round.
+    # Prefetch callers leave this unset; the campaign decides whether a policy
+    # is allowed to become active after all normal plan gates pass.
+    round_policy: Optional[Mapping[str, Any]] = None
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "ExperimentPlan":
         if not isinstance(raw, Mapping):
             raise ValueError("experiment plan must be a mapping")
-        required = tuple(cls.__dataclass_fields__)
+        # The three audit fields were added after the original plan format.
+        # Providers receive a schema that requires them, while persisted or
+        # mocked legacy plans remain readable and are rejected later by the
+        # remote campaign's evidence/resource safety checks when applicable.
+        required = (
+            "experiment_id",
+            "parent_model_id",
+            "diagnosis",
+            "objective",
+            "hypothesis",
+            "operator",
+            "operator_args",
+            "expected_effects",
+            "risks",
+            "required_budget",
+            "acceptance",
+            "stop_conditions",
+            "rationale",
+        )
         missing = [name for name in required if name not in raw]
         if missing:
             raise ValueError("experiment plan missing fields: %s" % ", ".join(missing))
@@ -127,6 +156,9 @@ class ExperimentPlan:
             raise ValueError("experiment plan structured fields must be mappings")
         if not isinstance(raw["risks"], (list, tuple)):
             raise ValueError("experiment plan risks must be a list")
+        round_policy = raw.get("round_policy")
+        if round_policy is not None and not isinstance(round_policy, Mapping):
+            raise ValueError("experiment plan round_policy must be an object")
         return cls(
             experiment_id=str(raw["experiment_id"]),
             parent_model_id=str(raw["parent_model_id"]),
@@ -141,6 +173,12 @@ class ExperimentPlan:
             acceptance=copy.deepcopy(dict(raw["acceptance"])),
             stop_conditions=copy.deepcopy(dict(raw["stop_conditions"])),
             rationale=str(raw["rationale"]),
+            consumed_observation_ids=[str(item) for item in raw.get("consumed_observation_ids", [])],
+            diagnosis_evidence=[str(item) for item in raw.get("diagnosis_evidence", [])],
+            resource_request=copy.deepcopy(dict(raw.get("resource_request") or {})),
+            parent_system_id=str(raw["parent_system_id"]) if raw.get("parent_system_id") else None,
+            repeat_for_statistics=bool(raw.get("repeat_for_statistics", False)),
+            round_policy=copy.deepcopy(dict(round_policy)) if round_policy is not None else None,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -158,19 +196,89 @@ class HardwareMetrics:
 
 
 @dataclass(frozen=True)
-class EvaluationResult:
+class EvaluationRecord:
+    """Canonical quality, hardware, validity, and provenance evidence."""
+
     quality_score: float
     quality_metrics: Mapping[str, Any]
-    hardware: HardwareMetrics
-    feasible: bool
+    hardware: HardwareMetrics = field(default_factory=HardwareMetrics)
+    feasible: bool = False
     violations: List[str] = field(default_factory=list)
     critical_regression: bool = False
+    failure_type: Optional[str] = None
+    model_id: Optional[str] = None
+    system_id: Optional[str] = None
+    device_id: Optional[str] = None
+    task_split: Optional[str] = None
+    validity: Mapping[str, Any] = field(default_factory=dict)
+    provenance: Mapping[str, Any] = field(default_factory=dict)
+    search_score: Optional[float] = None
+    evaluation_id: str = ""
+
+    def __post_init__(self) -> None:
+        if self.evaluation_id:
+            return
+        identity = {
+            "model_id": self.model_id,
+            "system_id": self.system_id,
+            "device_id": self.device_id,
+            "task_split": self.task_split,
+            "evaluator": self.provenance.get("evaluator") if isinstance(self.provenance, Mapping) else None,
+            "benchmark_recipe": self.provenance.get("benchmark_recipe") if isinstance(self.provenance, Mapping) else None,
+        }
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+        object.__setattr__(self, "evaluation_id", "E-" + digest)
+
+    @property
+    def score(self) -> float:
+        """Compatibility alias for the legacy subprocess evaluator."""
+
+        return self.quality_score
+
+    @property
+    def metrics(self) -> Mapping[str, Any]:
+        """Compatibility alias for the legacy subprocess evaluator."""
+
+        return self.quality_metrics
+
+    @property
+    def quality(self) -> float:
+        return self.quality_score
+
+    @property
+    def latency(self) -> Optional[float]:
+        return self.hardware.latency_s
+
+    @property
+    def peak_memory(self) -> Optional[float]:
+        return self.hardware.peak_memory_gb
+
+    @property
+    def energy(self) -> Optional[float]:
+        return self.hardware.energy_j
+
+    @property
+    def model_size(self) -> Optional[float]:
+        return self.hardware.model_size_gb
+
+    @property
+    def evidence(self) -> Mapping[str, Any]:
+        return {"validity": dict(self.validity), "provenance": dict(self.provenance)}
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "EvaluationResult":
+    def from_dict(cls, raw: Mapping[str, Any]) -> "EvaluationRecord":
+        if "quality_score" not in raw and "score" in raw:
+            return cls(
+                quality_score=float(raw["score"]),
+                quality_metrics=dict(raw.get("metrics") or {}),
+                hardware=HardwareMetrics(),
+                feasible=bool(raw.get("feasible", False)),
+                critical_regression=bool(raw.get("critical_regression", False)),
+                failure_type=str(raw["failure_type"]) if raw.get("failure_type") else None,
+            )
         hardware = raw.get("hardware") or {}
         return cls(
             quality_score=float(raw["quality_score"]),
@@ -179,7 +287,20 @@ class EvaluationResult:
             feasible=bool(raw.get("feasible", False)),
             violations=[str(item) for item in raw.get("violations", [])],
             critical_regression=bool(raw.get("critical_regression", False)),
+            failure_type=str(raw["failure_type"]) if raw.get("failure_type") else None,
+            model_id=str(raw["model_id"]) if raw.get("model_id") else None,
+            system_id=str(raw["system_id"]) if raw.get("system_id") else None,
+            device_id=str(raw["device_id"]) if raw.get("device_id") else None,
+            task_split=str(raw["task_split"]) if raw.get("task_split") else None,
+            validity=dict(raw.get("validity") or {}),
+            provenance=dict(raw.get("provenance") or {}),
+            search_score=float(raw["search_score"]) if raw.get("search_score") is not None else None,
+            evaluation_id=str(raw.get("evaluation_id") or ""),
         )
+
+
+# Compatibility import used by the current controller/archive modules.
+EvaluationResult = EvaluationRecord
 
 
 @dataclass(frozen=True)
@@ -191,6 +312,7 @@ class OperatorResult:
     metrics: Mapping[str, Any] = field(default_factory=dict)
     failure_type: Optional[str] = None
     message: str = ""
+    output_system: Optional[Any] = None
 
     @property
     def ok(self) -> bool:

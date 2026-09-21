@@ -48,3 +48,49 @@ The engineering gate includes the fully offline fake closed loop plus provider, 
 Research claims remain gated. The real H3 gate uses the fixed Windows RTX 5080 assets in `configs/models/minimax_h3_rtx5080.yaml`. It must produce a real `M0000 → M0001` transition using a model-level operator, then measure quality and at least one of latency, peak memory or model size on an external evaluator/hardware adapter. The efficiency metric must improve and quality regression must remain within the immutable TargetProfile threshold. Exploratory failures (including black-frame output) remain recorded and are not promoted.
 
 Later comparisons will hold controller model, target and experiment budget fixed across Human Recipe, Fixed Pipeline, Random Search, LLM Only and LLM + Harness4H3. Required search metrics are experiments/GPU-hours/wall-time to target, failed experiments, human interventions, best feasible quality and Pareto hypervolume. Hypervolume and statistical baselines are not claimed by the fake delivery.
+
+## Phase II — Remote SSH autonomous pipeline
+
+The remote gate is separate from local compilation: staging and unit tests do
+not prove that the live four-card server has executed v2. The acceptance run
+must use the server-side `--on-server` entrypoint and record, for at least one
+complete training/evaluation transition:
+
+| Area | Required evidence |
+|---|---|
+| Remote Controller | local vLLM preflight, structured validated plan, bounded context digest, and next-plan reuse |
+| Dynamic allocation | fresh resource decision with allocated GPU indices and worker lease |
+| Overlap | evaluation lease, speculative worker, and Controller prefetch events with non-conflicting indices |
+| Checkpoint I/O | prefetch completion/cached result before the worker lease, atomic staged file, and bounded cache contents |
+| ComfyUI lifecycle | queue idle, `/free` unload response, verified memory waterline, and released lease |
+| Experience | recipe/evaluation/power evidence appended and visible to the next plan |
+| Utilization | per-GPU power/utilization samples; report measured values without claiming 300 W or 100% unless observed |
+| Retention | active/rollback/Pareto checkpoint set and rejected/failed cleanup records |
+
+The current remote evidence ledger is
+[remote-pipeline-utilization-2026-09-16](../research/evidence/remote-pipeline-utilization-2026-09-16.md).
+Its latest state explicitly records that the legacy campaign still owns the
+lock; therefore it is not a substitute for the first live v2 acceptance run.
+
+### Bounded remote validation window
+
+When the shared server is explicitly available, run the bounded window from
+the remote checkout:
+
+```bash
+tools/remote-validation-window.sh --start \
+  --max-iterations 2 --max-runtime-s 7200
+```
+
+Without `--start` the command only prints campaign status. `--start` refuses
+an operator pause, an already-running campaign, or any pre-existing GPU
+compute process. It samples every configured GPU, requests a graceful pause at
+the iteration/time boundary, and writes `validation-report.json` and
+`validation-report.md` under a timestamped `work/remote-validation-window-*`
+directory. The report contains event names and references to the existing
+campaign state/event log; it never copies checkpoint/model bytes.
+
+The report is evidence only when `evidence_status` is `measured`, all four GPU
+indices have samples, and the final service state is not live. Its per-GPU
+power/utilization values remain measurements; 300 W and 100% are never claimed
+from a short window or from missing telemetry.

@@ -299,7 +299,7 @@ git commit -m "feat: overlap remote training with evaluation"
 - Modify: `README.md`
 
 **Interfaces:**
-- `tools/remote-campaign-service.sh start|status|stop` manages only the configured campaign PID file and log; `start` launches `run_overnight_controller.py --on-server` with `nohup`, `status` reads the PID and durable campaign state, and `stop` sends TERM to that recorded PID.
+- `tools/remote-campaign-service.sh start|status|stop` manages only the configured campaign PID file and log; `start` launches `run_overnight_controller.py --on-server` with `nohup`, `status` reads the PID and durable campaign state, and `stop` writes a one-shot graceful-stop marker for the recorded campaign PID.
 - The final campaign report contains `pipeline` with `overlap_cycles`, `gpu_seconds_by_index`, `power_target_w`, `power_peak_w`, `utilization_avg_pct_by_index`, and `idle_seconds_by_index`.
 
 - [ ] **Step 1: Write failing service/report tests**

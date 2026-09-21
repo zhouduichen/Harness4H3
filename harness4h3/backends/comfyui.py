@@ -83,6 +83,20 @@ class MiniMaxH3Adapter:
         )
         return result if isinstance(result, Mapping) else {}
 
+    def cancel(self, prompt_id: str) -> Mapping[str, Any]:
+        """Interrupt exactly one queued/running ComfyUI prompt.
+
+        ComfyUI accepts the prompt id on ``/interrupt``.  Keeping this
+        operation separate from ``free`` lets a timeout stop only the stuck
+        benchmark task before the normal cache-release lease is verified.
+        """
+
+        value = str(prompt_id or "").strip()
+        if not value:
+            raise BackendError("cannot cancel an empty prompt id", "backend_cancel")
+        result = self._json("/interrupt", {"prompt_id": value})
+        return result if isinstance(result, Mapping) else {}
+
     def wait(self, prompt_id: str) -> Mapping[str, Any]:
         deadline = time.monotonic() + self.task_timeout_s
         last = None
@@ -100,7 +114,20 @@ class MiniMaxH3Adapter:
                 if status.get("completed") or status_text == "success":
                     return item
             time.sleep(self.poll_interval_s)
-        raise BackendError("timed out waiting for %s; last=%r" % (prompt_id, last), "backend_timeout")
+        cancel_error = None
+        try:
+            self.cancel(prompt_id)
+        except BackendError as exc:
+            # The timeout is the authoritative failure.  Preserve cancellation
+            # details for the next Controller observation without replacing a
+            # deterministic timeout with a transient API error.
+            cancel_error = str(exc)
+        detail = "timed out waiting for %s; last=%r" % (prompt_id, last)
+        if cancel_error:
+            detail += "; cancellation_failed=%s" % cancel_error[:500]
+        else:
+            detail += "; prompt_cancelled=true"
+        raise BackendError(detail, "backend_timeout")
 
     @staticmethod
     def output_items(history: Mapping[str, Any]) -> List[Mapping[str, Any]]:

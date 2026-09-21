@@ -2,7 +2,7 @@
 
 ## Goal
 
-让远程闭环在生成下一轮 Controller plan 时仍然使用所有可安全使用的 GPU：训练阶段保留一个 Controller lane，评价阶段保留一个 ComfyUI lane 和一个 Controller lane，把剩余 GPU 给隔离的候选 worker；任何分布式 worker 只在完整 lease 内运行，不在 rank 中途抢卡。
+让远程闭环在生成下一轮 Controller plan 时仍然使用所有可安全使用的 GPU：普通弹性训练保留一个 Controller lane，明确的满卡训练则先生成并持久化下一轮 plan，再短暂释放本项目 Controller 以获得四卡；评价阶段保留一个 ComfyUI lane 和一个 Controller lane，把剩余 GPU 给隔离的候选 worker；任何分布式 worker 只在完整 lease 内运行，不在 rank 中途抢卡。
 
 ## Current evidence and gap
 
@@ -15,14 +15,13 @@
 
 ### 1. Elastic execution request
 
-对 distributed worker 的执行请求增加 campaign-level 的 Controller overlap cap。启用 overlap 时：
+对 distributed worker 的执行请求增加 campaign-level 的 Controller overlap cap。启用 overlap 时，执行请求分为两个明确模式：
 
-- `min_gpu_count` 保持来自验证后的 Controller plan，且不得低于 2；
-- `max_gpu_count` 被限制为 `total_gpu_count - controller_overlap_gpus`，默认是 3；
-- 请求被规范化为 elastic，这样没有评价 lease 时 worker 使用 3 张卡，有评价和 Controller 时自然降到 2 张卡；
+- 普通弹性模式：验证后的请求没有明确要求完整 GPU 集合时，`max_gpu_count` 被限制为 `total_gpu_count - controller_overlap_gpus`，默认是 3；`min_gpu_count` 保持来自 plan 且不得低于 2，请求被规范化为 elastic；
+- 满卡模式：验证后的 distributed 请求显式设置 `gpu_count >= total_gpu_count` 或 `min_gpu_count >= total_gpu_count` 时，保留四卡上限，不走 overlap cap；campaign 先生成并持久化 successor plan，再通过 handoff hold 释放 Controller，最后申请四卡 worker lease；
 - 原始 LLM 计划不被改写，事件和 worker result 同时记录 `planned_resource_request` 与 `effective_resource_request`。
 
-这让训练开始前可以安全释放旧的 TP=4 Controller，然后由 watcher 在 worker lease 留出的 1 张卡上启动 TP=1 Controller。训练启动后立即异步生成下一轮 plan。
+普通模式让训练开始前可以安全释放旧的 TP=4 Controller，然后由 watcher 在 worker lease 留出的 1 张卡上启动 TP=1 Controller；满卡模式则在训练开始前完成 successor plan 和 Controller handoff。训练启动后，普通模式继续异步生成下一轮 plan。
 
 ### 2. Controller GPU reservation
 
@@ -62,5 +61,5 @@ ComfyUI: 1 GPU | Controller: 1 GPU | speculative worker: 2 GPUs
 1. 纯函数测试证明四卡、三卡、评价+Controller+候选三种布局和资源上限。
 2. scheduler 测试证明 live Controller lease 排除对应 GPU、过期/死亡 owner 可回收、worker lease 与 Controller lease 不重叠。
 3. launcher contract 测试证明 handoff hold 阻止重启、child 退出后精确清理 Controller lease。
-4. campaign 测试证明 full-GPU LLM plan 改为 effective 3-GPU worker，并在 worker 已启动后触发 Controller prefetch；评价中候选 worker 保留 Controller lane。
+4. campaign 测试证明普通 overlap plan 改为 effective 3-GPU worker，明确的 full-GPU plan 保留 effective 4-GPU worker，并在获取四卡前触发 successor Controller prefetch 和 handoff；评价中候选 worker 保留 Controller lane。
 5. 远程短窗口验证出现 `controller_gpu_lease`、`worker_started`、`controller_plan_prefetch_started` 的正确顺序，并报告每张卡的 lane/利用率/功耗。

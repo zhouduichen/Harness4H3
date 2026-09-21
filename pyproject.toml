@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harness4h3"
-version = "1.0.0"
+version = "0.4.0"
 description = "Device-aware research harness for reproducible MiniMax H3 optimization experiments"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -28,4 +28,5 @@ include = ["harness4h3*", "h3_training*", "research*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-ra"

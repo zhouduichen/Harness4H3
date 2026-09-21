@@ -67,6 +67,24 @@ def test_round_gate_replans_when_runtime_capability_is_not_verified():
     assert result.reasons == ("capability_unverified:lpl",)
 
 
+def test_round_gate_replans_when_verified_name_has_no_execution_contract():
+    result = evaluate_round_gate(
+        worker_result=_worker(
+            operator="step_distill",
+            operator_args={"tdtm_merge_steps": 4},
+        ),
+        evaluation=_evaluation(),
+        target={"min_quality_score": 0.8},
+        capability_evidence={"tdtm": {"safe_to_plan": True}},
+        lane_evidence={"disjoint": True},
+        parent_digest="sha256:p",
+        child_digest="sha256:c",
+        retention={},
+    )
+    assert result.status == "replan"
+    assert result.reasons == ("capability_contract_missing:tdtm",)
+
+
 def test_round_gate_waits_for_resource_dependency_before_quality_decision():
     result = evaluate_round_gate(
         worker_result={},

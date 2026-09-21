@@ -55,6 +55,16 @@ class RemoteStudentWorker:
             str(self.config.worker_min_free_memory_gb),
             "--student-min-free-memory-gb",
             str(self.config.worker_student_min_free_memory_gb),
+            "--teacher-world-size",
+            str(self.config.teacher_world_size),
+            "--teacher-rank-min-free-memory-gb",
+            str(self.config.teacher_rank_min_free_memory_gb),
+            "--controller-hold-file",
+            self.config.controller_hold_file or "",
+            "--controller-release-file",
+            self.config.controller_release_file or "",
+            "--controller-worker-lease-file",
+            self.config.controller_worker_lease_file or "",
             "--max-steps",
             str(self.config.max_steps),
         )
@@ -104,6 +114,13 @@ class RemoteStudentEvaluator:
             "600",
             "--min-free-memory-gb",
             "8.0",
+            "--controller-hold-file",
+            self.config.controller_hold_file or "",
+            "--controller-release-file",
+            self.config.controller_release_file or "",
+            "--controller-worker-lease-file",
+            self.config.controller_worker_lease_file or "",
+            "--release-controller-handoff",
         )
         self.client.run(command, timeout_s=max(3600.0, self.config.controller.timeout_s * 20), check=False)
         raw = self.client.read_json(remote_result)
@@ -119,6 +136,9 @@ class RemoteStudentEvaluator:
             quality_score=float(raw["quality_score"]) if raw.get("quality_score") is not None else None,
             quality_metrics=dict(raw.get("quality_metrics") or {}),
             hardware=dict(raw.get("hardware") or {}),
+            metric_evidence=dict(raw.get("metric_evidence") or {}),
+            reward=float(raw["reward"]) if raw.get("reward") is not None else None,
+            reward_terms={str(key): float(value) for key, value in dict(raw.get("reward_terms") or {}).items()},
         )
 
 

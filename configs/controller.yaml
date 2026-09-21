@@ -1,4 +1,4 @@
-default_provider: rule_based_mock
+default_provider: vllm
 
 providers:
   rule_based_mock:
@@ -18,3 +18,29 @@ providers:
     endpoint: https://api.openai.com/v1/responses
     api_key_env: OPENAI_API_KEY
     store: false
+  vllm:
+    model: qwen3.5-controller
+    endpoint: http://127.0.0.1:8000/v1/chat/completions
+    remote_port: 8000
+    # Keep the control-plane request below the measured remote generation
+    # timeout.  The primary lineage needs one valid plan; the isolated GPU
+    # overlap lane has its own bounded prefetch and does not require four
+    # simultaneous full-length completions.
+    timeout_s: 240
+    plan_max_tokens: 2048
+    extended_plan_max_tokens: 2048
+    plan_candidate_count: 1
+    plan_candidate_temperature: 0.25
+    # The plan must echo every still-unconsumed observation ID for audit
+    # continuity.  Long-running campaigns can accumulate hundreds of compact
+    # The campaign bounds new observation IDs before building the prompt, but
+    # keep room for the strict plan schema and a small directive/evidence
+    # response.
+    plan_candidate_max_tokens: 2048
+    plan_selection_max_tokens: 384
+    review_max_tokens: 768
+    # The probe uses the complete strict ExperimentPlan schema; 768 tokens
+    # can truncate it and cause needless controller retries.
+    probe_max_tokens: 1536
+    context_window_tokens: 16384
+    network_access: ssh_forwarded_local_only

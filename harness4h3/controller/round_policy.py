@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping, Tuple
 
@@ -25,6 +26,109 @@ _FIELDS = {
 
 class RoundPolicyValidationError(ValueError):
     """Raised when an LLM-produced round policy cannot be trusted."""
+
+
+def normalize_round_policy_progress(policy: "RoundPolicy", raw: Any = None) -> dict[str, Any]:
+    """Return a small restart-safe progress cursor for one policy round.
+
+    The cursor is deliberately separate from the policy itself.  A policy is
+    immutable input from the Controller; progress is mutable campaign state
+    produced only after a candidate has completed evaluation.
+    """
+
+    if not isinstance(policy, RoundPolicy):
+        raise RoundPolicyValidationError("policy must be a RoundPolicy")
+    value = raw if isinstance(raw, Mapping) else {}
+    if str(value.get("round_id", "")) != policy.round_id:
+        return {
+            "round_id": policy.round_id,
+            "trials_completed": 0,
+            "gpu_hours_used": 0.0,
+            "completed_experiment_ids": [],
+            "stop_reason": None,
+        }
+    try:
+        trials = int(value.get("trials_completed", 0))
+    except (TypeError, ValueError):
+        trials = 0
+    try:
+        gpu_hours = float(value.get("gpu_hours_used", 0.0))
+    except (TypeError, ValueError):
+        gpu_hours = 0.0
+    ids = value.get("completed_experiment_ids", [])
+    if not isinstance(ids, (list, tuple)):
+        ids = []
+    completed_ids = []
+    for item in ids:
+        text = str(item).strip()
+        if text and text not in completed_ids:
+            completed_ids.append(text)
+    stop_reason = value.get("stop_reason")
+    stop_reason = str(stop_reason).strip() if stop_reason else None
+    return {
+        "round_id": policy.round_id,
+        "trials_completed": max(0, trials),
+        "gpu_hours_used": max(0.0, gpu_hours) if math.isfinite(gpu_hours) else 0.0,
+        "completed_experiment_ids": completed_ids,
+        "stop_reason": stop_reason,
+    }
+
+
+def round_policy_budget_status(policy: "RoundPolicy", progress: Any = None) -> str | None:
+    """Return the hard stop reason when a round policy has no budget left."""
+
+    cursor = normalize_round_policy_progress(policy, progress)
+    if cursor["stop_reason"]:
+        return str(cursor["stop_reason"])
+    max_trials = int(policy.axis_budget["max_trials"])
+    if int(cursor["trials_completed"]) >= max_trials:
+        return "budget_exhausted"
+    max_gpu_hours = float(policy.axis_budget["max_gpu_hours"])
+    used_gpu_hours = float(cursor["gpu_hours_used"])
+    if (max_gpu_hours <= 0.0 and used_gpu_hours > 0.0) or (
+        max_gpu_hours > 0.0 and used_gpu_hours >= max_gpu_hours
+    ):
+        return "budget_exhausted"
+    return None
+
+
+def record_round_policy_trial(
+    policy: "RoundPolicy",
+    progress: Any,
+    experiment_id: Any,
+    gpu_hours: Any = 0.0,
+) -> tuple[dict[str, Any], bool]:
+    """Count one newly evaluated candidate exactly once.
+
+    ``gpu_hours`` is measured worker cost when available.  The function is
+    tolerant of legacy records that omit it, because trial counting remains
+    authoritative even when old telemetry is incomplete.
+    """
+
+    cursor = normalize_round_policy_progress(policy, progress)
+    experiment = str(experiment_id or "").strip()
+    if not experiment or experiment in cursor["completed_experiment_ids"]:
+        return cursor, False
+    try:
+        cost = float(gpu_hours)
+    except (TypeError, ValueError):
+        cost = 0.0
+    if not math.isfinite(cost) or cost < 0.0:
+        cost = 0.0
+    cursor["trials_completed"] += 1
+    cursor["gpu_hours_used"] += cost
+    cursor["completed_experiment_ids"].append(experiment)
+    return cursor, True
+
+
+def mark_round_policy_stop(policy: "RoundPolicy", progress: Any, reason: str) -> dict[str, Any]:
+    """Persist an explicit policy stop without changing immutable policy data."""
+
+    cursor = normalize_round_policy_progress(policy, progress)
+    text = str(reason or "").strip()
+    if text:
+        cursor["stop_reason"] = text
+    return cursor
 
 
 def _non_empty_string(value: Any, field: str) -> str:
@@ -188,4 +292,12 @@ def validate_round_policy(
         raise RoundPolicyValidationError("round policy GPU allocation exceeds GPU count")
 
 
-__all__ = ["RoundPolicy", "RoundPolicyValidationError", "validate_round_policy"]
+__all__ = [
+    "RoundPolicy",
+    "RoundPolicyValidationError",
+    "mark_round_policy_stop",
+    "normalize_round_policy_progress",
+    "record_round_policy_trial",
+    "round_policy_budget_status",
+    "validate_round_policy",
+]

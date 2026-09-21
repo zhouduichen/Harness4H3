@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from research.experiments.a0_model_evolution import A0RuleBasedController
 from research.experiments.a1_real_evolution import A1BootstrapController, TieredRealBenchmarkEvaluator, _hardware_metrics
 from harness4h3.benchmark.h3 import BenchmarkSummary, BenchmarkTaskResult
+from harness4h3.archive.model_candidate import ModelCandidate
+from harness4h3.archive.system_candidate import SystemCandidate
 from harness4h3.controller.context import ControllerContext
 from harness4h3.controller.schemas import BudgetState, EvaluationResult, ExperimentPlan, HardwareMetrics
 from harness4h3.h3.state import ModelState
@@ -49,7 +52,14 @@ class StubBenchmark:
 
     def run(self, state, tasks, **kwargs):
         self.calls.append((state.model_id, len(tasks), kwargs["target"].id))
-        return summary(state.model_id, len(tasks))
+        return replace(
+            summary(state.model_id, len(tasks)),
+            system_id=getattr(kwargs.get("system"), "id", None),
+            device_id=kwargs.get("device_id"),
+            task_split=kwargs.get("task_split"),
+            benchmark_recipe=dict(kwargs.get("benchmark_recipe") or {"recipe": "fixed"}),
+            evaluator_version="test-evaluator-v1",
+        )
 
 
 def test_real_evaluator_progresses_dev_to_heldout_per_child():
@@ -69,6 +79,36 @@ def test_real_evaluator_progresses_dev_to_heldout_per_child():
     assert [call[1] for call in benchmark.calls] == [1, 2, 3]
     assert [first.quality_metrics["fidelity_tier"], second.quality_metrics["fidelity_tier"], third.quality_metrics["fidelity_tier"]] == [1, 2, 3]
     assert all(item.quality_metrics["real_benchmark"] for item in (first, second, third))
+
+
+def test_real_evaluator_emits_pair_keyed_canonical_record():
+    benchmark = StubBenchmark()
+    evaluator = TieredRealBenchmarkEvaluator(
+        benchmark,
+        {1: [object()]},
+        target(),
+        0.991,
+        HardwareMetrics(latency_s=90.0, peak_memory_gb=16.3, model_size_gb=12.5),
+    )
+    state = ModelState.fake_baseline("M0000")
+    model = ModelCandidate("M0000", None, 0, state.checkpoint_path, state, None, "baseline")
+    system = SystemCandidate.from_model_candidate("S0000", model, status="baseline")
+    record = evaluator.evaluate(
+        state,
+        target(),
+        0.991,
+        system=system,
+        device_id="L40-0",
+        task_split="dev",
+        benchmark_recipe={"name": "a1-t0", "steps": 32},
+    )
+    assert record.model_id == "M0000"
+    assert record.system_id == "S0000"
+    assert record.device_id == "L40-0"
+    assert record.task_split == "dev"
+    assert record.provenance["offline_simulation"] is False
+    assert record.provenance["benchmark_recipe"] == {"name": "a1-t0", "steps": 32}
+    assert record.quality_metrics["benchmark_summary"]["evaluator_version"] == "test-evaluator-v1"
 
 
 def test_a1_bootstrap_forces_full_fidelity_without_changing_plan_schema():

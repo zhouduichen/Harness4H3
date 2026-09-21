@@ -1,24 +1,28 @@
 # Harness4H3 Research Program
 
 This directory separates reproducible research programs and evidence from the
-frozen reusable Harness implementation.
+reusable research-preview Harness implementation.
 
 ## Research question and hypothesis
 
-**Question:** Can a bounded Controller choose device-aware H3 model/runtime
-interventions and reach a feasible Pareto candidate more reliably than an
-unstructured LLM-only process?
+**Question:** Can a bounded Controller use real device feedback to choose H3
+model/runtime interventions and reach a better feasible Pareto configuration?
+Harness-vs-LLM-only is a baseline/ablation, not the project-wide primary
+question.
 
 **Falsifiable hypothesis:** Given the same parent model, target device,
 operator set, task splits, evaluator, Controller budget, and acceptance rules,
-the Harness-mediated condition will produce more independently validated
-feasible candidates per unit wall/GPU time, with fewer invalid or repeated
-experiments, than the LLM-only condition.
+the bounded device-feedback Controller will produce independently validated
+feasible candidates under the declared target and budget; a separate
+Harness-vs-LLM-only comparison measures whether the protocol reduces invalid
+or repeated experiments.
 
 This hypothesis has not yet been established. The repository currently
 contains software-loop validation, real inference/benchmark evidence, one
-measured quantization comparison, runtime-memory studies, and a documented
-blocker for real model-changing training.
+measured quantization comparison, runtime-memory studies, and a remote
+four-GPU worker path for structural block pruning and teacher-output
+distillation. Semantic quality improvement is still an open experimental
+question.
 
 ## What may count as a contribution
 
@@ -45,7 +49,7 @@ not a proven performance result.
 | Controlled variables | Parent, target, tasks, seeds, workflow, sampler, evaluator, operator set, budget |
 | Dependent variables | Feasible quality, latency, peak VRAM, size, energy, experiments/time-to-target, failures |
 | Hard gates | Valid generation, quality floor/drop, device limits, parent immutability, child authenticity |
-| Evidence units | ExperimentPlan, OperatorResult, EvaluationResult, artifacts, hashes, cost, trajectory |
+| Evidence units | ExperimentPlan, OperatorResult, EvaluationRecord, model/system IDs, artifacts, hashes, cost, trajectory |
 
 The held-out split is not used to choose an intervention. Infrastructure
 failure, optimization rejection, and policy/controller failure are reported
@@ -61,20 +65,24 @@ separately.
 | M5/M5.5 quantized comparison | Measured | Reported size/latency/quality under recorded controls |
 | M6 runtime-memory branches | Measured | Reported outcomes, including VRAM rejection |
 | Phase 0 TinyH3 algorithm/harness gate | CPU reference | Training, checkpoint, resume, failure, and closed-loop mechanism only |
-| A1 model-changing training | Blocked | Reconnaissance and resource blocker only |
-| 4×L40 distributed preflight | Configuration prepared, host unverified | Requirements and blocked preflight only |
-| Pruning/distillation optimization | Not implemented | Interface intent only |
+| A1 recovery/step training | Real remote worker | Checkpoint and training evidence; quality requires benchmark |
+| 4×L40 distributed training | Deployed on the SSH host | FSDP worker elastically uses 2–4 safe GPUs; the current run uses 3 while GPU1 hosts vLLM |
+| Structured block pruning | Real remote worker | Reduced `num_layers`, child reload, then benchmark-gated |
+| Teacher-output distillation | Real remote worker | Frozen-parent output loss on configured cache; no semantic claim |
+| H3 DMD2 reference update | Real remote worker | FSDP-sharded frozen teacher plus trainable latent critic; benchmark-gated |
+| Trusted H3 quantization variant | Real remote worker | Matching prebuilt INT8/NVFP4 artifact, digest-verified; benchmark reload required |
+| Head/channel pruning | Not enabled | Requires shape-coupled loader/export implementation |
 | Harness superiority over baselines | Not evaluated | No superiority claim |
 
 ## Current execution priority
 
-Phase 0 is now the pre-GPU software gate and does not alter the real-H3 claim
-boundary. The next execution step is to move the repository to the target host, replace
-unverified device-profile facts with observations, run the persisted preflight,
-and establish a real H3 ComfyUI sanity/dev/held-out baseline. M6 is optional
-runtime-memory research and is not required for this migration. A1 remains
-blocked until a source-grounded trainer performs the real forward/backward,
-optimizer-step, child-save, parent-immutability, and child-reload checks.
+Phase 0 remains the CPU contract suite. The active program is now the remote
+real-H3 campaign: the server-side Qwen/vLLM Controller supplies the next
+operator and bounded resource request, the trusted worker produces real
+checkpoint evidence, and ComfyUI independently measures each child. The
+current run has already produced real recovery evidence and a benchmarked
+quality-preserving but latency-rejected candidate; the target-feasible result
+is still open. M6 remains optional runtime-memory research.
 
 ## Experiment programs
 
@@ -108,7 +116,9 @@ inputs, metrics, failures, and provenance.
 
 ## Current limitations
 
-- No real H3 trainer is registered.
+- The remote L40×4 campaign registers trusted recovery, structural block
+  pruning, teacher-output distillation, DMD2, and configured quantization
+  workers; each run still requires fresh benchmark evidence before promotion.
 - The official BF16 H3 transformer is not memory-feasible on the measured RTX
   5080 Laptop host without a different loading/training strategy.
 - Existing NVFP4/INT8 inference formats do not by themselves establish a
@@ -121,24 +131,24 @@ inputs, metrics, failures, and provenance.
 A [four-L40 device requirement profile](../configs/devices/l40x4-server.yaml),
 [FSDP A1-T0 recipe](../configs/experiments/a1-t0-l40x4.yaml), and
 [fixed worker example](../configs/a1-worker.l40x4.example.json) are prepared
-for host setup. They are not execution evidence: no L40 hardware observation,
-H3 forward/backward pass, optimizer step, or child checkpoint has been
-recorded from that host.
+for host setup. The remote campaign's JSONL output is the source of truth for
+host-specific hardware, training, checkpoint, and benchmark evidence; local
+`var/` outputs are deliberately not committed.
 
 ## Next valid model-changing experiment
 
-Before restarting A1, implement or adopt one source-grounded, memory-feasible
-H3 `recovery_finetune` trainer and pass the isolated A1-T0 smoke gate: real
-load, forward, finite loss, backward, non-zero gradient, optimizer step,
-separate child save, unchanged parent, changed intended weights, and real
-child reload. Only then connect it to `tools/h3_model_worker.py` and the fixed
-benchmark loop.
+The next valid model-changing experiment is the next Controller-selected
+operation whose resource request is available on the host. Training uses the
+elastic FSDP worker with the actual safe GPU allocation; structural pruning
+must pass the real H3 loader reload; distillation must record frozen-parent
+evidence; and every child must pass the independent benchmark before it can
+become active.
 
 ## Research history
 
 Completed and superseded [specifications](history/specs/) and
 [implementation plans](history/plans/) are kept under `history/`. They
-document why the frozen protocol exists but are not the current onboarding
+document earlier protocol decisions but are not the current onboarding
 path. Active usage is documented in [the repository README](../README.md),
 [optimization protocol](../docs/optimization-flow.md), and
 [device porting guide](../docs/device-porting.md).

@@ -1,0 +1,79 @@
+schema_version: 1
+quality_scope: structural_proxy
+research_grade: true
+
+remote:
+  host: Jiayu-intern
+  ssh_port: 30902
+  harness_root: /home/intern/huangjiahao/Harness4H3-rsi
+  model_root: /data/models/MiniMax-H3
+  comfyui_root: /home/intern/huangjiahao/ComfyUI
+  comfyui_port: 8188
+  python: /home/intern/miniconda3/envs/comfy/bin/python
+  training_python: /home/intern/miniconda3/envs/comfy/bin/torchrun
+  results_root: /home/intern/huangjiahao/Harness4H3-rsi/work/remote-h3-controller-20260914
+  deployment_dir: /home/intern/huangjiahao/ComfyUI/models/diffusion_models
+  campaign_root: /home/intern/huangjiahao/Harness4H3-rsi/work/remote-h3-controller-20260914
+
+workflow:
+  template: ../examples/remote_linux_h3_workflow_api.json
+  prompt_target: {node_id: "139", input: prompt}
+  seed_target: {node_id: "137", input: noise_seed}
+  mutable:
+    steps: {node_id: "132", input: steps}
+    cfg: {node_id: "138", input: cfg}
+
+runtime:
+  experience_path: ../var/remote-h3-controller/experience.jsonl
+  output_root: ../var/remote-h3-controller/benchmark
+  tasks_path: ../examples/tasks.yaml
+  target_path: targets/l40x4_h3_example.yaml
+
+reward:
+  alpha: 1.0
+  beta: 0.2
+  gamma: 0.2
+  delta: 0.2
+
+checkpoint_retention:
+  policy: rejected_candidate_v1
+
+benchmark:
+  splits: [heldout]
+  comfyui_workers:
+    - {gpu_index: 0, port: 8188}
+    - {gpu_index: 2, port: 8189}
+    - {gpu_index: 3, port: 8190}
+  sampling_interval_s: 1.0
+  evaluator_command: []
+  evaluator_timeout_s: 180
+  reset_backend_before_run: true
+  comfyui_cache_policy: idle_release
+  black_frame_rate_threshold: 0.0
+  efficiency_thresholds:
+    latency_s: 0.10
+    peak_memory_gb: 0.05
+    energy_j: 0.10
+
+worker:
+  enabled: true
+  entrypoint: /home/intern/huangjiahao/Harness4H3-rsi/tools/h3_real_train_worker.py
+  config_template: /home/intern/huangjiahao/Harness4H3-rsi/configs/a1-worker.l40x4-rsi-staging.json
+  python: /home/intern/miniconda3/envs/comfy/bin/torchrun
+  allowed_operators: [prune_blocks, distill, recovery_finetune, step_distill, dmd2, quantize]
+  operator_entrypoints:
+    prune_blocks: /home/intern/huangjiahao/Harness4H3-rsi/tools/h3_real_prune_worker.py
+    distill: /home/intern/huangjiahao/Harness4H3-rsi/tools/h3_real_train_worker.py
+    recovery_finetune: /home/intern/huangjiahao/Harness4H3-rsi/tools/h3_real_train_worker.py
+    step_distill: /home/intern/huangjiahao/Harness4H3-rsi/tools/h3_real_train_worker.py
+    dmd2: /home/intern/huangjiahao/Harness4H3-rsi/tools/h3_real_train_worker.py
+    quantize: /home/intern/huangjiahao/Harness4H3-rsi/tools/h3_real_quantize_worker.py
+  operator_launchers:
+    prune_blocks: python
+    distill: torchrun
+    recovery_finetune: torchrun
+    step_distill: torchrun
+    dmd2: torchrun
+    quantize: python
+  quantized_bits: [8]
+  max_steps: 32

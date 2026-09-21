@@ -69,10 +69,8 @@ class SystemCandidateStore:
     def lineage(self) -> List[SystemCandidate]:
         if not self.candidates_dir.exists():
             return []
-        items = [
-            SystemCandidate.from_dict(json.loads(path.read_text(encoding="utf-8")))
-            for path in self.candidates_dir.glob("C*.json")
-        ]
+        paths = {path for pattern in ("S*.json", "C*.json") for path in self.candidates_dir.glob(pattern)}
+        items = [SystemCandidate.from_dict(json.loads(path.read_text(encoding="utf-8"))) for path in paths]
         return sorted(items, key=lambda item: (item.generation, item.id))
 
     def children(self, candidate_id: str) -> List[SystemCandidate]:
@@ -81,15 +79,15 @@ class SystemCandidateStore:
 
     def next_id(self) -> str:
         numbers = [int(item.id[1:]) for item in self.lineage()]
-        return "C%04d" % ((max(numbers) + 1) if numbers else 0)
+        return "S%04d" % ((max(numbers) + 1) if numbers else 0)
 
     def initialize(self, candidate: SystemCandidate) -> SystemCandidate:
         self._ensure()
         existing = self.lineage()
         if existing:
             return self.active()
-        if candidate.id != "C0000" or candidate.parent_id is not None or candidate.generation != 0:
-            raise SystemStoreError("initial system candidate must be root C0000")
+        if candidate.id not in {"S0000", "C0000"} or candidate.parent_id is not None or candidate.generation != 0:
+            raise SystemStoreError("initial system candidate must be root S0000")
         self.create(candidate)
         self.set_active(candidate.id)
         return candidate

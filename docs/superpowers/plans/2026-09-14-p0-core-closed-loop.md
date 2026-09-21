@@ -1,5 +1,9 @@
 # P0 Core Closed-Loop Integration Implementation Plan
 
+> **Status:** Implemented in the shared worktree. The real MiniMax-H3 adapter remains
+> intentionally fail-closed because it is outside this P0 core phase; verification
+> completed with 291 passing tests and 2 CUDA-dependent skips.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the existing Harness4H3 optimization loop search explicit model/runtime pairs with target-driven objectives and Harness-owned continuation decisions.
@@ -28,7 +32,7 @@
 - Modify: `harness4h3/evaluator/protocol.py`
 - Modify: `harness4h3/target/profile.py`
 - Test: `tests/unit/test_evaluation_record.py`
-- Test: `tests/unit/test_config.py`
+- Test: `tests/test_config.py`
 
 **Interfaces:**
 - `ObjectiveSpec(name: str, direction: str, weight: float = 1.0)` validates one numeric objective and exposes `to_dict()`.
@@ -62,7 +66,7 @@ def test_legacy_evaluator_factory_returns_canonical_record():
 
 - [ ] **Step 2: Run focused tests and verify the new symbols fail**
 
-Run: `pytest tests/unit/test_evaluation_record.py tests/unit/test_config.py -q`
+Run: `pytest tests/unit/test_evaluation_record.py tests/test_config.py -q`
 
 Expected: FAIL because `ObjectiveSpec`, `EvaluationRecord`, and the explicit objective parsing are not implemented.
 
@@ -76,7 +80,7 @@ Update `CompositeEvaluator` and its protocols to return `EvaluationRecord`. When
 
 - [ ] **Step 4: Run focused tests and the existing evaluator tests**
 
-Run: `pytest tests/unit/test_evaluation_record.py tests/unit/test_config.py tests/test_evaluator.py tests/unit/test_fake_operators_and_evaluator.py tests/unit/test_h3_benchmark.py -q`
+Run: `pytest tests/unit/test_evaluation_record.py tests/test_config.py tests/test_evaluator.py tests/unit/test_fake_operators_and_evaluator.py tests/unit/test_h3_benchmark.py -q`
 
 Expected: PASS.
 
@@ -221,7 +225,7 @@ git commit -m "feat: separate runtime system children from model children"
 - Modify: `harness4h3/cli.py`
 - Test: `tests/integration/test_fake_closed_loop.py`
 - Test: `tests/unit/test_controller_providers.py`
-- Test: `tests/unit/test_loop.py`
+- Test: `tests/test_loop.py`
 
 **Interfaces:**
 - `SessionState.current_system_id: Optional[str]` is persisted after `budget` and defaults to `None` for old checkpoints.
@@ -266,7 +270,7 @@ Keep the existing recent eight records, add a full-history summary with counts b
 
 - [ ] **Step 7: Run all core loop/provider tests**
 
-Run: `pytest tests/integration/test_fake_closed_loop.py tests/unit/test_loop.py tests/unit/test_controller_providers.py tests/integration/test_decision_semantics.py -q`
+Run: `pytest tests/integration/test_fake_closed_loop.py tests/test_loop.py tests/unit/test_controller_providers.py tests/integration/test_decision_semantics.py -q`
 
 Expected: PASS, including old tests asserting `current_model_id` and old checkpoint resume.
 

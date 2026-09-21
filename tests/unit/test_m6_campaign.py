@@ -87,7 +87,7 @@ def test_rejection_does_not_consume_failure_budget_classification():
 
 def test_research_report_splits_rejection_from_failure_and_records_zero_intervention():
     payload = {
-        "harness": {"version": "Harness4H3-v1.0"},
+        "harness": {"version": "Harness4H3-v0.4"},
         "target_profile_id": "rtx5080_h3_v1",
         "status": "experiment_budget_exhausted",
         "iterations": [

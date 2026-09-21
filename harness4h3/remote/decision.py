@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .reward import RewardResult, RewardWeights, compute_reward
@@ -44,6 +44,7 @@ class AcceptanceInput:
     efficiency_thresholds: Mapping[str, float]
     reward_weights: RewardWeights = field(default_factory=lambda: RewardWeights(1.0, 0.2, 0.2, 0.2))
     research_grade: bool = False
+    on_pareto_front: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,12 +56,56 @@ class DecisionResult:
     pareto_eligible: bool
     reward_terms: Mapping[str, float] = field(default_factory=dict)
     missing_metrics: Tuple[str, ...] = ()
+    continuation_status: str = "reject"
+    advance: bool = False
+
+    def with_continuation(self, status: str, advance: bool) -> "DecisionResult":
+        return replace(self, continuation_status=str(status), advance=bool(advance))
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 
 def _training_violations(metrics: Mapping[str, Any]) -> List[str]:
+    operator = str(metrics.get("operator", "")).strip()
+    if operator == "quantize":
+        violations: List[str] = []
+        before = metrics.get("parent_sha256_before") or metrics.get("parent_sha256")
+        after = metrics.get("parent_sha256_after") or metrics.get("parent_sha256")
+        child = metrics.get("child_sha256")
+        if not before or not after or before != after:
+            violations.append("quantize_parent_hash_changed")
+        if not child or child == before:
+            violations.append("quantize_child_hash_unchanged")
+        if metrics.get("child_copy_verified") is not True:
+            violations.append("quantize_child_copy_unverified")
+        if metrics.get("source_is_quantized") is not True:
+            violations.append("quantize_source_not_verified")
+        if metrics.get("offline_simulation") is True:
+            violations.append("quantize_offline_simulation")
+        return violations
+    if metrics.get("structural_change") is True or metrics.get("operator") == "prune_blocks":
+        violations: List[str] = []
+        before = metrics.get("parent_sha256_before") or metrics.get("parent_sha256")
+        after = metrics.get("parent_sha256_after") or metrics.get("parent_sha256")
+        child = metrics.get("child_sha256")
+        if not before or not after or before != after:
+            violations.append("training_parent_hash_changed")
+        if not child or child == before:
+            violations.append("training_child_hash_unchanged")
+        if metrics.get("child_reloaded") is not True:
+            violations.append("training_child_reload")
+        try:
+            removed_parameters = float(metrics.get("removed_parameter_count", 0))
+            child_blocks = float(metrics.get("child_num_blocks", 0))
+            parent_blocks = float(metrics.get("parent_num_blocks", 0))
+        except (TypeError, ValueError):
+            removed_parameters, child_blocks, parent_blocks = 0.0, 0.0, 0.0
+        if removed_parameters <= 0 or child_blocks >= parent_blocks:
+            violations.append("training_no_structural_change")
+        if metrics.get("offline_simulation") is True:
+            violations.append("training_offline_simulation")
+        return violations
     violations: List[str] = []
     steps = metrics.get("optimizer_steps")
     if not isinstance(steps, (int, float)) or isinstance(steps, bool) or steps <= 0:
@@ -112,10 +157,22 @@ def decide(inputs: AcceptanceInput) -> DecisionResult:
         violations.append("quality_baseline_missing")
 
     reward_result = compute_reward(quality, hardware, parent_hardware, inputs.reward_weights)
+    # Energy telemetry is optional for this phase.  Preserve the missing
+    # field in the reward evidence, but do not turn ``energy_j=None`` into a
+    # fake failure or invent a value just to make the scalar reward finite.
     for missing in reward_result.missing:
-        violations.append("metric_%s_missing" % missing)
-    if inputs.research_grade and reward_result.reward is None:
-        violations.append("research_grade_metrics_missing")
+        if missing != "E":
+            violations.append("metric_%s_missing" % missing)
+    if inputs.research_grade:
+        core_metrics = {
+            "quality_score": quality,
+            "latency_s": _get(hardware, "latency_s"),
+            "peak_memory_gb": _get(hardware, "peak_memory_gb"),
+        }
+        if _target(inputs.target, "max_model_size_gb") is not None:
+            core_metrics["model_size_gb"] = _get(hardware, "model_size_gb")
+        if any(not isinstance(value, (int, float)) or isinstance(value, bool) for value in core_metrics.values()):
+            violations.append("research_grade_core_metrics_missing")
 
     efficiency_passed = False
     for name, threshold in inputs.efficiency_thresholds.items():
@@ -139,9 +196,26 @@ def decide(inputs: AcceptanceInput) -> DecisionResult:
         elif limit is not None and measured is None:
             violations.append("metric_%s_missing" % measured_name)
 
-    complete_metrics = reward_result.reward is not None
+    # Pareto/search evidence needs Q/L/M/S.  E is an optional objective when
+    # the host cannot expose power telemetry; it remains None in the record.
+    core_metric_values = [
+        quality,
+        _get(hardware, "latency_s"),
+        _get(hardware, "peak_memory_gb"),
+    ]
+    if _target(inputs.target, "max_model_size_gb") is not None:
+        core_metric_values.append(_get(hardware, "model_size_gb"))
+    complete_metrics = all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in core_metric_values
+    )
+    execution_violations = tuple(
+        item
+        for item in violations
+        if item.startswith(("training_", "quantize_"))
+    )
     if violations:
-        status = "rejected" if any(item.startswith("training_") or item in {"quality_gate", "generation_valid", "decode_success", "temporal_gate", "efficiency_gate"} for item in violations) else "evaluated_candidate"
+        status = "rejected" if execution_violations or any(item in {"quality_gate", "generation_valid", "decode_success", "temporal_gate", "efficiency_gate"} for item in violations) else "evaluated_candidate"
         accepted = False
     elif not inputs.research_grade:
         status = "evaluated_candidate"
@@ -149,7 +223,30 @@ def decide(inputs: AcceptanceInput) -> DecisionResult:
     else:
         status = "accepted"
         accepted = True
-    pareto_eligible = bool(accepted and complete_metrics)
+    pareto_eligible = bool(complete_metrics and not any(
+        item.startswith(("training_", "quantize_"))
+        or item in {"quality_gate", "generation_valid", "decode_success", "temporal_gate"}
+        for item in violations
+    ))
+    if accepted:
+        continuation_status = "final_accept"
+        advance = True
+    elif any(
+        item.startswith(("training_", "quantize_"))
+        or item in {"quality_gate", "generation_valid", "decode_success", "temporal_gate"}
+        for item in violations
+    ):
+        continuation_status = "reject"
+        advance = False
+    elif inputs.on_pareto_front:
+        continuation_status = "pareto_keep"
+        advance = True
+    elif complete_metrics:
+        continuation_status = "exploratory_keep"
+        advance = True
+    else:
+        continuation_status = "reject"
+        advance = False
     return DecisionResult(
         status=status,
         accepted=accepted,
@@ -158,5 +255,6 @@ def decide(inputs: AcceptanceInput) -> DecisionResult:
         pareto_eligible=pareto_eligible,
         reward_terms=reward_result.terms,
         missing_metrics=reward_result.missing,
+        continuation_status=continuation_status,
+        advance=advance,
     )
-

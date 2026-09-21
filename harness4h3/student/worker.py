@@ -295,13 +295,25 @@ class RealH3TeacherBackend:
 
     offline_simulation = False
 
-    def __init__(self, comfyui_root: Path, cache_dir: Path, *, dtype: torch.dtype = torch.bfloat16):
+    def __init__(
+        self,
+        comfyui_root: Path,
+        cache_dir: Path,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        teacher_targets_dir: Optional[Path] = None,
+    ):
         self.comfyui_root = Path(comfyui_root).resolve()
         self.cache_dir = Path(cache_dir).resolve()
         self.dtype = dtype
+        self.teacher_targets_dir = Path(teacher_targets_dir).resolve() if teacher_targets_dir else None
         self.adapter = None
 
     def load_teacher(self, checkpoint: Path, device: torch.device) -> Any:
+        if self.teacher_targets_dir is not None:
+            if not self.teacher_targets_dir.is_dir():
+                raise StudentTrainingError("teacher_targets_missing", str(self.teacher_targets_dir))
+            return {"precomputed_teacher_targets": True}
         from h3_training.adapters.real_h3 import RealMiniMaxH3Adapter
 
         self.adapter = RealMiniMaxH3Adapter(self.comfyui_root, device=str(device), dtype=self.dtype)
@@ -318,6 +330,27 @@ class RealH3TeacherBackend:
         max_steps: int,
         device: torch.device,
     ) -> Iterable[StudentBatch]:
+        if self.teacher_targets_dir is not None:
+            paths = sorted(self.teacher_targets_dir.glob("*.pt"))
+            if not paths:
+                raise StudentTrainingError("teacher_targets_missing", str(self.teacher_targets_dir))
+            for index in range(max_steps):
+                try:
+                    raw = torch.load(paths[index % len(paths)], map_location="cpu", weights_only=False)
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    raise StudentTrainingError("teacher_targets_corrupt", str(exc)) from exc
+                if not isinstance(raw, Mapping):
+                    raise StudentTrainingError("teacher_targets_corrupt", "target item must be a mapping")
+                required = ("latent", "conditioning", "timestep", "target")
+                if any(name not in raw for name in required):
+                    raise StudentTrainingError("teacher_targets_corrupt", "target item is missing required tensors")
+                yield StudentBatch(
+                    latent=torch.as_tensor(raw["latent"]).to(device=device, dtype=self.dtype),
+                    conditioning=torch.as_tensor(raw["conditioning"]).to(device=device, dtype=self.dtype),
+                    timestep=torch.as_tensor(raw["timestep"]).to(device=device, dtype=torch.float32),
+                    target=torch.as_tensor(raw["target"]).to(device=device, dtype=self.dtype),
+                )
+            return
         if self.adapter is None:
             raise StudentTrainingError("h3_adapter_unavailable", "real H3 adapter was not initialized")
         paths = sorted(self.cache_dir.glob("*.pt"))

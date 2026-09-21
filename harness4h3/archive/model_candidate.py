@@ -22,6 +22,40 @@ class ModelCandidate:
     status: str
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
+    @property
+    def model_id(self) -> str:
+        return self.id
+
+    @property
+    def parent_model_id(self) -> Optional[str]:
+        return self.parent_id
+
+    @property
+    def architecture(self) -> str:
+        return self.state.architecture_name
+
+    @property
+    def parameter_count(self) -> Optional[int]:
+        return self.state.parameter_count
+
+    @property
+    def quantization(self) -> Mapping[str, Any]:
+        return self.state.quantization
+
+    @property
+    def training_method(self) -> Optional[str]:
+        value = self.metadata.get("training_method") if isinstance(self.metadata, Mapping) else None
+        value = value or self.state.provenance.get("training_method")
+        return str(value) if value else None
+
+    @property
+    def algorithm_state(self) -> Mapping[str, Any]:
+        return self.state.algorithm_state
+
+    @property
+    def provenance(self) -> Mapping[str, Any]:
+        return self.state.provenance
+
     def __post_init__(self) -> None:
         if not MODEL_ID_PATTERN.fullmatch(self.id):
             raise ValueError("invalid model candidate id %r" % self.id)

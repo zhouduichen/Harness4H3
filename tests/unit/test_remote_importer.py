@@ -9,6 +9,7 @@ def test_successful_training_result_is_unvalidated_without_evaluation():
         {
             "status": "success",
             "metrics": {"optimizer_steps": 1, "gradient_norm": 0.2, "child_sha256": "d" * 64},
+            "cost": {"wall_time_s": 12.0, "gpu_hours": 1.5},
             "output_state": {
                 "model_id": "M0006",
                 "parent_model_id": "M0005",
@@ -20,6 +21,7 @@ def test_successful_training_result_is_unvalidated_without_evaluation():
     assert record.status == "training_only_unvalidated"
     assert record.operator == "step_distill"
     assert record.reward is None
+    assert record.training["cost"]["gpu_hours"] == 1.5
 
 
 def test_failed_result_preserves_failure_and_does_not_create_child():
@@ -47,4 +49,3 @@ def test_importer_is_idempotent_and_keeps_corrupt_items_separate(tmp_path):
     assert len(first.corrupt) == 1
     assert second.skipped_duplicates == 1
     assert len(list(store.read())) == 1
-

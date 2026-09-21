@@ -8,14 +8,22 @@ student:
   worker_python: /home/intern/miniconda3/envs/comfy/bin/python
   worker_device: auto
   worker_gpu_wait_s: 1800
-  worker_min_free_memory_gb: 44.3
+  # H3 teacher is FSDP-sharded across three cards; this is the per-rank lease.
+  worker_min_free_memory_gb: 20.0
   worker_student_min_free_memory_gb: 20.0
+  teacher_world_size: 3
+  teacher_rank_min_free_memory_gb: 20.0
+  controller_handoff:
+    hold_file: /home/intern/huangjiahao/Harness4H3-rsi/work/remote-h3-controller-20260914/.controller-handoff-hold.json
+    release_file: /home/intern/huangjiahao/Harness4H3-rsi/work/remote-h3-controller-20260914/.controller-release.json
+    worker_lease_file: /home/intern/huangjiahao/Harness4H3-rsi/work/remote-h3-controller-20260914/.h3-worker-gpu-lease.json
   remote_campaign_root: /home/intern/huangjiahao/Harness4H3/work/student-campaign
   remote_config_path: /home/intern/huangjiahao/Harness4H3/configs/student-campaign.yaml
   vae_name: minimax_h3_video_vae_fp16.safetensors
   local_output_root: var/student-campaign
   experience_path: var/student-campaign/experience.jsonl
   max_rounds: 4
+  min_rounds_before_success: 2
   max_failures: 8
   max_steps: 32
   controller:

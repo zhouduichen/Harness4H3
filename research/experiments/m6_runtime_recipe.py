@@ -54,6 +54,47 @@ def _load_runtime_gene(root: Path) -> Mapping[str, Any]:
     return raw if isinstance(raw, Mapping) and raw.get("status") else {}
 
 
+def _load_prior_campaign(path_value: Optional[str]) -> Mapping[str, Any]:
+    if not path_value:
+        return {}
+    try:
+        raw = json.loads(Path(path_value).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(raw, Mapping):
+        return {}
+    iterations = []
+    for item in raw.get("iterations") or []:
+        if not isinstance(item, Mapping):
+            continue
+        if not item.get("operator"):
+            continue
+        not_evaluated = not item.get("split_results") or bool(item.get("split_errors"))
+        iterations.append(
+            {
+                "experiment_id": item.get("experiment_id"),
+                "operator": item.get("operator"),
+                "operator_args": dict(item.get("operator_args") or {}),
+                "outcome": "not_evaluated" if not_evaluated else item.get("outcome"),
+                "failure_type": item.get("failure_type"),
+                "optimization_conclusion": "none" if not_evaluated else "evaluated",
+                "reason": item.get("accept_reject_reason"),
+            }
+        )
+    return {
+        "campaign_id": raw.get("campaign_id") or Path(path_value).parent.name,
+        "status": raw.get("campaign_classification") or raw.get("status"),
+        "termination_reason": raw.get("termination_reason"),
+        "optimization_conclusion": (
+            "inconclusive_no_optimization_conclusion"
+            if not any(item.get("split_results") for item in raw.get("iterations") or [])
+            else "evaluated"
+        ),
+        "source_path": str(Path(path_value)),
+        "experiments": iterations,
+    }
+
+
 def _controller_plan(
     args: argparse.Namespace,
     target: Any,
@@ -182,11 +223,23 @@ def main() -> int:
     parser.add_argument("--max-iterations", type=int, default=8)
     parser.add_argument("--max-failed-experiments", type=int, default=5)
     parser.add_argument("--repetitions", type=int, default=1)
+    parser.add_argument("--campaign-id", default="M6-Campaign")
+    parser.add_argument("--prior-campaign", default=None)
+    parser.add_argument("--preflight-record", default=None)
     args = parser.parse_args()
     if args.max_iterations <= 0 or args.max_failed_experiments < 0:
         raise ValueError("iteration and failure budgets must be positive/non-negative")
 
     root = Path(__file__).resolve().parents[2]
+    prior_campaign = _load_prior_campaign(args.prior_campaign)
+    preflight: Mapping[str, Any] = {}
+    if args.preflight_record:
+        try:
+            loaded_preflight = json.loads(Path(args.preflight_record).read_text(encoding="utf-8"))
+            if isinstance(loaded_preflight, Mapping):
+                preflight = loaded_preflight
+        except (OSError, ValueError, TypeError):
+            preflight = {"status": "unreadable", "path": str(args.preflight_record)}
     config = load_config(root / args.config)
     target = load_target_profile(root / args.target)
     tasks = load_tasks(config.runtime.tasks_path)
@@ -294,6 +347,7 @@ def main() -> int:
             )
 
     payload: Dict[str, Any] = {
+        "campaign_id": args.campaign_id,
         "harness": {
             "version": HARNESS_VERSION,
             "status": HARNESS_STATUS,
@@ -318,10 +372,21 @@ def main() -> int:
         "human_intervention_count": 0,
         "system_candidates": [candidate.to_dict() for candidate in system_store.lineage()],
         "iterations": [],
+        "prior_campaigns": [dict(prior_campaign)] if prior_campaign else [],
+        "preflight": dict(preflight),
         "experience_influence_evidence": experience_influence_evidence,
         "gpu_hours_available": False,
     }
     recent: List[Mapping[str, Any]] = [{"stage": "M5.5", "evaluation": dict(m55_evaluation)}]
+    if prior_campaign:
+        recent.append({"stage": "prior_campaign", **dict(prior_campaign)})
+        experience_influence_evidence.append(
+            {
+                "source_campaign_id": prior_campaign.get("campaign_id"),
+                "source_status": prior_campaign.get("status"),
+                "lesson": "backend timeout produced no optimization conclusion; prior operator/config remains eligible",
+            }
+        )
     recent.extend(experiment_history)
     accepted = False
     accepted_system_candidate_id: Optional[str] = None

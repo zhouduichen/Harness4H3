@@ -5,6 +5,10 @@ import pytest
 from harness4h3.controller.round_policy import (
     RoundPolicy,
     RoundPolicyValidationError,
+    mark_round_policy_stop,
+    normalize_round_policy_progress,
+    record_round_policy_trial,
+    round_policy_budget_status,
     validate_round_policy,
 )
 
@@ -73,3 +77,35 @@ def test_round_policy_rejects_unregistered_operator_and_gpu_sum():
             evaluation_digest="sha256:eval",
             gpu_count=4,
         )
+
+
+def test_round_policy_progress_counts_completed_trials_once_and_survives_restart():
+    policy = RoundPolicy.from_dict(policy_payload())
+    progress = normalize_round_policy_progress(policy)
+
+    progress, counted = record_round_policy_trial(policy, progress, "exp-1", 1.25)
+    assert counted is True
+    assert progress["trials_completed"] == 1
+    assert progress["gpu_hours_used"] == pytest.approx(1.25)
+
+    duplicate, counted = record_round_policy_trial(policy, progress, "exp-1", 99.0)
+    assert counted is False
+    assert duplicate == progress
+
+    progress, counted = record_round_policy_trial(policy, progress, "exp-2", 0.5)
+    assert counted is True
+    assert round_policy_budget_status(policy, progress) == "budget_exhausted"
+    restored = normalize_round_policy_progress(policy, progress)
+    assert restored == progress
+
+
+def test_round_policy_progress_resets_for_a_new_round_and_records_explicit_stop():
+    policy = RoundPolicy.from_dict(policy_payload())
+    old = {"round_id": "R0001", "trials_completed": 99, "gpu_hours_used": 99.0}
+    progress = normalize_round_policy_progress(policy, old)
+    assert progress["trials_completed"] == 0
+    assert round_policy_budget_status(policy, progress) is None
+
+    stopped = mark_round_policy_stop(policy, progress, "critical_regression")
+    assert stopped["stop_reason"] == "critical_regression"
+    assert round_policy_budget_status(policy, stopped) == "critical_regression"
