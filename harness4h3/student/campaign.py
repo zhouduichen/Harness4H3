@@ -768,6 +768,13 @@ class StudentCampaign:
             handle.flush()
             os.fsync(handle.fileno())
 
+    def _control_round_dir(self, round_index: int, candidate_id: str, fidelity: str) -> Path:
+        """Use a worker-safe flat name for local and SSH round adapters."""
+
+        safe_candidate = "".join(character if character.isalnum() or character in "-_" else "_" for character in str(candidate_id))
+        safe_fidelity = "".join(character if character.isalnum() or character in "-_" else "_" for character in str(fidelity))
+        return self.output_root / ("student_%04d_%s_%s" % (round_index, safe_candidate, safe_fidelity))
+
     def _run_control_plane(self, *, max_rounds: int) -> CampaignResult:
         from ..campaign.adapters import StudentCampaignAdapter
         from ..campaign.base import ActorIdentity
@@ -938,35 +945,45 @@ class StudentCampaign:
                         }
                         candidate_decisions.append(decision)
                         continue
-                    validation = adapter.validate(reviewed_candidate, self.output_root / round_id / candidate.candidate_id)
-                    trace.append(
-                        "training.started",
-                        round_id=round_id,
-                        experiment_id=reviewed_candidate.experiment_id,
-                        candidate_id=reviewed_candidate.candidate_id,
-                        parent_candidate_id=reviewed_candidate.parent_candidate_id,
-                        actor=self.campaign_base.controller_identity,
-                        payload={"fidelity": self.fidelity_schedule[0], "validation": dict(validation)},
-                        evidence_ids=(str(validation.get("manifest_digest")),),
-                    )
-                    execution = adapter.execute(
+                    validation = adapter.validate(
                         reviewed_candidate,
-                        self.fidelity_schedule[0],
-                        self.output_root / round_id / candidate.candidate_id,
+                        self._control_round_dir(round_index, reviewed_candidate.candidate_id, "validate"),
                     )
-                    public_execution = self._control_public_execution(execution)
-                    training_obj = execution.get("_training_result")
-                    evaluation_obj = execution.get("_evaluation")
-                    trace.append(
-                        "training.completed",
-                        round_id=round_id,
-                        experiment_id=reviewed_candidate.experiment_id,
-                        candidate_id=reviewed_candidate.candidate_id,
-                        parent_candidate_id=reviewed_candidate.parent_candidate_id,
-                        actor=self.campaign_base.controller_identity,
-                        payload=public_execution.get("training") or {},
-                        evidence_ids=(str(public_execution.get("training", {}).get("child_checkpoint") or "training")),
-                    )
+                    execution = None
+                    public_execution = {}
+                    training_obj = None
+                    evaluation_obj = None
+                    for fidelity in self.fidelity_schedule:
+                        trace.append(
+                            "training.started",
+                            round_id=round_id,
+                            experiment_id=reviewed_candidate.experiment_id,
+                            candidate_id=reviewed_candidate.candidate_id,
+                            parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                            actor=self.campaign_base.controller_identity,
+                            payload={"fidelity": fidelity, "validation": dict(validation)},
+                            evidence_ids=(str(validation.get("manifest_digest")),),
+                        )
+                        execution = adapter.execute(
+                            reviewed_candidate,
+                            fidelity,
+                            self._control_round_dir(round_index, reviewed_candidate.candidate_id, fidelity),
+                        )
+                        public_execution = self._control_public_execution(execution)
+                        training_obj = execution.get("_training_result")
+                        evaluation_obj = execution.get("_evaluation")
+                        trace.append(
+                            "training.completed",
+                            round_id=round_id,
+                            experiment_id=reviewed_candidate.experiment_id,
+                            candidate_id=reviewed_candidate.candidate_id,
+                            parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                            actor=self.campaign_base.controller_identity,
+                            payload={"fidelity": fidelity, **(public_execution.get("training") or {})},
+                            evidence_ids=(str(public_execution.get("training", {}).get("child_checkpoint") or "training")),
+                        )
+                        if training_obj is None or getattr(training_obj, "status", "failed") != "success":
+                            break
                     training_payload = public_execution.get("training") or {}
                     trace.append(
                         "training.metric",
@@ -1004,7 +1021,7 @@ class StudentCampaign:
                         candidate_id=reviewed_candidate.candidate_id,
                         parent_candidate_id=reviewed_candidate.parent_candidate_id,
                         actor=self.campaign_base.evaluator_identity,
-                        payload={"fidelity": self.fidelity_schedule[0]},
+                        payload={"fidelity": public_execution.get("fidelity", self.fidelity_schedule[-1])},
                         evidence_ids=(),
                     )
                     trace.append(
@@ -1017,7 +1034,13 @@ class StudentCampaign:
                         payload=public_execution.get("evaluation") or {},
                         evidence_ids=(str(public_execution.get("evaluation", {}).get("video_path") or "evaluation")),
                     )
-                    evidence_items = list(adapter.verify(reviewed_candidate, execution, self.output_root / round_id / candidate.candidate_id))
+                    evidence_items = list(
+                        adapter.verify(
+                            reviewed_candidate,
+                            execution,
+                            self._control_round_dir(round_index, reviewed_candidate.candidate_id, execution.get("fidelity", self.fidelity_schedule[-1])),
+                        )
+                    )
                     evaluation_valid = bool(getattr(evaluation_obj, "valid", False))
                     evaluation_promotable = bool(getattr(evaluation_obj, "promotable", False))
                     evidence_items.append(MetricEvidence("evaluation_promotable", "student-adapter-v1", str(self.output_root / round_id / candidate.candidate_id), 1.0 if evaluation_promotable else 0.0, evaluation_promotable, "student-evaluator", "server", True))
@@ -1035,6 +1058,16 @@ class StudentCampaign:
                         objectives=objectives,
                         min_rounds_met=round_index >= self.min_rounds_before_success,
                     )
+                    evaluation_failure = None
+                    if not evaluation_valid or not evaluation_promotable:
+                        evaluation_failure = attributor.attribute(
+                            "evaluation",
+                            {
+                                "failure_code": getattr(evaluation_obj, "failure_code", None) or "metric_missing",
+                                "message": getattr(evaluation_obj, "message", "evaluation did not produce promotable evidence"),
+                            },
+                            decision_obj.evidence_ids,
+                        )
                     decision = {
                         "candidate_id": reviewed_candidate.candidate_id,
                         "parent_candidate_id": reviewed_candidate.parent_candidate_id,
@@ -1048,6 +1081,9 @@ class StudentCampaign:
                         "predicted_metric_delta": dict(reviewed_candidate.predicted_metric_delta),
                         "review": review.to_dict(),
                     }
+                    if evaluation_failure is not None:
+                        decision["failure_code"] = evaluation_failure.failure_code
+                        decision["failure"] = evaluation_failure.to_dict()
                     candidate_decisions.append(decision)
                     self._append_control_experience(reviewed_candidate, evidence_map, decision_obj, round_index=round_index)
                     trace.append(
