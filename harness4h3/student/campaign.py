@@ -945,6 +945,16 @@ class StudentCampaign:
                         failure = attributor.attribute("training", public_execution.get("training") or {"failure_code": "training_failed"}, ())
                         decision = {"candidate_id": reviewed_candidate.candidate_id, "promotable": False, "target_satisfied": False, "failure_code": failure.failure_code, "failure": failure.to_dict()}
                         candidate_decisions.append(decision)
+                        trace.append(
+                            "campaign.replanned",
+                            round_id=round_id,
+                            experiment_id=reviewed_candidate.experiment_id,
+                            candidate_id=reviewed_candidate.candidate_id,
+                            parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                            actor=self.campaign_base.controller_identity,
+                            payload={"failure": failure.to_dict(), "action": "retain_parent"},
+                            evidence_ids=failure.evidence_ids,
+                        )
                         continue
                     trace.append(
                         "evaluation.completed",

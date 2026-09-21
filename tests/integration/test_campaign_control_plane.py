@@ -80,6 +80,34 @@ class FakeWorker:
         )
 
 
+class RecoveringWorker(FakeWorker):
+    def __init__(self):
+        self.calls = 0
+
+    def run(self, manifest, round_dir):
+        self.calls += 1
+        if self.calls <= 3:
+            return TrainingResult(
+                status="failed",
+                proposal_digest=manifest.proposal_digest,
+                compiler_digest=manifest.manifest_digest,
+                parent_sha256="0" * 64,
+                child_sha256=None,
+                child_checkpoint=None,
+                optimizer_steps=0,
+                initial_loss=None,
+                final_loss=None,
+                gradient_norm=None,
+                wall_time_s=0.1,
+                peak_memory_gb=0.0,
+                changed_parameter_count=0,
+                offline_simulation=True,
+                failure_code="worker_oom",
+                message="scripted transient OOM",
+            )
+        return super().run(manifest, round_dir)
+
+
 class FakeEvaluator:
     def evaluate(self, checkpoint, round_dir):
         return StudentEvaluation(
@@ -161,3 +189,33 @@ def test_control_plane_runs_batch_review_gate_and_persists_lineage(tmp_path):
     assert any(item["event_type"] == "parent.selected" for item in events)
     assert all(item["base_digest"] == base.digest for item in events)
 
+
+def test_control_plane_recovery_keeps_parent_until_verified_child(tmp_path):
+    snapshot = CapabilitySnapshot((
+        Capability("distill", "training", "scripted", {}, "V2", True, ""),
+        Capability("dmd2", "training", "scripted", {}, "V2", True, ""),
+    ))
+    base = make_base(
+        target_profile={"id": "edge", "quality": {"min_quality_score": 0.7}},
+        capability_snapshot=snapshot.to_dict(),
+    )
+    result = StudentCampaign(
+        BatchProvider(),
+        FakeCompiler(),
+        RecoveringWorker(),
+        FakeEvaluator(),
+        output_root=tmp_path,
+        campaign_base=base,
+        capability_snapshot=snapshot,
+        review_pipeline=ReviewPipeline(Advocate(), Critical(), Modifier(), base, max_rounds=1),
+        max_failures=2,
+    ).run(max_rounds=2)
+
+    assert result.status == "target_satisfied"
+    assert result.target_satisfied is True
+    assert any(item.get("failure_code") == "worker_oom" for item in result.candidate_decisions)
+    events = [json.loads(line) for line in (tmp_path / "decision-trace.jsonl").read_text().splitlines()]
+    selected = [item for item in events if item["event_type"] == "parent.selected"]
+    assert selected[-1]["payload"]["generation"] == 1
+    assert selected[-1]["parent_candidate_id"] == "M0000"
+    assert any(item["event_type"] == "campaign.replanned" and item["payload"].get("failure", {}).get("failure_code") == "worker_oom" for item in events)

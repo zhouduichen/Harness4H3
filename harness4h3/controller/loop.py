@@ -117,6 +117,7 @@ class OptimizationLoop:
         self.continuation = ContinuationPolicy(exploration_enabled=exploration_enabled)
         self.require_real_evidence = bool(require_real_evidence)
         self.validation = ValidationPipeline()
+        self._legacy_trace = None
 
     def run(
         self,
@@ -126,6 +127,11 @@ class OptimizationLoop:
         initial_candidate: ModelCandidate,
         checkpoint_hook: Optional[Callable[[SessionState], None]] = None,
     ) -> OptimizationResult:
+        from ..campaign.adapters import LegacyH3CampaignAdapter
+
+        self._legacy_trace = LegacyH3CampaignAdapter(self.operators, self.run_root, target).trace(
+            session_id, self.controller, self.evaluator
+        )
         state = self._load_or_initialize(session_id, target, budget, initial_candidate)
         current = self.models.get(state.current_model_id)
         current_system = self.systems.get(state.current_system_id)
@@ -155,6 +161,15 @@ class OptimizationLoop:
             except ControllerProviderError as exc:
                 state = self._transition(state, LoopState.VALIDATE)
                 error = PlanValidationError("controller_failure", str(exc))
+                self._legacy_event(
+                    "campaign.replanned",
+                    round_id=None,
+                    experiment_id=None,
+                    candidate_id=current.id,
+                    parent_candidate_id=current.parent_id,
+                    actor=self._legacy_trace.base.controller_identity,
+                    payload={"failure_code": error.code, "message": str(error)},
+                )
                 state = self._record_validation_failure(state, target, current, {}, error)
                 self._checkpoint(state)
                 if checkpoint_hook:
@@ -169,6 +184,15 @@ class OptimizationLoop:
                 if validated.plan.parent_system_id and validated.plan.parent_system_id != current_system.id:
                     raise PlanValidationError("policy_invalid", "plan parent does not match current system")
             except PlanValidationError as exc:
+                self._legacy_event(
+                    "proposal.validated",
+                    round_id=None,
+                    experiment_id=str(raw_plan.get("experiment_id")) if isinstance(raw_plan, Mapping) else None,
+                    candidate_id=current.id,
+                    parent_candidate_id=current.parent_id,
+                    actor=self._legacy_trace.base.controller_identity,
+                    payload={"ok": False, "error_code": exc.code, "message": str(exc)},
+                )
                 state = self._record_validation_failure(state, target, current, raw_plan, exc)
                 self._checkpoint(state)
                 if checkpoint_hook:
@@ -181,6 +205,24 @@ class OptimizationLoop:
                 continue
 
             plan = validated.plan
+            self._legacy_event(
+                "proposal.generated",
+                round_id=None,
+                experiment_id=plan.experiment_id,
+                candidate_id=None,
+                parent_candidate_id=current.id,
+                actor=self._legacy_trace.base.controller_identity,
+                payload=plan.to_dict(),
+            )
+            self._legacy_event(
+                "proposal.validated",
+                round_id=None,
+                experiment_id=plan.experiment_id,
+                candidate_id=None,
+                parent_candidate_id=current.id,
+                actor=self._legacy_trace.base.controller_identity,
+                payload={"ok": True, "estimated_cost": asdict(validated.estimated_cost), "plan": plan.to_dict()},
+            )
             fingerprint = self._experiment_fingerprint(current_system, plan, target)
             if not plan.repeat_for_statistics:
                 prior_fingerprints = {
@@ -229,6 +271,15 @@ class OptimizationLoop:
             state = self._transition(state, LoopState.EXECUTE)
             child_id = self.models.next_id()
             child_system_id = self.systems.next_id()
+            self._legacy_event(
+                "training.started",
+                round_id=None,
+                experiment_id=plan.experiment_id,
+                candidate_id=child_id,
+                parent_candidate_id=current.id,
+                actor=self._legacy_trace.base.controller_identity,
+                payload={"operator": plan.operator, "operator_args": plan.operator_args},
+            )
             operator_result = self.operators.execute(
                 plan.operator,
                 current,
@@ -244,6 +295,15 @@ class OptimizationLoop:
                 ),
             )
             self._write_json(experiment_dir / "operator_result.json", operator_result.to_dict())
+            self._legacy_event(
+                "training.completed",
+                round_id=None,
+                experiment_id=plan.experiment_id,
+                candidate_id=child_id,
+                parent_candidate_id=current.id,
+                actor=self._legacy_trace.base.controller_identity,
+                payload=operator_result.to_dict(),
+            )
             if operator_result.ok and self.require_real_evidence and not self._has_real_evidence(operator_result):
                 operator_result = OperatorResult(
                     "failed",
@@ -256,6 +316,15 @@ class OptimizationLoop:
                 )
                 self._write_json(experiment_dir / "operator_result.json", operator_result.to_dict())
             if not operator_result.ok:
+                self._legacy_event(
+                    "campaign.replanned",
+                    round_id=None,
+                    experiment_id=plan.experiment_id,
+                    candidate_id=child_id,
+                    parent_candidate_id=current.id,
+                    actor=self._legacy_trace.base.controller_identity,
+                    payload={"failure_code": operator_result.failure_type or "operator_failure", "message": operator_result.message},
+                )
                 state = self._record_operator_failure(
                     state, target, current, plan, operator_result, fingerprint=fingerprint
                 )
@@ -309,6 +378,15 @@ class OptimizationLoop:
                     benchmark_recipe=self._benchmark_recipe(child_system),
                 )
                 self._write_json(experiment_dir / "evaluation.json", evaluation.to_dict())
+                self._legacy_event(
+                    "evaluation.completed",
+                    round_id=None,
+                    experiment_id=plan.experiment_id,
+                    candidate_id=child.id,
+                    parent_candidate_id=current.id,
+                    actor=self._legacy_trace.base.evaluator_identity,
+                    payload=evaluation.to_dict(),
+                )
                 state = self._transition(state, LoopState.UPDATE_PARETO)
                 front_ids = [
                     entry.candidate_id
@@ -334,6 +412,15 @@ class OptimizationLoop:
                     benchmark_recipe=self._benchmark_recipe(child_system),
                 )
                 self._write_json(experiment_dir / "evaluation.json", evaluation.to_dict())
+                self._legacy_event(
+                    "evaluation.completed",
+                    round_id=None,
+                    experiment_id=plan.experiment_id,
+                    candidate_id=current.id,
+                    parent_candidate_id=current.id,
+                    actor=self._legacy_trace.base.evaluator_identity,
+                    payload=evaluation.to_dict(),
+                )
                 state = self._transition(state, LoopState.UPDATE_PARETO)
                 front_ids = [
                     entry.candidate_id
@@ -374,6 +461,15 @@ class OptimizationLoop:
             if keep:
                 self.models.set_active(next_model_id)
                 self.systems.set_active(next_system_id)
+                self._legacy_event(
+                    "parent.selected",
+                    round_id=None,
+                    experiment_id=plan.experiment_id,
+                    candidate_id=next_model_id,
+                    parent_candidate_id=current.id,
+                    actor=self._legacy_trace.base.controller_identity,
+                    payload={"candidate_id": next_model_id, "generation": child.generation if child else current.generation},
+                )
             failed = not keep
             new_budget = state.budget.consume(operator_result.cost, failed=failed, controller_calls=1)
             decision = self._decision(
@@ -400,6 +496,15 @@ class OptimizationLoop:
                 repeat_for_statistics=plan.repeat_for_statistics,
             )
             self.experiments.append(record)
+            self._legacy_event(
+                "gate.decided",
+                round_id=None,
+                experiment_id=plan.experiment_id,
+                candidate_id=child.id if child else current.id,
+                parent_candidate_id=current.id,
+                actor=self._legacy_trace.base.evaluator_identity,
+                payload={"decision": dict(decision), "evaluation": evaluation.to_dict() if evaluation else None},
+            )
             failure_counts = dict(state.failure_counts)
             if decision_failure:
                 failure_counts[decision_failure] = failure_counts.get(decision_failure, 0) + 1
@@ -876,7 +981,42 @@ class OptimizationLoop:
             current_system_id=state.current_system_id,
         )
 
+    def _legacy_event(
+        self,
+        event_type: str,
+        *,
+        round_id: Optional[str],
+        experiment_id: Optional[str],
+        candidate_id: Optional[str],
+        parent_candidate_id: Optional[str],
+        actor: Any,
+        payload: Mapping[str, Any],
+        evidence_ids: Optional[List[str]] = None,
+    ) -> None:
+        if self._legacy_trace is None:
+            return
+        self._legacy_trace.append(
+            event_type,
+            round_id=round_id,
+            experiment_id=experiment_id,
+            candidate_id=candidate_id,
+            parent_candidate_id=parent_candidate_id,
+            actor=actor,
+            payload=dict(payload),
+            evidence_ids=tuple(evidence_ids or ()),
+        )
+
     def _finish(self, state: SessionState, status: str) -> OptimizationResult:
+        if self._legacy_trace is not None:
+            self._legacy_event(
+                "campaign.stopped",
+                round_id=None,
+                experiment_id=None,
+                candidate_id=state.current_model_id,
+                parent_candidate_id=None,
+                actor=self._legacy_trace.base.controller_identity,
+                payload={"reason": status, "current_model_id": state.current_model_id},
+            )
         finished = SessionState(
             state.session_id,
             state.target_profile_id,

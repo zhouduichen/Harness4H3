@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol, Sequence, Tuple
 
@@ -10,7 +11,8 @@ from ..student.compiler import CompileManifest
 from ..student.evaluator import StudentEvaluation
 from ..student.proposal import StudentProposal
 from ..student.worker import TrainingResult
-from .base import ActorIdentity
+from .base import ActorIdentity, CampaignBase, canonical_digest
+from .events import DecisionTrace
 from .gates import MetricEvidence
 from .proposals import CandidateEnvelope
 
@@ -153,6 +155,64 @@ class LegacyH3CampaignAdapter:
         self.registry = registry
         self.output_root = Path(output_root)
         self.target = target
+
+    def build_base(self, session_id: str, controller: Any, evaluator: Any) -> CampaignBase:
+        """Load one immutable base or create it before the legacy loop starts."""
+
+        base_path = self.output_root / ("campaign-%s-base.json" % str(session_id))
+        snapshot = self.capability_snapshot(self.registry, {})
+        controller_identity = ActorIdentity(
+            str(getattr(controller, "provider_name", "legacy-controller")),
+            str(getattr(controller, "model_name", controller.__class__.__name__)),
+            str(getattr(controller, "version", "legacy-v1")),
+        )
+        evaluator_identity = ActorIdentity(
+            "legacy-evaluator",
+            evaluator.__class__.__name__,
+            str(getattr(evaluator, "version", "legacy-v1")),
+        )
+        critic_identity = ActorIdentity("legacy-critic", "fixed-critical-v1", "1")
+        if critic_identity in {controller_identity, evaluator_identity}:
+            critic_identity = ActorIdentity("legacy-critic", "fixed-critical-v2", "1")
+        if base_path.is_file():
+            base = CampaignBase.from_dict(json.loads(base_path.read_text(encoding="utf-8")))
+            if base.target_profile_hash != canonical_digest(self.target.to_dict()):
+                raise ValueError("campaign verification base changed; start a new legacy campaign")
+            return base
+        base = CampaignBase(
+            schema_version=1,
+            campaign_id="legacy-%s" % str(session_id),
+            target_profile=self.target.to_dict(),
+            target_profile_hash=canonical_digest(self.target.to_dict()),
+            verifier_bank={"version": "legacy-composite-v1", "evaluator": evaluator.__class__.__name__},
+            verifier_bank_hash=canonical_digest({"version": "legacy-composite-v1", "evaluator": evaluator.__class__.__name__}),
+            dataset_manifest_hash=canonical_digest({"dataset": "legacy-evaluator-inputs"}),
+            evaluation_recipe_hash=canonical_digest({"recipe": "legacy-composite-v1", "target": self.target.id}),
+            controller_identity=controller_identity,
+            critic_identity=critic_identity,
+            evaluator_identity=evaluator_identity,
+            prompt_version="legacy-controller-v1",
+            capability_snapshot=snapshot.to_dict(),
+        )
+        base_path.parent.mkdir(parents=True, exist_ok=True)
+        base_path.write_text(json.dumps(base.to_dict(), sort_keys=True) + "\n", encoding="utf-8")
+        return base
+
+    def trace(self, session_id: str, controller: Any, evaluator: Any) -> DecisionTrace:
+        base = self.build_base(session_id, controller, evaluator)
+        trace = DecisionTrace(self.output_root / ("campaign-%s-decision-trace.jsonl" % str(session_id)), base)
+        if not trace.read():
+            trace.append(
+                "campaign.created",
+                round_id=None,
+                experiment_id=None,
+                candidate_id=None,
+                parent_candidate_id=None,
+                actor=base.controller_identity,
+                payload={"base_digest": base.digest, "adapter": "legacy-h3", "session_id": str(session_id)},
+                evidence_ids=(),
+            )
+        return trace
 
     @staticmethod
     def capability_snapshot(registry: Any, backend_status: Optional[Mapping[str, Mapping[str, Any]]] = None):

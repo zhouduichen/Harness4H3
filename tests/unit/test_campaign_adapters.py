@@ -3,6 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from harness4h3.campaign.adapters import StudentCampaignAdapter
+from harness4h3.campaign.adapters import LegacyH3CampaignAdapter
+from harness4h3.operators.model_evolution import build_model_evolution_registry
+from harness4h3.target.profile import TargetProfile
 from harness4h3.student.evaluator import StudentEvaluation
 from harness4h3.student.worker import TrainingResult
 from tests.unit.test_student_proposal import valid_payload
@@ -58,3 +61,19 @@ def test_student_adapter_maps_compile_train_eval_to_shared_evidence(tmp_path):
     assert result["v3"]["video_decodable"] is True
     evidence = adapter.verify(None, result, tmp_path / "round")
     assert any(item.metric_name == "video_decodable" for item in evidence)
+
+
+def test_legacy_adapter_persists_immutable_base_and_trace(tmp_path):
+    class Controller:
+        provider_name = "controller"
+        model_name = "model"
+
+    class Evaluator:
+        version = "evaluator-v1"
+
+    target = TargetProfile("edge", "mobile", "scripted")
+    adapter = LegacyH3CampaignAdapter(build_model_evolution_registry(), tmp_path, target)
+    trace = adapter.trace("session-1", Controller(), Evaluator())
+    assert trace.read()[0].event_type == "campaign.created"
+    assert (tmp_path / "campaign-session-1-base.json").is_file()
+    assert trace.base.target_profile_hash
