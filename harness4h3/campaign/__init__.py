@@ -4,6 +4,15 @@ from .base import ActorIdentity, CampaignBase, CampaignBaseError, canonical_dige
 from .capabilities import Capability, CapabilityRegistry, CapabilitySnapshot
 from .events import DecisionEvent, DecisionTrace, TraceIntegrityError
 from .proposals import CandidateEnvelope, ProposalBatch, ProposalValidationError, ProposalValidationReport, validate_batch
+from .reviews import (
+    AdvocateReport,
+    CandidateReview,
+    CriticalReport,
+    ReviewContractError,
+    ReviewIdentityError,
+    ReviewPipeline,
+    RevisionRecord,
+)
 
 __all__ = [
     "ActorIdentity",
@@ -13,12 +22,19 @@ __all__ = [
     "CapabilityRegistry",
     "CapabilitySnapshot",
     "CandidateEnvelope",
+    "AdvocateReport",
+    "CandidateReview",
+    "CriticalReport",
     "DecisionEvent",
     "DecisionTrace",
     "TraceIntegrityError",
     "ProposalBatch",
     "ProposalValidationError",
     "ProposalValidationReport",
+    "ReviewContractError",
+    "ReviewIdentityError",
+    "ReviewPipeline",
+    "RevisionRecord",
     "canonical_digest",
     "canonical_json",
     "validate_batch",
