@@ -3,6 +3,8 @@
 from .base import ActorIdentity, CampaignBase, CampaignBaseError, canonical_digest, canonical_json
 from .capabilities import Capability, CapabilityRegistry, CapabilitySnapshot
 from .events import DecisionEvent, DecisionTrace, TraceIntegrityError
+from .failures import FailureAttributor, FailureReport
+from .gates import AcceptanceGate, GateDecision, MetricEvidence, pareto_dominates
 from .proposals import CandidateEnvelope, ProposalBatch, ProposalValidationError, ProposalValidationReport, validate_batch
 from .reviews import (
     AdvocateReport,
@@ -27,6 +29,12 @@ __all__ = [
     "CriticalReport",
     "DecisionEvent",
     "DecisionTrace",
+    "FailureAttributor",
+    "FailureReport",
+    "AcceptanceGate",
+    "GateDecision",
+    "MetricEvidence",
+    "pareto_dominates",
     "TraceIntegrityError",
     "ProposalBatch",
     "ProposalValidationError",
