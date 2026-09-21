@@ -95,6 +95,186 @@ class MetricBankResult:
         }
 
 
+@dataclass(frozen=True)
+class TeacherRelativeMetrics:
+    """Teacher-relative quality and incumbent-comparable efficiency evidence."""
+
+    quality_ratio: float
+    latency: float
+    memory: float
+    size: float
+    energy: Optional[float] = None
+    efficiency_deltas: Mapping[str, float] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "quality_ratio": float(self.quality_ratio),
+            "latency": float(self.latency),
+            "memory": float(self.memory),
+            "size": float(self.size),
+            "energy": float(self.energy) if self.energy is not None else None,
+            "efficiency_deltas": dict(self.efficiency_deltas),
+        }
+
+
+@dataclass(frozen=True)
+class ParetoDecision:
+    """Strict promotion decision for a valid Student candidate."""
+
+    promotable: bool
+    reason: str
+    reward: Optional[float]
+    incumbent_reward: Optional[float]
+    reward_delta: Optional[float]
+    improved_metrics: tuple[str, ...] = ()
+    regressed_metrics: tuple[str, ...] = ()
+    quality_floor_ratio: float = 0.90
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "promotable": self.promotable,
+            "reason": self.reason,
+            "reward": self.reward,
+            "incumbent_reward": self.incumbent_reward,
+            "reward_delta": self.reward_delta,
+            "improved_metrics": list(self.improved_metrics),
+            "regressed_metrics": list(self.regressed_metrics),
+            "quality_floor_ratio": self.quality_floor_ratio,
+        }
+
+
+def _bounded_log_delta(reference: float, value: float) -> float:
+    if reference <= 0 or value <= 0:
+        raise ValueError("metric references must be positive")
+    return max(-1.0, min(1.0, math.log(float(reference) / float(value))))
+
+
+def teacher_relative_metrics(
+    student: Mapping[str, float],
+    teacher: Mapping[str, float],
+) -> TeacherRelativeMetrics:
+    """Normalize a Student observation against the H3 teacher quality baseline."""
+
+    quality = _finite(student.get("quality"))
+    teacher_quality = _finite(teacher.get("quality"), positive=True)
+    latency = _finite(student.get("latency"), positive=True)
+    memory = _finite(student.get("memory"), positive=True)
+    size = _finite(student.get("size"), positive=True)
+    if quality is None or teacher_quality is None or latency is None or memory is None or size is None:
+        raise ValueError("quality, latency, memory, and size are required for teacher-relative metrics")
+    energy = _finite(student.get("energy"), positive=True)
+    teacher_energy = _finite(teacher.get("energy"), positive=True)
+    deltas = {}
+    for name, value in (("latency", latency), ("memory", memory), ("size", size)):
+        reference = _finite(teacher.get(name), positive=True)
+        if reference is not None:
+            deltas[name] = _bounded_log_delta(reference, value)
+    if energy is not None and teacher_energy is not None:
+        deltas["energy"] = _bounded_log_delta(teacher_energy, energy)
+    return TeacherRelativeMetrics(
+        quality_ratio=float(quality / teacher_quality),
+        latency=float(latency),
+        memory=float(memory),
+        size=float(size),
+        energy=float(energy) if energy is not None else None,
+        efficiency_deltas=deltas,
+    )
+
+
+def _relative_score(
+    quality_ratio: float,
+    values: Mapping[str, float],
+    incumbent: Mapping[str, float],
+) -> float:
+    terms = {"quality": 0.60 * float(quality_ratio)}
+    weights = {"latency": 0.20, "memory": 0.10, "size": 0.05, "energy": 0.05}
+    present = [name for name in weights if name in values and name in incumbent]
+    scale = 1.0 / (0.60 + sum(weights[name] for name in present))
+    score = terms["quality"]
+    for name in present:
+        score += weights[name] * _bounded_log_delta(float(incumbent[name]), float(values[name]))
+    return float(score * scale)
+
+
+def normalize_reward(
+    relative: TeacherRelativeMetrics,
+    *,
+    incumbent: Mapping[str, float],
+) -> float:
+    """Compute a bounded quality-efficiency score against the current incumbent."""
+
+    values = {
+        "latency": relative.latency,
+        "memory": relative.memory,
+        "size": relative.size,
+    }
+    if relative.energy is not None:
+        values["energy"] = relative.energy
+    return _relative_score(relative.quality_ratio, values, incumbent)
+
+
+def pareto_decision(
+    *,
+    candidate: Mapping[str, float],
+    incumbent: Optional[Mapping[str, float]],
+    quality_floor_ratio: float = 0.90,
+    min_reward_delta: float = 0.02,
+    material_efficiency_gain: float = 0.05,
+    max_regression: float = 0.02,
+) -> ParetoDecision:
+    """Decide whether a valid Student improves the quality-efficiency frontier."""
+
+    quality_ratio = _finite(candidate.get("quality_ratio"))
+    if quality_ratio is None or quality_ratio < float(quality_floor_ratio):
+        return ParetoDecision(False, "quality_floor_failed", None, None, None, quality_floor_ratio=quality_floor_ratio)
+    if incumbent is None:
+        return ParetoDecision(True, "initial_feasible", None, None, None, quality_floor_ratio=quality_floor_ratio)
+    incumbent_quality = _finite(incumbent.get("quality_ratio"))
+    if incumbent_quality is None:
+        raise ValueError("incumbent quality_ratio is required")
+    comparable = ("latency", "memory", "size", "energy")
+    improved = []
+    regressed = []
+    for name in comparable:
+        candidate_value = _finite(candidate.get(name), positive=True)
+        incumbent_value = _finite(incumbent.get(name), positive=True)
+        if candidate_value is None or incumbent_value is None:
+            continue
+        relative_change = (float(incumbent_value) - float(candidate_value)) / float(incumbent_value)
+        if relative_change >= float(material_efficiency_gain):
+            improved.append(name)
+        if relative_change < -float(max_regression):
+            regressed.append(name)
+    candidate_values = {name: candidate[name] for name in comparable if name in candidate and name in incumbent}
+    incumbent_values = {name: incumbent[name] for name in comparable if name in candidate and name in incumbent}
+    reward = _relative_score(quality_ratio, candidate_values, incumbent_values)
+    incumbent_reward = _relative_score(incumbent_quality, incumbent_values, incumbent_values)
+    reward_delta = reward - incumbent_reward
+    quality_improved = quality_ratio >= incumbent_quality + 0.01 and not regressed
+    material_pareto = bool(improved) and not regressed and quality_ratio >= incumbent_quality - float(max_regression)
+    if reward_delta >= float(min_reward_delta) or material_pareto or quality_improved:
+        return ParetoDecision(
+            True,
+            "pareto_improvement",
+            reward,
+            incumbent_reward,
+            reward_delta,
+            tuple(improved),
+            tuple(regressed),
+            quality_floor_ratio,
+        )
+    return ParetoDecision(
+        False,
+        "pareto_rejected",
+        reward,
+        incumbent_reward,
+        reward_delta,
+        tuple(improved),
+        tuple(regressed),
+        quality_floor_ratio,
+    )
+
+
 class MetricVerifierBank:
     """Extract Q/L/M/E/S from evaluator evidence and aggregate a reward.
 
@@ -199,4 +379,9 @@ __all__ = [
     "MetricObservation",
     "MetricRewardWeights",
     "MetricVerifierBank",
+    "ParetoDecision",
+    "TeacherRelativeMetrics",
+    "normalize_reward",
+    "pareto_decision",
+    "teacher_relative_metrics",
 ]

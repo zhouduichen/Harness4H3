@@ -10,7 +10,9 @@ from pathlib import Path
 from harness4h3.student.campaign import StudentCampaign, build_student_proposal_provider
 from harness4h3.student.compiler import StudentCompiler
 from harness4h3.student.config import load_student_campaign_config
+from harness4h3.student.evaluation_manifest import build_manifest
 from harness4h3.student.remote import (
+    RemoteStudentBaseline,
     RemoteStudentEvaluator,
     RemoteStudentRetention,
     RemoteStudentWorker,
@@ -33,21 +35,39 @@ def main(argv=None) -> int:
         timeout_s=config.controller.timeout_s,
     )
     output_root = Path(config.remote_campaign_root)
-    campaign = StudentCampaign(
-        provider,
-        StudentCompiler(config.target),
-        RemoteStudentWorker(config, client),
-        RemoteStudentEvaluator(config, client),
-        goal=config.goal,
-        target=config.target,
-        output_root=output_root,
-        experience_path=output_root / "experience.jsonl",
-        max_failures=config.max_failures,
-        min_rounds_before_success=config.min_rounds_before_success,
-        retention_handler=RemoteStudentRetention(config, client).retain,
-    )
     result_path = output_root / "campaign-result.json"
     try:
+        manifest_path = Path(config.evaluation_manifest)
+        if not manifest_path.is_file():
+            build_manifest(Path(config.h3_cache_dir), manifest_path)
+        campaign_args = (
+            provider,
+            StudentCompiler(config.target),
+            RemoteStudentWorker(config, client),
+            RemoteStudentEvaluator(config, client),
+        )
+        campaign_kwargs = dict(
+            goal=config.goal,
+            target=config.target,
+            output_root=output_root,
+            experience_path=output_root / "experience.jsonl",
+            max_failures=config.max_failures,
+            min_rounds_before_success=config.min_rounds_before_success,
+            retention_handler=RemoteStudentRetention(config, client).retain,
+        )
+        if config.quality_backend == "clip_temporal":
+            teacher_baseline = RemoteStudentBaseline(config, client).run()
+            campaign_kwargs.update(
+                teacher_baseline=teacher_baseline,
+                quality_policy={
+                    "quality_floor_ratio": config.quality_floor_ratio,
+                    "min_reward_delta": config.min_reward_delta,
+                    "material_efficiency_gain": config.material_efficiency_gain,
+                    "max_metric_regression": config.max_metric_regression,
+                    "no_improvement_patience": config.no_improvement_patience,
+                },
+            )
+        campaign = StudentCampaign(*campaign_args, **campaign_kwargs)
         result = campaign.run(max_rounds=args.max_rounds or config.max_rounds)
         exit_code = 0 if result.status == "success" else 1
         payload = result.to_dict()

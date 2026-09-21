@@ -122,6 +122,11 @@ class RemoteStudentEvaluator:
             self.config.controller_worker_lease_file or "",
             "--release-controller-handoff",
         )
+        if self.config.evaluation_manifest:
+            command += ("--evaluation-manifest", self.config.evaluation_manifest)
+        if self.config.clip_model_path:
+            command += ("--clip-model-path", self.config.clip_model_path)
+        command += ("--quality-backend", self.config.quality_backend)
         self.client.run(command, timeout_s=max(3600.0, self.config.controller.timeout_s * 20), check=False)
         raw = self.client.read_json(remote_result)
         if not isinstance(raw, Mapping):
@@ -140,6 +145,44 @@ class RemoteStudentEvaluator:
             reward=float(raw["reward"]) if raw.get("reward") is not None else None,
             reward_terms={str(key): float(value) for key, value in dict(raw.get("reward_terms") or {}).items()},
         )
+
+
+class RemoteStudentBaseline:
+    """Run the fixed trusted H3 calibration worker on the server."""
+
+    def __init__(self, config: StudentCampaignConfig, client: SSHClient):
+        self.config = config
+        self.client = client
+
+    def run(self) -> Mapping[str, Any]:
+        root = PurePosixPath(self.config.remote_campaign_root)
+        output = str(root / "teacher-baseline")
+        result_path = str(root / "teacher-baseline-result.json")
+        command = tuple(self.config.baseline_command) + (
+            "--evaluation-manifest",
+            str(self.config.evaluation_manifest),
+            "--output",
+            output,
+            "--result",
+            result_path,
+            "--comfyui-root",
+            self.config.remote.comfyui_root,
+            "--cache-dir",
+            self.config.h3_cache_dir,
+            "--vae-name",
+            self.config.vae_name,
+            "--clip-model-path",
+            str(self.config.clip_model_path),
+            "--device",
+            self.config.worker_device,
+            "--wait-for-gpu-s",
+            "600",
+        )
+        self.client.run(command, timeout_s=max(3600.0, self.config.controller.timeout_s * 20), check=False)
+        raw = self.client.read_json(result_path)
+        if not isinstance(raw, Mapping) or raw.get("status") != "success":
+            raise RuntimeError("teacher baseline failed: %s" % dict(raw or {}))
+        return dict(raw)
 
 
 class RemoteStudentRetention:
@@ -227,4 +270,4 @@ class RemoteStudentSupervisor:
         return payload
 
 
-__all__ = ["RemoteStudentEvaluator", "RemoteStudentRetention", "RemoteStudentSupervisor", "RemoteStudentWorker"]
+__all__ = ["RemoteStudentBaseline", "RemoteStudentEvaluator", "RemoteStudentRetention", "RemoteStudentSupervisor", "RemoteStudentWorker"]

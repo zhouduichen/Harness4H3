@@ -55,3 +55,12 @@ def test_remote_paths_cannot_escape_configured_roots(tmp_path):
 def test_worker_device_must_be_a_cuda_index_or_auto(tmp_path):
     with pytest.raises(StudentConfigError, match="worker_device"):
         load_student_campaign_config(_write_config(tmp_path, worker_device="cuda:bad"))
+
+
+def test_clip_quality_backend_requires_local_model_path(tmp_path):
+    with pytest.raises(StudentConfigError, match="clip_model_path"):
+        load_student_campaign_config(_write_config(tmp_path, quality_backend="clip_temporal"))
+    config = load_student_campaign_config(
+        _write_config(tmp_path, quality_backend="clip_temporal", clip_model_path="/srv/models/clip")
+    )
+    assert config.evaluation_manifest == "/srv/harness/work/student/evaluation-manifest.json"

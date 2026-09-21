@@ -8,12 +8,13 @@ import time
 import tempfile
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence
 
 from .compiler import CompileError, CompileManifest, StudentCompiler
 from .evaluator import StudentEvaluation, append_experience, make_experience_record
+from .metrics import ParetoDecision, pareto_decision, teacher_relative_metrics
 from .proposal import StudentProposal, StudentTarget
 from .retention import apply_retention, retain_after_evaluation
 from .worker import TrainingResult
@@ -418,6 +419,26 @@ class CampaignResult:
         }
 
 
+@dataclass(frozen=True)
+class StudentQualityPolicy:
+    quality_floor_ratio: float = 0.90
+    min_reward_delta: float = 0.02
+    material_efficiency_gain: float = 0.05
+    max_metric_regression: float = 0.02
+    no_improvement_patience: int = 3
+
+    def __post_init__(self) -> None:
+        if not 0 < float(self.quality_floor_ratio) <= 1:
+            raise ValueError("quality_floor_ratio must be in (0, 1]")
+        if any(float(value) < 0 for value in (self.min_reward_delta, self.material_efficiency_gain, self.max_metric_regression)):
+            raise ValueError("quality policy margins must be non-negative")
+        if int(self.no_improvement_patience) <= 0:
+            raise ValueError("no_improvement_patience must be positive")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
@@ -462,6 +483,8 @@ class StudentCampaign:
         max_candidates: int = 5,
         min_candidates: int = 3,
         fidelity_schedule: Sequence[str] = ("F1",),
+        teacher_baseline: Optional[Mapping[str, Any]] = None,
+        quality_policy: Optional[Mapping[str, Any] | StudentQualityPolicy] = None,
     ):
         self.provider = provider
         self.compiler = compiler
@@ -483,6 +506,20 @@ class StudentCampaign:
         self.max_candidates = int(max_candidates)
         self.min_candidates = int(min_candidates)
         self.fidelity_schedule = tuple(str(item) for item in fidelity_schedule)
+        self.teacher_baseline = dict(teacher_baseline or {})
+        if isinstance(quality_policy, StudentQualityPolicy):
+            self.quality_policy = quality_policy
+        elif quality_policy is not None:
+            self.quality_policy = StudentQualityPolicy(**dict(quality_policy))
+        else:
+            self.quality_policy = None
+        if self.quality_policy is not None and not self.teacher_baseline:
+            raise ValueError("quality policy requires teacher_baseline")
+        self._incumbent: Optional[dict[str, Any]] = None
+        self._frontier: list[dict[str, Any]] = []
+        self._best_reward: Optional[float] = None
+        self._no_improvement_rounds = 0
+        self._improvement_count = 0
         if self.max_failures < 0:
             raise ValueError("max_failures must be non-negative")
         if self.min_rounds_before_success <= 0:
@@ -512,7 +549,7 @@ class StudentCampaign:
         prior_rounds: Sequence[Mapping[str, Any]] = (),
     ) -> Mapping[str, Any]:
         bounded_failures = [dict(item) for item in failures[-8:]]
-        return {
+        context = {
             "goal": self.goal,
             "round": round_index,
             "target": asdict(self.target),
@@ -521,12 +558,32 @@ class StudentCampaign:
             "failures": bounded_failures,
             "prior_rounds": [dict(item) for item in prior_rounds[-4:]],
         }
+        if self.quality_policy is not None:
+            context["optimization"] = {
+                "teacher_baseline": dict(self.teacher_baseline),
+                "incumbent": dict(self._incumbent or {}),
+                "frontier": [dict(item) for item in self._frontier[-4:]],
+                "best_reward": self._best_reward,
+                "no_improvement_rounds": self._no_improvement_rounds,
+                "quality_policy": self.quality_policy.to_dict(),
+            }
+        return context
 
     def _persist_resume(self, next_round: int, status: str, failures: Sequence[Mapping[str, Any]], seen: Sequence[str]) -> None:
-        _atomic_json(
-            self.resume_path,
-            {"next_round": next_round, "status": status, "failures": list(failures[-16:]), "seen_proposal_digests": list(seen[-16:])},
-        )
+        payload: dict[str, Any] = {
+            "next_round": next_round,
+            "status": status,
+            "failures": list(failures[-16:]),
+            "seen_proposal_digests": list(seen[-16:]),
+        }
+        if self.quality_policy is not None:
+            payload["teacher_baseline"] = dict(self.teacher_baseline)
+            payload["incumbent"] = dict(self._incumbent or {})
+            payload["frontier"] = [dict(item) for item in self._frontier]
+            payload["best_reward"] = self._best_reward
+            payload["no_improvement_rounds"] = self._no_improvement_rounds
+            payload["improvement_count"] = self._improvement_count
+        _atomic_json(self.resume_path, payload)
 
     def _load_resume(self) -> tuple[int, list[Mapping[str, Any]], list[str]]:
         if not self.resume_path.is_file():
@@ -537,6 +594,17 @@ class StudentCampaign:
             return 1, [], []
         if not isinstance(raw, Mapping) or raw.get("status") not in {"running", "worker_running", "failed"}:
             return 1, [], []
+        if self.quality_policy is not None:
+            stored_baseline = raw.get("teacher_baseline")
+            if isinstance(stored_baseline, Mapping) and stored_baseline:
+                self.teacher_baseline = dict(stored_baseline)
+            stored_incumbent = raw.get("incumbent")
+            self._incumbent = dict(stored_incumbent) if isinstance(stored_incumbent, Mapping) and stored_incumbent else None
+            stored_frontier = raw.get("frontier")
+            self._frontier = [dict(item) for item in stored_frontier if isinstance(item, Mapping)] if isinstance(stored_frontier, list) else []
+            self._best_reward = float(raw["best_reward"]) if raw.get("best_reward") is not None else None
+            self._no_improvement_rounds = int(raw.get("no_improvement_rounds", 0))
+            self._improvement_count = int(raw.get("improvement_count", 0))
         try:
             next_round = max(1, int(raw.get("next_round", 1)))
         except (TypeError, ValueError):
@@ -556,14 +624,94 @@ class StudentCampaign:
                     event = json.loads(line)
                     if not isinstance(event, Mapping):
                         continue
-                    if event.get("status") == "failed":
-                        failures.append({"round": event.get("round"), "failure_code": event.get("failure_code"), "message": event.get("message", "")})
+                    if event.get("status") in {"failed", "rejected"}:
+                        failures.append(
+                            {
+                                "round": event.get("round"),
+                                "failure_code": event.get("failure_code"),
+                                "message": event.get("message", ""),
+                                "type": "optimization_rejected" if event.get("status") == "rejected" else "failure",
+                            }
+                        )
                     digest = event.get("proposal_digest")
                     if digest:
                         seen.append(str(digest))
             except (OSError, TypeError, ValueError, json.JSONDecodeError):
                 pass
         return next_round, [dict(item) for item in failures if isinstance(item, Mapping)], [str(item) for item in seen]
+
+    @property
+    def strict_optimization(self) -> bool:
+        return self.quality_policy is not None
+
+    @staticmethod
+    def _optimization_metrics(evaluation: StudentEvaluation) -> Mapping[str, float]:
+        raw = evaluation.metric_evidence.get("optimization_metrics")
+        if not isinstance(raw, Mapping):
+            raise ValueError("metric_evidence_missing: optimization_metrics is required")
+        result = {}
+        for name in ("quality", "latency", "memory", "size", "energy"):
+            if raw.get(name) is not None:
+                result[name] = float(raw[name])
+        required = ("quality", "latency", "memory", "size")
+        if any(name not in result for name in required):
+            raise ValueError("metric_evidence_missing: required optimization metric is absent")
+        return result
+
+    def _apply_quality_policy(self, evaluation: StudentEvaluation) -> tuple[StudentEvaluation, Optional[ParetoDecision], Optional[dict[str, float]]]:
+        if not self.strict_optimization:
+            return evaluation, None, None
+        if not evaluation.valid:
+            return evaluation, None, None
+        try:
+            candidate_metrics = dict(self._optimization_metrics(evaluation))
+            teacher_metrics = dict(self.teacher_baseline.get("optimization_metrics") or self.teacher_baseline)
+            relative = teacher_relative_metrics(candidate_metrics, teacher_metrics)
+            candidate = {
+                "quality_ratio": relative.quality_ratio,
+                "latency": relative.latency,
+                "memory": relative.memory,
+                "size": relative.size,
+            }
+            if relative.energy is not None:
+                candidate["energy"] = relative.energy
+            policy = self.quality_policy
+            assert policy is not None
+            decision = pareto_decision(
+                candidate=candidate,
+                incumbent=self._incumbent,
+                quality_floor_ratio=policy.quality_floor_ratio,
+                min_reward_delta=policy.min_reward_delta,
+                material_efficiency_gain=policy.material_efficiency_gain,
+                max_regression=policy.max_metric_regression,
+            )
+        except (TypeError, ValueError, KeyError) as exc:
+            return replace(evaluation, promotable=False, failure_code="metric_evidence_missing", message=str(exc)), None, None
+        evidence = dict(evaluation.metric_evidence)
+        evidence["teacher_relative"] = relative.to_dict()
+        evidence["optimization_decision"] = decision.to_dict()
+        return replace(
+            evaluation,
+            promotable=decision.promotable,
+            failure_code=None if decision.promotable else decision.reason,
+            message=decision.reason,
+            metric_evidence=evidence,
+            reward=decision.reward,
+        ), decision, candidate
+
+    def _update_quality_state(self, candidate: Mapping[str, float], decision: ParetoDecision) -> None:
+        if decision.promotable:
+            self._incumbent = dict(candidate)
+            self._frontier.append(dict(candidate))
+            if decision.reward is not None:
+                self._best_reward = max(self._best_reward or decision.reward, decision.reward)
+            if decision.reason == "pareto_improvement":
+                self._improvement_count += 1
+                self._no_improvement_rounds = 0
+            else:
+                self._no_improvement_rounds = 0
+        else:
+            self._no_improvement_rounds += 1
 
     @staticmethod
     def _round_failure(
@@ -1240,16 +1388,25 @@ class StudentCampaign:
                 else:
                     seen.append(proposal.digest)
                     compile_manifest = self._compile_round(proposal, round_dir)
-                    _atomic_json(
-                        self.resume_path,
-                        {
-                            "next_round": round_index,
-                            "status": "worker_running",
-                            "manifest": compile_manifest.to_dict(),
-                            "failures": list(failures[-16:]),
-                            "seen_proposal_digests": list(seen[-16:]),
-                        },
-                    )
+                    worker_resume: dict[str, Any] = {
+                        "next_round": round_index,
+                        "status": "worker_running",
+                        "manifest": compile_manifest.to_dict(),
+                        "failures": list(failures[-16:]),
+                        "seen_proposal_digests": list(seen[-16:]),
+                    }
+                    if self.quality_policy is not None:
+                        worker_resume.update(
+                            {
+                                "teacher_baseline": dict(self.teacher_baseline),
+                                "incumbent": dict(self._incumbent or {}),
+                                "frontier": [dict(item) for item in self._frontier],
+                                "best_reward": self._best_reward,
+                                "no_improvement_rounds": self._no_improvement_rounds,
+                                "improvement_count": self._improvement_count,
+                            }
+                        )
+                    _atomic_json(self.resume_path, worker_resume)
                     training = self.worker.run(compile_manifest, round_dir)
                     if training.status != "success":
                         failure_code = training.failure_code or "training_failed"
@@ -1260,6 +1417,9 @@ class StudentCampaign:
                             message = "worker reported success without a child checkpoint"
                         else:
                             evaluation = self.evaluator.evaluate(Path(training.child_checkpoint), round_dir)
+                            evaluation, policy_decision, policy_candidate = self._apply_quality_policy(evaluation)
+                            if self.strict_optimization and evaluation.valid and policy_decision is None:
+                                self._no_improvement_rounds += 1
                             failure_code = evaluation.failure_code
                             message = evaluation.message
                             outcome = "accepted" if evaluation.promotable else "rejected"
@@ -1290,6 +1450,8 @@ class StudentCampaign:
                                 if outcome != "accepted":
                                     apply_retention(decision)
                             if evaluation.promotable:
+                                if self.strict_optimization and policy_decision is not None and policy_candidate is not None:
+                                    self._update_quality_state(policy_candidate, policy_decision)
                                 rounds.append(CampaignRound(round_index, proposal, compile_manifest, training, evaluation, None, message))
                                 prior_rounds.append(
                                     {
@@ -1314,11 +1476,59 @@ class StudentCampaign:
                                         },
                                     }
                                 )
+                                if self.strict_optimization:
+                                    self._persist_resume(round_index + 1, "running", failures, seen)
+                                    if self._no_improvement_rounds >= self.quality_policy.no_improvement_patience:
+                                        status = "success" if self._improvement_count > 0 else "no_pareto_improvement"
+                                        stop_reason = "no_improvement_patience"
+                                        self._append_event({"round": round_index, "status": status, "failure_code": None if status == "success" else "no_pareto_improvement", "proposal_digest": proposal.digest, "llm_context": context, "optimization": {"incumbent": self._incumbent, "frontier": self._frontier}})
+                                        self._persist_resume(round_index + 1, status, failures, seen)
+                                        return CampaignResult(
+                                            status,
+                                            len(rounds),
+                                            tuple(rounds),
+                                            None if status == "success" else "no_pareto_improvement",
+                                            "effective optimization stopped after no-improvement patience",
+                                            status == "success",
+                                            status == "success",
+                                            stop_reason=stop_reason,
+                                        )
+                                    self._append_event({"round": round_index, "status": "accepted_intermediate", "failure_code": None, "proposal_digest": proposal.digest, "llm_context": context, "optimization": {"incumbent": self._incumbent, "frontier": self._frontier}})
+                                    continue
                                 if round_index >= self.min_rounds_before_success:
                                     self._append_event({"round": round_index, "status": "success", "failure_code": None, "proposal_digest": proposal.digest, "llm_context": context})
                                     self._persist_resume(round_index + 1, "success", failures, seen)
                                     return CampaignResult("success", round_index, tuple(rounds), None, "student accepted")
                                 self._append_event({"round": round_index, "status": "accepted_intermediate", "failure_code": None, "proposal_digest": proposal.digest, "llm_context": context})
+                                self._persist_resume(round_index + 1, "running", failures, seen)
+                                continue
+                            if self.strict_optimization and evaluation.valid:
+                                failures.append(
+                                    {
+                                        "round": round_index,
+                                        "failure_code": failure_code or "pareto_rejected",
+                                        "message": message,
+                                        "type": "optimization_rejected",
+                                        "teacher_relative": evaluation.metric_evidence.get("teacher_relative", {}),
+                                        "optimization_decision": evaluation.metric_evidence.get("optimization_decision", {}),
+                                    }
+                                )
+                                rounds.append(self._round_failure(round_index, proposal, compile_manifest, training, evaluation, failure_code or "pareto_rejected", message))
+                                self._append_event({"round": round_index, "status": "rejected", "failure_code": failure_code or "pareto_rejected", "message": message, "proposal_digest": proposal.digest, "llm_context": context, "optimization": {"incumbent": self._incumbent, "frontier": self._frontier}})
+                                if self._no_improvement_rounds >= self.quality_policy.no_improvement_patience:
+                                    status = "success" if self._improvement_count > 0 else "no_pareto_improvement"
+                                    stop_reason = "no_improvement_patience"
+                                    self._persist_resume(round_index + 1, status, failures, seen)
+                                    return CampaignResult(
+                                        status,
+                                        len(rounds),
+                                        tuple(rounds),
+                                        None if status == "success" else "no_pareto_improvement",
+                                        "effective optimization stopped after no-improvement patience",
+                                        status == "success",
+                                        status == "success",
+                                        stop_reason=stop_reason,
+                                    )
                                 self._persist_resume(round_index + 1, "running", failures, seen)
                                 continue
             except (ValueError, CompileError, OSError, TypeError, KeyError) as exc:
@@ -1335,6 +1545,19 @@ class StudentCampaign:
             self._persist_resume(round_index + 1, "running", failures, seen)
             if failure_count > self.max_failures:
                 break
+        if self.strict_optimization:
+            status = "success" if self._improvement_count > 0 else "no_pareto_improvement"
+            self._persist_resume(int(max_rounds) + 1, status, failures, seen)
+            return CampaignResult(
+                status,
+                len(rounds),
+                tuple(rounds),
+                None if status == "success" else "no_pareto_improvement",
+                "effective optimization reached the round budget",
+                status == "success",
+                status == "success",
+                stop_reason="campaign_budget_exhausted",
+            )
         status = "failed" if rounds else "no_rounds"
         self._persist_resume(int(max_rounds) + 1, status, failures, seen)
         return CampaignResult(status, len(rounds), tuple(rounds), last_failure, "campaign did not reach an accepted student")

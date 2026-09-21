@@ -22,10 +22,20 @@ student:
   vae_name: minimax_h3_video_vae_fp16.safetensors
   local_output_root: var/student-campaign
   experience_path: var/student-campaign/experience.jsonl
-  max_rounds: 4
-  min_rounds_before_success: 2
+  max_rounds: 8
+  min_rounds_before_success: 1
   max_failures: 8
-  max_steps: 32
+  max_steps: 256
+  # Strict optimization uses one fixed server-local manifest and the H3
+  # teacher as the quality/efficiency reference point.
+  evaluation_manifest: /home/intern/huangjiahao/Harness4H3/work/student-campaign/evaluation-manifest.json
+  clip_model_path: /data/models/clip-vit-large-patch14
+  quality_backend: clip_temporal
+  quality_floor_ratio: 0.90
+  min_reward_delta: 0.02
+  material_efficiency_gain: 0.05
+  max_metric_regression: 0.02
+  no_improvement_patience: 3
   controller:
     provider: vllm
     model: qwen3.5-controller

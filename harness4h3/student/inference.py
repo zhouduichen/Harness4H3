@@ -25,16 +25,33 @@ class StudentGenerationError(RuntimeError):
         self.message = str(message)
 
 
-def _load_prompt(cache_dir: Path, target: StudentTarget, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+def _resolve_cache_path(cache_dir: Path, cache_path: Optional[Path]) -> Path:
+    if cache_path is not None:
+        selected = Path(cache_path).resolve()
+        if not selected.is_file():
+            raise StudentGenerationError("cache_missing", "H3 cache item does not exist: %s" % selected)
+        return selected
     paths = sorted(Path(cache_dir).glob("*.pt"))
     if not paths:
         raise StudentGenerationError("cache_missing", "no H3 cache item under %s" % cache_dir)
+    return paths[0].resolve()
+
+
+def load_h3_cache_item(
+    cache_dir: Path,
+    target: StudentTarget,
+    device: torch.device,
+    dtype: torch.dtype,
+    *,
+    cache_path: Optional[Path] = None,
+) -> Mapping[str, Any]:
+    selected = _resolve_cache_path(cache_dir, cache_path)
     try:
-        raw = torch.load(paths[0], map_location="cpu", weights_only=False)
+        raw = torch.load(selected, map_location="cpu", weights_only=False)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise StudentGenerationError("cache_corrupt", str(exc)) from exc
     if not isinstance(raw, Mapping) or "prompt" not in raw or "video" not in raw:
-        raise StudentGenerationError("invalid_h3_cache", "cache item lacks prompt or video")
+        raise StudentGenerationError("invalid_h3_cache", "cache item lacks prompt or video: %s" % selected)
     prompt = torch.as_tensor(raw["prompt"])
     if prompt.ndim != 2 or prompt.shape[1] != target.condition_dim:
         raise StudentGenerationError("invalid_h3_conditioning", "expected prompt [tokens,%d], got %s" % (target.condition_dim, tuple(prompt.shape)))
@@ -50,7 +67,25 @@ def _load_prompt(cache_dir: Path, target: StudentTarget, device: torch.device, d
     expected = (1, target.latent_channels, target.latent_frames, target.latent_height, target.latent_width)
     if tuple(latent.shape) != expected:
         raise StudentGenerationError("student_target_mismatch", "H3 cache latent %s does not match target %s" % (tuple(latent.shape), expected))
-    return prompt.unsqueeze(0).to(device=device, dtype=dtype)
+    return {
+        "path": selected,
+        "prompt": prompt.unsqueeze(0).to(device=device, dtype=dtype),
+        "latent": latent,
+        "caption": str(raw.get("caption", "")).strip(),
+    }
+
+
+def _load_prompt(
+    cache_dir: Path,
+    target: StudentTarget,
+    device: torch.device,
+    dtype: torch.dtype,
+    *,
+    cache_path: Optional[Path] = None,
+) -> torch.Tensor:
+    return torch.as_tensor(
+        load_h3_cache_item(cache_dir, target, device, dtype, cache_path=cache_path)["prompt"]
+    )
 
 
 def load_student_model(
@@ -178,6 +213,7 @@ def generate_video(
     output_path: Path,
     *,
     device: Optional[str] = None,
+    cache_path: Optional[Path] = None,
     seed: int = 20260920,
 ) -> Mapping[str, Any]:
     started = time.perf_counter()
@@ -191,7 +227,7 @@ def generate_video(
         torch.cuda.set_device(selected)
         torch.cuda.reset_peak_memory_stats(selected)
     dtype = torch.bfloat16 if proposal.deployment.precision == "bf16" else torch.float16
-    prompt = _load_prompt(cache_dir, target, selected, dtype)
+    prompt = _load_prompt(cache_dir, target, selected, dtype, cache_path=cache_path)
     model = load_student_model(proposal, checkpoint, target, selected)
     latent = sample_student_latent(model, prompt, proposal, target, selected, seed=seed)
     del model
@@ -211,4 +247,12 @@ def generate_video(
     }
 
 
-__all__ = ["StudentGenerationError", "decode_video_latent", "generate_video", "load_student_model", "sample_student_latent", "write_video"]
+__all__ = [
+    "StudentGenerationError",
+    "decode_video_latent",
+    "generate_video",
+    "load_h3_cache_item",
+    "load_student_model",
+    "sample_student_latent",
+    "write_video",
+]

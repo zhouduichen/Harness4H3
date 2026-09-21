@@ -88,6 +88,15 @@ class StudentCampaignConfig:
     controller_hold_file: Optional[str] = None
     controller_release_file: Optional[str] = None
     controller_worker_lease_file: Optional[str] = None
+    evaluation_manifest: Optional[str] = None
+    clip_model_path: Optional[str] = None
+    quality_backend: str = "structural_proxy"
+    quality_floor_ratio: float = 0.90
+    min_reward_delta: float = 0.02
+    material_efficiency_gain: float = 0.05
+    max_metric_regression: float = 0.02
+    no_improvement_patience: int = 3
+    baseline_command: Tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -95,6 +104,7 @@ class StudentCampaignConfig:
         value["local_output_root"] = str(self.local_output_root)
         value["experience_path"] = str(self.experience_path)
         value["evaluation_command"] = list(self.evaluation_command)
+        value["baseline_command"] = list(self.baseline_command)
         value["remote"] = asdict(self.remote)
         return value
 
@@ -208,6 +218,32 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
     vae_name = str(student.get("vae_name", "minimax_h3_video_vae_fp16.safetensors")).strip()
     if not vae_name or "/" in vae_name or "\\" in vae_name:
         raise StudentConfigError("student.vae_name must be a model filename")
+    evaluation_manifest_raw = student.get("evaluation_manifest")
+    evaluation_manifest = (
+        _absolute_remote(evaluation_manifest_raw, "student.evaluation_manifest")
+        if evaluation_manifest_raw
+        else str(PurePosixPath(remote_campaign_root) / "evaluation-manifest.json")
+    )
+    _under(remote, evaluation_manifest, "student.evaluation_manifest")
+    clip_model_raw = student.get("clip_model_path")
+    clip_model_path = None
+    if clip_model_raw is not None:
+        clip_model_path = _absolute_remote(clip_model_raw, "student.clip_model_path")
+    quality_backend = str(student.get("quality_backend", "structural_proxy")).strip().lower()
+    if quality_backend not in {"clip_temporal", "structural_proxy"}:
+        raise StudentConfigError("student.quality_backend must be clip_temporal or structural_proxy")
+    if quality_backend == "clip_temporal" and not clip_model_path:
+        raise StudentConfigError("student.clip_model_path is required for clip_temporal")
+    try:
+        quality_floor_ratio = float(student.get("quality_floor_ratio", 0.90))
+        min_reward_delta = float(student.get("min_reward_delta", 0.02))
+        material_efficiency_gain = float(student.get("material_efficiency_gain", 0.05))
+        max_metric_regression = float(student.get("max_metric_regression", 0.02))
+        no_improvement_patience = int(student.get("no_improvement_patience", 3))
+    except (TypeError, ValueError) as exc:
+        raise StudentConfigError("student quality policy is invalid") from exc
+    if not 0 < quality_floor_ratio <= 1 or min_reward_delta < 0 or material_efficiency_gain < 0 or max_metric_regression < 0 or no_improvement_patience <= 0:
+        raise StudentConfigError("student quality policy is invalid")
     try:
         max_rounds = int(student.get("max_rounds", 4))
         max_failures = int(student.get("max_failures", 4))
@@ -223,6 +259,13 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         or min_rounds_before_success > max_rounds
     ):
         raise StudentConfigError("student round limits are invalid")
+    baseline_raw = student.get("baseline_command")
+    baseline_command = _command(
+        baseline_raw
+        if baseline_raw is not None
+        else [worker_python, str(PurePosixPath(remote.harness_root) / "tools" / "student_teacher_baseline_worker.py")],
+        "student.baseline_command",
+    )
     try:
         teacher_world_size = int(student.get("teacher_world_size", 3))
         teacher_rank_min_free_memory_gb = float(student.get("teacher_rank_min_free_memory_gb", 20.0))
@@ -273,6 +316,15 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         controller_hold_file=str(controller_hold_file) if controller_hold_file else None,
         controller_release_file=str(controller_release_file) if controller_release_file else None,
         controller_worker_lease_file=str(controller_worker_lease_file) if controller_worker_lease_file else None,
+        evaluation_manifest=evaluation_manifest,
+        clip_model_path=clip_model_path,
+        quality_backend=quality_backend,
+        quality_floor_ratio=quality_floor_ratio,
+        min_reward_delta=min_reward_delta,
+        material_efficiency_gain=material_efficiency_gain,
+        max_metric_regression=max_metric_regression,
+        no_improvement_patience=no_improvement_patience,
+        baseline_command=baseline_command,
     )
 
 
