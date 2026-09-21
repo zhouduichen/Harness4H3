@@ -161,8 +161,8 @@ def decode_video_latent(comfyui_root: Path, vae_name: str, latent: torch.Tensor)
         decoded = mapping["VAEDecodeTiled"]().decode(
             vae,
             {"samples": latent},
-            tile_size=256,
-            overlap=64,
+            tile_size=128,
+            overlap=32,
             temporal_size=8,
             temporal_overlap=2,
         )[0]

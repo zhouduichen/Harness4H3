@@ -87,6 +87,9 @@ def main(argv=None) -> int:
                         "resolution": [int(frames.shape[2]), int(frames.shape[1])],
                     }
                 )
+                del frames, latent
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
         quality = float(statistics.mean(float(item["quality"]["aggregate"]) for item in cases))
         hardware = {
             "latency_s": float(statistics.median(latencies)),
