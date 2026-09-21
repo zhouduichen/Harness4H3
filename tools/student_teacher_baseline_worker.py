@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import statistics
 import sys
 import time
@@ -65,31 +66,46 @@ def main(argv=None) -> int:
         )
         cases = []
         latencies = []
+        decoded_by_cache: dict[str, dict[str, Any]] = {}
         for case in manifest.cases:
-            cache_item = load_h3_cache_item(Path(args.cache_dir), target, device, torch.float32, cache_path=Path(case.cache_path))
+            cache_key = str(Path(case.cache_path).resolve())
             for seed in case.seeds:
-                started = time.perf_counter()
-                latent = torch.as_tensor(cache_item["latent"], device=device)
-                frames = decode_video_latent(Path(args.comfyui_root), args.vae_name, latent)
                 video_path = output_dir / "teacher-baseline" / ("%s-%d.mp4" % (case.case_id, seed))
-                write_video(frames, video_path)
-                latency = time.perf_counter() - started
-                evidence = quality_backend.evaluate(video_path, case.caption)
+                cached = decoded_by_cache.get(cache_key)
+                if cached is None:
+                    cache_item = load_h3_cache_item(Path(args.cache_dir), target, device, torch.float32, cache_path=Path(case.cache_path))
+                    started = time.perf_counter()
+                    latent = torch.as_tensor(cache_item["latent"], device=device)
+                    frames = decode_video_latent(Path(args.comfyui_root), args.vae_name, latent)
+                    source_path = output_dir / "teacher-baseline" / ("source-%04d.mp4" % (len(decoded_by_cache) + 1))
+                    write_video(frames, source_path)
+                    evidence = quality_backend.evaluate(source_path, case.caption)
+                    cached = {
+                        "video_path": str(source_path),
+                        "quality": evidence.to_dict(),
+                        "latency_s": time.perf_counter() - started,
+                        "frame_count": int(frames.shape[0]),
+                        "resolution": [int(frames.shape[2]), int(frames.shape[1])],
+                    }
+                    decoded_by_cache[cache_key] = cached
+                    del frames, latent
+                    if device.type == "cuda":
+                        torch.cuda.empty_cache()
+                shutil.copy2(cached["video_path"], video_path)
+                latency = float(cached["latency_s"])
+                evidence = dict(cached["quality"])
                 latencies.append(latency)
                 cases.append(
                     {
                         "case_id": case.case_id,
                         "seed": int(seed),
                         "video_path": str(video_path),
-                        "quality": evidence.to_dict(),
+                        "quality": evidence,
                         "latency_s": latency,
-                        "frame_count": int(frames.shape[0]),
-                        "resolution": [int(frames.shape[2]), int(frames.shape[1])],
+                        "frame_count": int(cached["frame_count"]),
+                        "resolution": list(cached["resolution"]),
                     }
                 )
-                del frames, latent
-                if device.type == "cuda":
-                    torch.cuda.empty_cache()
         quality = float(statistics.mean(float(item["quality"]["aggregate"]) for item in cases))
         hardware = {
             "latency_s": float(statistics.median(latencies)),

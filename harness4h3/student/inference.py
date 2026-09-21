@@ -25,6 +25,10 @@ class StudentGenerationError(RuntimeError):
         self.message = str(message)
 
 
+_VAE_CACHE: dict[tuple[str, str], Any] = {}
+_COMFY_INITIALIZED: set[str] = set()
+
+
 def _resolve_cache_path(cache_dir: Path, cache_path: Optional[Path]) -> Path:
     if cache_path is not None:
         selected = Path(cache_path).resolve()
@@ -149,12 +153,18 @@ def decode_video_latent(comfyui_root: Path, vae_name: str, latent: torch.Tensor)
     try:
         import nodes
 
-        initialized = nodes.init_extra_nodes(init_custom_nodes=False)
-        if inspect.isawaitable(initialized):
-            asyncio.run(initialized)
+        if root not in _COMFY_INITIALIZED:
+            initialized = nodes.init_extra_nodes(init_custom_nodes=False)
+            if inspect.isawaitable(initialized):
+                asyncio.run(initialized)
+            _COMFY_INITIALIZED.add(root)
         mapping = nodes.NODE_CLASS_MAPPINGS
         loader = mapping["VAELoader"]()
-        vae = loader.load_vae(str(vae_name))[0]
+        cache_key = (root, str(vae_name))
+        vae = _VAE_CACHE.get(cache_key)
+        if vae is None:
+            vae = loader.load_vae(str(vae_name))[0]
+            _VAE_CACHE[cache_key] = vae
         # Full-frame H3 VAE decoding can approach the capacity of a 48 GB
         # card even for the small fixed manifest. Tiled spatial+temporal
         # decoding keeps evaluation reproducible without changing the VAE.
