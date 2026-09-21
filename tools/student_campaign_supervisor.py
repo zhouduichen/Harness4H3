@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from harness4h3.student.campaign import StudentCampaign, build_student_proposal_provider
+from harness4h3.student.campaign import StudentCampaign, build_student_control_plane, build_student_proposal_provider
 from harness4h3.student.compiler import StudentCompiler
 from harness4h3.student.config import load_student_campaign_config
 from harness4h3.student.evaluation_manifest import build_manifest
@@ -69,6 +69,16 @@ def main(argv=None) -> int:
                     "no_improvement_patience": config.no_improvement_patience,
                 },
             )
+        campaign_base, capability_snapshot, review_pipeline = build_student_control_plane(
+            config, provider, output_root, campaign_kwargs.get("teacher_baseline")
+        )
+        campaign_kwargs.update(
+            campaign_base=campaign_base,
+            capability_snapshot=capability_snapshot,
+            review_pipeline=review_pipeline,
+            initial_parent_checkpoint=config.teacher_checkpoint,
+            fidelity_schedule=config.fidelity_schedule,
+        )
         campaign = StudentCampaign(*campaign_args, **campaign_kwargs)
         result = campaign.run(max_rounds=args.max_rounds or config.max_rounds)
         exit_code = 0 if result.status == "success" else 1

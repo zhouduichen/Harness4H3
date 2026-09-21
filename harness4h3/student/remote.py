@@ -25,7 +25,15 @@ class RemoteStudentWorker:
             raise ValueError("invalid Student round directory")
         return str(PurePosixPath(self.config.remote_campaign_root) / name)
 
-    def run(self, manifest: CompileManifest, round_dir: Path) -> TrainingResult:
+    def run(
+        self,
+        manifest: CompileManifest,
+        round_dir: Path,
+        *,
+        parent_checkpoint: str | Path | None = None,
+        parent_candidate_id: str | None = None,
+        fidelity: str = "F1",
+    ) -> TrainingResult:
         remote_dir = self._remote_round_dir(round_dir)
         remote_manifest = remote_dir + "/compile_manifest.json"
         remote_result = remote_dir + "/training-result.json"
@@ -67,7 +75,13 @@ class RemoteStudentWorker:
             self.config.controller_worker_lease_file or "",
             "--max-steps",
             str(self.config.max_steps),
+            "--fidelity",
+            str(fidelity),
+            "--parent-candidate-id",
+            str(parent_candidate_id or ""),
         )
+        if parent_checkpoint:
+            command += ("--parent-checkpoint", str(parent_checkpoint))
         self.client.run(command, timeout_s=max(3600.0, self.config.controller.timeout_s * 20), check=False)
         raw = self.client.read_json(remote_result)
         if not isinstance(raw, Mapping):

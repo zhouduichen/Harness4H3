@@ -53,11 +53,11 @@ from .operators.model_evolution import build_external_model_evolution_registry, 
 from .executor.local import LocalProcessExecutor
 from .target.profile import load_target_profile
 from research.experiments.remote_h3_closed_loop import RemoteCampaign
-from .student.campaign import StudentCampaign, build_student_proposal_provider
+from .student.campaign import StudentCampaign, build_student_control_plane, build_student_proposal_provider
 from .student.compiler import StudentCompiler
 from .student.config import StudentConfigError, load_student_campaign_config
 from .student.proposal import StudentProposal
-from .student.remote import RemoteStudentEvaluator, RemoteStudentRetention, RemoteStudentSupervisor, RemoteStudentWorker
+from .student.remote import RemoteStudentBaseline, RemoteStudentEvaluator, RemoteStudentRetention, RemoteStudentSupervisor, RemoteStudentWorker
 
 
 def _emit(value: Any, json_mode: bool) -> None:
@@ -563,6 +563,12 @@ def cmd_student_run(args: argparse.Namespace) -> int:
         base_url=config.controller.base_url,
         timeout_s=config.controller.timeout_s,
     )
+    if config.quality_backend != "clip_temporal":
+        raise StudentConfigError("student run requires quality_backend=clip_temporal for the semantic verifier")
+    teacher_baseline = RemoteStudentBaseline(config, client).run()
+    campaign_base, capability_snapshot, review_pipeline = build_student_control_plane(
+        config, provider, config.local_output_root, teacher_baseline
+    )
     campaign = StudentCampaign(
         provider,
         StudentCompiler(config.target),
@@ -575,6 +581,19 @@ def cmd_student_run(args: argparse.Namespace) -> int:
         max_failures=config.max_failures,
         min_rounds_before_success=config.min_rounds_before_success,
         retention_handler=RemoteStudentRetention(config, client).retain,
+        campaign_base=campaign_base,
+        capability_snapshot=capability_snapshot,
+        review_pipeline=review_pipeline,
+        initial_parent_checkpoint=config.teacher_checkpoint,
+        fidelity_schedule=config.fidelity_schedule,
+        teacher_baseline=teacher_baseline,
+        quality_policy={
+            "quality_floor_ratio": config.quality_floor_ratio,
+            "min_reward_delta": config.min_reward_delta,
+            "material_efficiency_gain": config.material_efficiency_gain,
+            "max_metric_regression": config.max_metric_regression,
+            "no_improvement_patience": config.no_improvement_patience,
+        },
     )
     result = campaign.run(max_rounds=args.max_rounds or config.max_rounds)
     _emit(result.to_dict(), args.json)

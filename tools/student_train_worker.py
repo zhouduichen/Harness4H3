@@ -145,6 +145,9 @@ def main(argv=None) -> int:
     parser.add_argument("--controller-release-file", default="")
     parser.add_argument("--controller-worker-lease-file", default="")
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--fidelity", default="F1")
+    parser.add_argument("--parent-checkpoint", default="")
+    parser.add_argument("--parent-candidate-id", default="")
     args = parser.parse_args(argv)
     if args.teacher_world_size < 2 or args.teacher_world_size > 3:
         parser.error("--teacher-world-size must be between 2 and 3")
@@ -191,6 +194,9 @@ def main(argv=None) -> int:
             device=selected_student_device,
             teacher_device=selected_teacher_device,
             student_device=selected_student_device,
+            parent_checkpoint=Path(args.parent_checkpoint) if args.parent_checkpoint else None,
+            parent_candidate_id=args.parent_candidate_id or None,
+            fidelity=args.fidelity,
         )
         if result.status == "success" and handoff_acquired:
             # Keep the Controller stopped until the independent evaluator

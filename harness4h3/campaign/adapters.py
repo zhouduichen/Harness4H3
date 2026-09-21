@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol, Sequence, Tuple
@@ -46,11 +47,47 @@ class StudentCampaignAdapter:
             raise ValueError("student proposal must be a mapping")
         return StudentProposal.from_dict(value)
 
-    def run_proposal(self, proposal: Any, round_dir: Path, *, fidelity: str = "F1") -> Mapping[str, Any]:
+    def _run_worker(
+        self,
+        compile_manifest: CompileManifest,
+        round_dir: Path,
+        *,
+        fidelity: str,
+        parent_checkpoint: str | Path | None,
+        parent_candidate_id: str | None,
+    ) -> TrainingResult:
+        """Call old test doubles and the new parent-aware worker safely."""
+
+        run = self.worker.run
+        parameters = inspect.signature(run).parameters
+        kwargs = {}
+        if "fidelity" in parameters:
+            kwargs["fidelity"] = fidelity
+        if "parent_checkpoint" in parameters:
+            kwargs["parent_checkpoint"] = parent_checkpoint
+        if "parent_candidate_id" in parameters:
+            kwargs["parent_candidate_id"] = parent_candidate_id
+        return run(compile_manifest, round_dir, **kwargs)
+
+    def run_proposal(
+        self,
+        proposal: Any,
+        round_dir: Path,
+        *,
+        fidelity: str = "F1",
+        parent_checkpoint: str | Path | None = None,
+        parent_candidate_id: str | None = None,
+    ) -> Mapping[str, Any]:
         parsed = self._proposal(proposal)
         round_dir = Path(round_dir)
         compile_manifest = self.compiler.compile(parsed, round_dir / "compile")
-        training = self.worker.run(compile_manifest, round_dir)
+        training = self._run_worker(
+            compile_manifest,
+            round_dir,
+            fidelity=fidelity,
+            parent_checkpoint=parent_checkpoint,
+            parent_candidate_id=parent_candidate_id,
+        )
         if not isinstance(training, TrainingResult):
             raise ValueError("Student worker must return TrainingResult")
         if training.status != "success" or not training.child_checkpoint:
@@ -63,6 +100,11 @@ class StudentCampaignAdapter:
                 "v1": {"graph_status": compile_manifest.graph_status, "parameter_count": compile_manifest.parameter_count},
                 "v2": training.to_dict(),
                 "v3": {"video_decodable": False},
+                "parent": {
+                    "candidate_id": parent_candidate_id,
+                    "checkpoint": str(parent_checkpoint) if parent_checkpoint else None,
+                    "fidelity": fidelity,
+                },
                 "_compile_manifest": compile_manifest,
                 "_training_result": training,
                 "_evaluation": None,
@@ -80,6 +122,12 @@ class StudentCampaignAdapter:
                 "video_decodable": bool(evaluation.valid),
                 "validity": copy.deepcopy(dict(evaluation.validity)),
             },
+            "parent": {
+                "candidate_id": parent_candidate_id,
+                "checkpoint": str(parent_checkpoint) if parent_checkpoint else None,
+                "inherited": bool(training.parent_inherited),
+                "fidelity": fidelity,
+            },
             "v4": {
                 "quality_score": evaluation.quality_score,
                 "quality_metrics": copy.deepcopy(dict(evaluation.quality_metrics)),
@@ -91,11 +139,25 @@ class StudentCampaignAdapter:
             "_evaluation": evaluation,
         }
 
-    def run_candidate(self, candidate: CandidateEnvelope, *, fidelity: str, round_dir: Path) -> Mapping[str, Any]:
+    def run_candidate(
+        self,
+        candidate: CandidateEnvelope,
+        *,
+        fidelity: str,
+        round_dir: Path,
+        parent_checkpoint: str | Path | None = None,
+        parent_candidate_id: str | None = None,
+    ) -> Mapping[str, Any]:
         raw = candidate.provenance.get("student_proposal")
         if raw is None:
             raise ValueError("Student candidate provenance must contain student_proposal")
-        return self.run_proposal(raw, round_dir, fidelity=fidelity)
+        return self.run_proposal(
+            raw,
+            round_dir,
+            fidelity=fidelity,
+            parent_checkpoint=parent_checkpoint,
+            parent_candidate_id=parent_candidate_id,
+        )
 
     def validate(self, candidate: CandidateEnvelope, round_dir: Path) -> Mapping[str, Any]:
         parsed = self._proposal(candidate.provenance.get("student_proposal"))
@@ -107,13 +169,34 @@ class StudentCampaignAdapter:
             "proposal_digest": manifest.proposal_digest,
         }
 
-    def execute(self, candidate: CandidateEnvelope, fidelity: str, round_dir: Path) -> Mapping[str, Any]:
-        return self.run_candidate(candidate, fidelity=fidelity, round_dir=round_dir)
+    def execute(
+        self,
+        candidate: CandidateEnvelope,
+        fidelity: str,
+        round_dir: Path,
+        *,
+        parent_checkpoint: str | Path | None = None,
+        parent_candidate_id: str | None = None,
+    ) -> Mapping[str, Any]:
+        return self.run_candidate(
+            candidate,
+            fidelity=fidelity,
+            round_dir=round_dir,
+            parent_checkpoint=parent_checkpoint,
+            parent_candidate_id=parent_candidate_id,
+        )
 
     def verify(self, candidate: CandidateEnvelope, execution: Mapping[str, Any], round_dir: Path) -> Tuple[MetricEvidence, ...]:
         training = execution.get("training") or {}
         evaluation = execution.get("evaluation") or {}
         validity = execution.get("v3") or {}
+        fidelity = str(execution.get("fidelity") or "")
+        algorithm_dispatch = str(training.get("algorithm_dispatch") or "")
+        quality_metrics = evaluation.get("quality_metrics") or {}
+        semantic_verified = (
+            quality_metrics.get("semantic") is not None
+            and str(quality_metrics.get("score_type", "")) == "clip_temporal"
+        )
         evidence = [
             MetricEvidence(
                 "video_decodable", "student-adapter-v1", str(round_dir),
@@ -121,6 +204,35 @@ class StudentCampaignAdapter:
                 bool(validity.get("video_decodable")), "student-evaluator", "server", True,
             )
         ]
+        evidence.extend(
+            (
+                MetricEvidence(
+                    "algorithm_dispatch", "student-adapter-v1", str(round_dir),
+                    1.0 if algorithm_dispatch == "executed" else 0.0,
+                    algorithm_dispatch == "executed", "student-worker", "server", True,
+                ),
+                MetricEvidence(
+                    "parent_checkpoint_bound", "student-adapter-v1", str(round_dir),
+                    1.0 if training.get("parent_sha256") else 0.0,
+                    bool(training.get("parent_sha256")), "student-worker", "server", True,
+                ),
+                MetricEvidence(
+                    "parent_inherited", "student-adapter-v1", str(round_dir),
+                    1.0 if training.get("parent_inherited") else 0.0,
+                    bool(training.get("parent_inherited")), "student-worker", "server", False,
+                ),
+                MetricEvidence(
+                    "fidelity_executed", "student-adapter-v1", str(round_dir),
+                    1.0 if fidelity else 0.0,
+                    bool(fidelity), "student-worker", "server", True,
+                ),
+                MetricEvidence(
+                    "semantic_verified", "student-adapter-v1", str(round_dir),
+                    1.0 if semantic_verified else 0.0,
+                    semantic_verified, "student-evaluator", "server", True,
+                ),
+            )
+        )
         if training.get("peak_memory_gb") is not None:
             evidence.append(MetricEvidence(
                 "peak_memory_gb", "student-adapter-v1", str(round_dir),
@@ -132,6 +244,32 @@ class StudentCampaignAdapter:
                 float(evaluation["quality_score"]), 1.0, "student-evaluator", "server", False,
             ))
         hardware = evaluation.get("hardware") or {}
+        evidence.extend(
+            (
+                MetricEvidence(
+                    "quality_verified", "student-adapter-v1", str(round_dir),
+                    1.0 if evaluation.get("quality_score") is not None else 0.0,
+                    evaluation.get("quality_score") is not None, "student-evaluator", "server", True,
+                ),
+                MetricEvidence(
+                    "latency_verified", "student-adapter-v1", str(round_dir),
+                    1.0 if hardware.get("latency_s") is not None else 0.0,
+                    hardware.get("latency_s") is not None, "student-evaluator", "server", True,
+                ),
+                MetricEvidence(
+                    "memory_verified", "student-adapter-v1", str(round_dir),
+                    1.0 if (training.get("peak_memory_gb") is not None or hardware.get("peak_memory_gb") is not None) else 0.0,
+                    training.get("peak_memory_gb") is not None or hardware.get("peak_memory_gb") is not None,
+                    "student-evaluator", "server", True,
+                ),
+                MetricEvidence(
+                    "model_size_verified", "student-adapter-v1", str(round_dir),
+                    1.0 if (training.get("model_size_bytes") is not None or hardware.get("model_size_gb") is not None) else 0.0,
+                    training.get("model_size_bytes") is not None or hardware.get("model_size_gb") is not None,
+                    "student-evaluator", "server", True,
+                ),
+            )
+        )
         for metric_name in ("latency_s", "energy_j", "model_size_gb"):
             value = hardware.get(metric_name)
             if value is not None:

@@ -26,6 +26,7 @@ student:
   min_rounds_before_success: 1
   max_failures: 8
   max_steps: 256
+  fidelity_schedule: [F1, F2, F3]
   # Strict optimization uses one fixed server-local manifest and the H3
   # teacher as the quality/efficiency reference point.
   evaluation_manifest: /home/intern/huangjiahao/Harness4H3/work/student-campaign/evaluation-manifest.json

@@ -10,7 +10,7 @@ from .proposal import (
     ValidationReport,
     canonical_digest,
 )
-from .campaign import StudentProposalBatchProvider, student_proposal_batch_json_schema
+from .campaign import StudentProposalBatchProvider, build_student_control_plane, student_proposal_batch_json_schema
 
 __all__ = [
     "ArchitectureSpec",
@@ -22,5 +22,6 @@ __all__ = [
     "ValidationReport",
     "canonical_digest",
     "StudentProposalBatchProvider",
+    "build_student_control_plane",
     "student_proposal_batch_json_schema",
 ]

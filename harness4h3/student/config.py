@@ -82,6 +82,7 @@ class StudentCampaignConfig:
     max_rounds: int
     max_failures: int
     max_steps: int
+    fidelity_schedule: Tuple[str, ...] = ("F1", "F2", "F3")
     min_rounds_before_success: int = 1
     teacher_world_size: int = 3
     teacher_rank_min_free_memory_gb: float = 20.0
@@ -90,7 +91,7 @@ class StudentCampaignConfig:
     controller_worker_lease_file: Optional[str] = None
     evaluation_manifest: Optional[str] = None
     clip_model_path: Optional[str] = None
-    quality_backend: str = "structural_proxy"
+    quality_backend: str = "clip_temporal"
     quality_floor_ratio: float = 0.90
     min_reward_delta: float = 0.02
     material_efficiency_gain: float = 0.05
@@ -225,11 +226,19 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         else str(PurePosixPath(remote_campaign_root) / "evaluation-manifest.json")
     )
     _under(remote, evaluation_manifest, "student.evaluation_manifest")
+    quality_backend_raw = student.get("quality_backend")
+    quality_backend = str(quality_backend_raw if quality_backend_raw is not None else "clip_temporal").strip().lower()
     clip_model_raw = student.get("clip_model_path")
     clip_model_path = None
     if clip_model_raw is not None:
         clip_model_path = _absolute_remote(clip_model_raw, "student.clip_model_path")
-    quality_backend = str(student.get("quality_backend", "structural_proxy")).strip().lower()
+        _under(remote, clip_model_path, "student.clip_model_path")
+    elif quality_backend == "clip_temporal" and quality_backend_raw is None:
+        # Semantic verification is the production default. Keep the default
+        # path deterministic under the configured model root, while allowing
+        # deployments to override it explicitly.
+        clip_model_path = str(PurePosixPath(remote.model_root) / "clip-vit-large-patch14-336")
+        _under(remote, clip_model_path, "student.clip_model_path")
     if quality_backend not in {"clip_temporal", "structural_proxy"}:
         raise StudentConfigError("student.quality_backend must be clip_temporal or structural_proxy")
     if quality_backend == "clip_temporal" and not clip_model_path:
@@ -248,9 +257,19 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         max_rounds = int(student.get("max_rounds", 4))
         max_failures = int(student.get("max_failures", 4))
         max_steps = int(student.get("max_steps", 32))
+        fidelity_schedule_raw = student.get("fidelity_schedule", ["F1", "F2", "F3"])
         min_rounds_before_success = int(student.get("min_rounds_before_success", 1))
     except (TypeError, ValueError) as exc:
         raise StudentConfigError("student round limits must be integers") from exc
+    if not isinstance(fidelity_schedule_raw, (list, tuple)) or not fidelity_schedule_raw:
+        raise StudentConfigError("student.fidelity_schedule must be a non-empty array")
+    fidelity_schedule = tuple(str(item).strip().upper() for item in fidelity_schedule_raw)
+    if (
+        any(not item for item in fidelity_schedule)
+        or len(set(fidelity_schedule)) != len(fidelity_schedule)
+        or any(item not in {"F1", "F2", "F3"} for item in fidelity_schedule)
+    ):
+        raise StudentConfigError("student.fidelity_schedule must contain unique names from F1, F2, F3")
     if (
         max_rounds <= 0
         or max_failures < 0
@@ -310,6 +329,7 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         max_rounds=max_rounds,
         max_failures=max_failures,
         max_steps=max_steps,
+        fidelity_schedule=fidelity_schedule,
         min_rounds_before_success=min_rounds_before_success,
         teacher_world_size=teacher_world_size,
         teacher_rank_min_free_memory_gb=teacher_rank_min_free_memory_gb,
