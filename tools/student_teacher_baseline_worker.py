@@ -38,6 +38,11 @@ def main(argv=None) -> int:
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--vae-name", required=True)
     parser.add_argument("--clip-model-path", required=True)
+    parser.add_argument("--latent-channels", type=int, default=24)
+    parser.add_argument("--latent-frames", type=int, default=5)
+    parser.add_argument("--latent-height", type=int, default=16)
+    parser.add_argument("--latent-width", type=int, default=16)
+    parser.add_argument("--condition-dim", type=int, default=5120)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--wait-for-gpu-s", type=int, default=600)
     args = parser.parse_args(argv)
@@ -50,7 +55,13 @@ def main(argv=None) -> int:
         device_name = select_free_cuda_device(8.0, args.wait_for_gpu_s) if args.device == "auto" else args.device
         device = torch.device(device_name)
         quality_backend = ClipTemporalQualityBackend(args.clip_model_path, device=device_name)
-        target = StudentTarget()
+        target = StudentTarget(
+            latent_channels=args.latent_channels,
+            latent_frames=args.latent_frames,
+            latent_height=args.latent_height,
+            latent_width=args.latent_width,
+            condition_dim=args.condition_dim,
+        )
         cases = []
         latencies = []
         for case in manifest.cases:
