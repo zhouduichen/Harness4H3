@@ -184,6 +184,8 @@ def test_control_plane_runs_batch_review_gate_and_persists_lineage(tmp_path):
     assert result.status == "target_satisfied"
     assert len(result.candidate_decisions) == 3
     assert (tmp_path / "experience.jsonl").is_file()
+    archive = [json.loads(line) for line in (tmp_path / "archive.jsonl").read_text().splitlines()]
+    assert {item["archive_kind"] for item in archive} == {"pareto"}
     events = [json.loads(line) for line in (tmp_path / "decision-trace.jsonl").read_text().splitlines()]
     assert events[0]["event_type"] == "campaign.created"
     assert any(item["event_type"] == "parent.selected" for item in events)
@@ -219,3 +221,6 @@ def test_control_plane_recovery_keeps_parent_until_verified_child(tmp_path):
     assert selected[-1]["payload"]["generation"] == 1
     assert selected[-1]["parent_candidate_id"] == "M0000"
     assert any(item["event_type"] == "campaign.replanned" and item["payload"].get("failure", {}).get("failure_code") == "worker_oom" for item in events)
+    archive = [json.loads(line) for line in (tmp_path / "archive.jsonl").read_text().splitlines()]
+    assert any(item["archive_kind"] == "failure" for item in archive)
+    assert any(item["archive_kind"] == "pareto" for item in archive)

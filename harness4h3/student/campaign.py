@@ -494,6 +494,7 @@ class StudentCampaign:
         self.events_path = self.output_root / "campaign-events.jsonl"
         self.resume_path = self.output_root / "resume.json"
         self.decision_trace_path = self.output_root / "decision-trace.jsonl"
+        self.archive_path = self.output_root / "archive.jsonl"
 
     def _append_event(self, payload: Mapping[str, Any]) -> None:
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -743,6 +744,30 @@ class StudentCampaign:
             handle.flush()
             os.fsync(handle.fileno())
 
+    def _append_control_archive(self, candidate: Any, decision: Mapping[str, Any]) -> None:
+        if candidate is None:
+            return
+        mutation_fields = tuple(candidate.mutation_fields)
+        novelty = len(set(mutation_fields)) / float(max(1, len(candidate.mutation_fields)))
+        record = {
+            "schema_version": 1,
+            "archive_kind": "pareto" if decision.get("promotable") else "failure",
+            "candidate_id": candidate.candidate_id,
+            "parent_candidate_id": candidate.parent_candidate_id,
+            "generation": candidate.generation,
+            "candidate_digest": candidate.digest(self.campaign_base),
+            "mutation_fields": list(mutation_fields),
+            "novelty": novelty,
+            "decision": dict(decision),
+            "target_profile_hash": self.campaign_base.target_profile_hash,
+            "verifier_bank_hash": self.campaign_base.verifier_bank_hash,
+        }
+        self.archive_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.archive_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
     def _run_control_plane(self, *, max_rounds: int) -> CampaignResult:
         from ..campaign.adapters import StudentCampaignAdapter
         from ..campaign.base import ActorIdentity
@@ -806,6 +831,7 @@ class StudentCampaign:
         for round_index in range(start_round, int(max_rounds) + 1):
             round_id = "R%04d" % round_index
             context = self._context(round_index, (), (), ())
+            decision_start = len(candidate_decisions)
             try:
                 batch = self._control_batch(
                     context,
@@ -941,9 +967,24 @@ class StudentCampaign:
                         payload=public_execution.get("training") or {},
                         evidence_ids=(str(public_execution.get("training", {}).get("child_checkpoint") or "training")),
                     )
+                    training_payload = public_execution.get("training") or {}
+                    trace.append(
+                        "training.metric",
+                        round_id=round_id,
+                        experiment_id=reviewed_candidate.experiment_id,
+                        candidate_id=reviewed_candidate.candidate_id,
+                        parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                        actor=self.campaign_base.evaluator_identity,
+                        payload={
+                            key: training_payload.get(key)
+                            for key in ("optimizer_steps", "initial_loss", "final_loss", "gradient_norm", "peak_memory_gb")
+                            if training_payload.get(key) is not None
+                        },
+                        evidence_ids=(str(public_execution.get("training", {}).get("compiler_digest") or "training")),
+                    )
                     if training_obj is None or getattr(training_obj, "status", "failed") != "success":
                         failure = attributor.attribute("training", public_execution.get("training") or {"failure_code": "training_failed"}, ())
-                        decision = {"candidate_id": reviewed_candidate.candidate_id, "promotable": False, "target_satisfied": False, "failure_code": failure.failure_code, "failure": failure.to_dict()}
+                        decision = {"candidate_id": reviewed_candidate.candidate_id, "promotable": False, "target_satisfied": False, "failure_code": failure.failure_code, "failure": failure.to_dict(), "review": review.to_dict()}
                         candidate_decisions.append(decision)
                         trace.append(
                             "campaign.replanned",
@@ -956,6 +997,16 @@ class StudentCampaign:
                             evidence_ids=failure.evidence_ids,
                         )
                         continue
+                    trace.append(
+                        "evaluation.started",
+                        round_id=round_id,
+                        experiment_id=reviewed_candidate.experiment_id,
+                        candidate_id=reviewed_candidate.candidate_id,
+                        parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                        actor=self.campaign_base.evaluator_identity,
+                        payload={"fidelity": self.fidelity_schedule[0]},
+                        evidence_ids=(),
+                    )
                     trace.append(
                         "evaluation.completed",
                         round_id=round_id,
@@ -995,6 +1046,7 @@ class StudentCampaign:
                         "reason": decision_obj.reason,
                         "evidence": {key: value.to_dict() for key, value in evidence_map.items()},
                         "predicted_metric_delta": dict(reviewed_candidate.predicted_metric_delta),
+                        "review": review.to_dict(),
                     }
                     candidate_decisions.append(decision)
                     self._append_control_experience(reviewed_candidate, evidence_map, decision_obj, round_index=round_index)
@@ -1012,6 +1064,26 @@ class StudentCampaign:
                 except (TypeError, ValueError, KeyError, OSError) as exc:
                     failure = attributor.attribute("execution", {"failure_code": "campaign_error", "message": str(exc)}, ())
                     candidate_decisions.append({"candidate_id": candidate.candidate_id, "promotable": False, "target_satisfied": False, "failure_code": failure.failure_code, "failure": failure.to_dict()})
+
+            candidate_by_id = {item.candidate_id: item for item in batch.candidates}
+            for decision in candidate_decisions[decision_start:]:
+                archived_candidate = candidate_by_id.get(decision.get("candidate_id"))
+                self._append_control_archive(archived_candidate, decision)
+                novelty = (
+                    len(set(archived_candidate.mutation_fields)) / float(max(1, len(archived_candidate.mutation_fields)))
+                    if archived_candidate is not None
+                    else 0.0
+                )
+                trace.append(
+                    "archive.updated",
+                    round_id=round_id,
+                    experiment_id=None,
+                    candidate_id=decision.get("candidate_id"),
+                    parent_candidate_id=archived_candidate.parent_candidate_id if archived_candidate else None,
+                    actor=self.campaign_base.controller_identity,
+                    payload={"archive_kind": "pareto" if decision.get("promotable") else "failure", "novelty": novelty},
+                    evidence_ids=(),
+                )
 
             best = self._control_best([item for item in candidate_decisions if item.get("candidate_id") in {value.candidate_id for value in batch.candidates} and item.get("promotable")])
             if best is not None:
@@ -1051,28 +1123,16 @@ class StudentCampaign:
                 if failure_rounds > self.max_failures:
                     stop_reason = "failure_budget_exhausted"
                     break
-        if stop_reason == "max_rounds" and not last_target_satisfied:
-            trace.append(
-                "campaign.stopped",
-                round_id="R%04d" % min(int(max_rounds), max(1, start_round + len(completed_rounds))),
-                experiment_id=None,
-                candidate_id=parent_id if parent_id != "M0000" else None,
-                parent_candidate_id=None,
-                actor=self.campaign_base.controller_identity,
-                payload={"reason": stop_reason, "promotable": last_promotable, "target_satisfied": False},
-                evidence_ids=(),
-            )
-        elif last_target_satisfied:
-            trace.append(
-                "campaign.stopped",
-                round_id="R%04d" % max(start_round, start_round + len(completed_rounds) - 1),
-                experiment_id=None,
-                candidate_id=parent_id,
-                parent_candidate_id=None,
-                actor=self.campaign_base.controller_identity,
-                payload={"reason": stop_reason, "promotable": True, "target_satisfied": True},
-                evidence_ids=(),
-            )
+        trace.append(
+            "campaign.stopped",
+            round_id="R%04d" % min(int(max_rounds), max(1, start_round + len(completed_rounds))),
+            experiment_id=None,
+            candidate_id=parent_id if parent_id != "M0000" else None,
+            parent_candidate_id=None,
+            actor=self.campaign_base.controller_identity,
+            payload={"reason": stop_reason, "promotable": last_promotable, "target_satisfied": last_target_satisfied},
+            evidence_ids=(),
+        )
         return CampaignResult(
             "target_satisfied" if last_target_satisfied else ("promotable" if last_promotable else "failed"),
             len(completed_rounds),
