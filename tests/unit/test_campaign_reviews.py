@@ -82,8 +82,11 @@ class ScriptedModifier:
 
     def review(self, request):
         return {
-            "candidate": self.candidate.to_dict(),
+            "candidate_id": self.candidate.candidate_id,
             "base_digest": request["base_digest"],
+            "operations": [
+                {"op": "replace", "path": "/training/method", "value": "velocity_distill"},
+            ],
             "changed_fields": ["training.method"],
             "resolved_objection_ids": ["objection-1"],
             "reason": "use the registered distillation backend",

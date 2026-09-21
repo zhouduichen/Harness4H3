@@ -1371,6 +1371,34 @@ class StudentCampaign:
                         }
                         candidate_decisions.append(decision)
                         continue
+                    canonical_proposal = None
+                    if reviewed_candidate.provenance.get("student_proposal") is not None:
+                        canonical_proposal = self._revalidate_reviewed_student_candidate(
+                            reviewed_candidate,
+                            batch,
+                            snapshot,
+                            parent_id,
+                            parent_generation,
+                        )
+                        trace.append(
+                            "proposal.revalidated",
+                            round_id=round_id,
+                            experiment_id=reviewed_candidate.experiment_id,
+                            candidate_id=reviewed_candidate.candidate_id,
+                            parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                            actor=self.campaign_base.controller_identity,
+                            payload={
+                                "proposal_digest": canonical_proposal.digest,
+                                "candidate_proposal_digest": reviewed_candidate.proposal_digest,
+                                "validation": {
+                                    "schema": True,
+                                    "capability": True,
+                                    "parent_generation": True,
+                                    "compiler_pending": True,
+                                },
+                            },
+                            evidence_ids=(),
+                        )
                     validation = adapter.validate(
                         reviewed_candidate,
                         self._control_round_dir(round_index, reviewed_candidate.candidate_id, "validate"),
@@ -1809,6 +1837,46 @@ class StudentCampaign:
         if value is None:
             return None
         return value if isinstance(value, StudentProposal) else StudentProposal.from_dict(value)
+
+    def _revalidate_reviewed_student_candidate(
+        self,
+        candidate: Any,
+        batch: Any,
+        snapshot: Any,
+        parent_id: str,
+        parent_generation: int,
+    ) -> StudentProposal:
+        from ..campaign.proposals import ProposalBatch, validate_batch
+        from ..campaign.revision import proposal_from_candidate
+
+        try:
+            canonical_proposal = proposal_from_candidate(candidate)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("revision_integrity_failure: %s" % exc) from exc
+        proposal_report = canonical_proposal.validate(self.target)
+        if not proposal_report.ok:
+            raise ValueError("revision_proposal_invalid: %s" % "; ".join(proposal_report.errors))
+        post_review_batch = ProposalBatch(
+            batch_id=batch.batch_id + ":reviewed",
+            round_id=batch.round_id,
+            diagnosis=batch.diagnosis,
+            parent_selection_evidence_ids=batch.parent_selection_evidence_ids,
+            candidates=(candidate,),
+        )
+        post_review_report = validate_batch(
+            post_review_batch,
+            base=self.campaign_base,
+            snapshot=snapshot,
+            parent_ids={parent_id: parent_generation},
+            min_candidates=1,
+            max_candidates=1,
+        )
+        if not post_review_report.ok:
+            raise ValueError(
+                "revision_candidate_invalid: %s"
+                % "; ".join(post_review_report.errors or (str(post_review_report.candidate_errors),))
+            )
+        return canonical_proposal
 
     def _compile_round(self, proposal: StudentProposal, round_dir: Path) -> CompileManifest:
         compile_dir = round_dir / "compile"

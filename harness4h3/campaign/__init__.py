@@ -7,6 +7,7 @@ from .events import DecisionEvent, DecisionTrace, TraceIntegrityError
 from .failures import FailureAttributor, FailureReport
 from .gates import AcceptanceGate, GateDecision, MetricEvidence, pareto_dominates
 from .proposals import CandidateEnvelope, ProposalBatch, ProposalValidationError, ProposalValidationReport, validate_batch
+from .revision import RevisionPatch, RevisionPatchError, apply_revision_patch, canonical_candidate_from_proposal
 from .reviews import (
     AdvocateReport,
     CandidateReview,
@@ -50,4 +51,8 @@ __all__ = [
     "canonical_digest",
     "canonical_json",
     "validate_batch",
+    "RevisionPatch",
+    "RevisionPatchError",
+    "apply_revision_patch",
+    "canonical_candidate_from_proposal",
 ]

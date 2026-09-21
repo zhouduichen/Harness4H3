@@ -12,6 +12,14 @@ from typing import Any, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 
 from .base import ActorIdentity, CampaignBase, canonical_json
 from .proposals import CandidateEnvelope, MUTATION_FIELDS
+from .revision import (
+    RevisionPatch,
+    RevisionPatchError,
+    apply_revision_patch,
+    canonical_candidate_from_patch,
+    canonical_candidate_from_proposal,
+    proposal_from_candidate,
+)
 
 
 OBJECTION_CATEGORIES = frozenset(
@@ -89,39 +97,30 @@ def review_json_schema(role: str) -> Mapping[str, Any]:
             ],
         }
     if role == "revision":
-        candidate_schema = {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "candidate_id": {"type": "string", "minLength": 1},
-                "parent_candidate_id": {"type": ["string", "null"]},
-                "generation": {"type": "integer", "minimum": 0},
-                "experiment_id": {"type": "string", "minLength": 1},
-                "proposal_digest": {"type": "string", "minLength": 1},
-                "mutation_fields": string_array,
-                "architecture": {"type": "object"},
-                "training_recipe": {"type": "object"},
-                "deployment_recipe": {"type": "object"},
-                "provenance": {"type": "object"},
-                "predicted_metric_delta": {"type": "object", "additionalProperties": {"type": "number"}},
-            },
-            "required": [
-                "candidate_id", "parent_candidate_id", "generation", "experiment_id", "proposal_digest",
-                "mutation_fields", "architecture", "training_recipe", "deployment_recipe", "provenance",
-                "predicted_metric_delta",
-            ],
-        }
         return {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "candidate": candidate_schema,
+                "candidate_id": {"type": "string", "minLength": 1},
                 "base_digest": {"type": "string", "minLength": 1},
+                "operations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "op": {"enum": ["add", "replace"]},
+                            "path": {"type": "string", "pattern": "^/(architecture|training|deployment)/[^/]+$"},
+                            "value": {},
+                        },
+                        "required": ["op", "path", "value"],
+                    },
+                },
                 "changed_fields": string_array,
                 "resolved_objection_ids": string_array,
                 "reason": {"type": "string", "minLength": 1},
             },
-            "required": ["candidate", "base_digest", "changed_fields", "resolved_objection_ids", "reason"],
+            "required": ["candidate_id", "base_digest", "operations", "changed_fields", "resolved_objection_ids", "reason"],
         }
     raise ReviewContractError("unsupported review role: %s" % role)
 
@@ -145,9 +144,10 @@ def _review_prompt(role: str, request: Mapping[str, Any]) -> str:
         )
     else:
         instruction = (
-            "Act as an independent Revision agent. Revise only the CandidateEnvelope to address "
-            "the Critical objections. Preserve candidate_id, immutable campaign base digest, and "
-            "the registered action space. Never edit TargetProfile, VerifierBank, or any final gate."
+            "Act as an independent Revision agent. Return only a RevisionPatch with JSON-Pointer "
+            "operations over architecture, training, or deployment fields. Preserve candidate_id "
+            "and immutable campaign base digest. Never return a complete CandidateEnvelope, edit "
+            "parent/generation/Teacher identity, TargetProfile, VerifierBank, or any final gate."
         )
     return (
         instruction
@@ -377,7 +377,8 @@ class CriticalReport:
 
 @dataclass(frozen=True)
 class RevisionRecord:
-    candidate: CandidateEnvelope
+    candidate: Optional[CandidateEnvelope]
+    patch: RevisionPatch
     base_digest: str
     changed_fields: Tuple[str, ...]
     resolved_objection_ids: Tuple[str, ...]
@@ -387,27 +388,24 @@ class RevisionRecord:
     def from_dict(cls, raw: Mapping[str, Any]) -> "RevisionRecord":
         if not isinstance(raw, Mapping):
             raise ReviewContractError("revision must be a mapping")
-        fields = {"candidate", "base_digest", "changed_fields", "resolved_objection_ids", "reason"}
+        fields = {"candidate_id", "base_digest", "operations", "changed_fields", "resolved_objection_ids", "reason"}
         _strict_keys(raw, fields, "revision")
-        changed = _string_array(raw["changed_fields"], "changed_fields")
-        invalid = sorted(set(changed) - MUTATION_FIELDS)
-        if invalid:
-            raise ReviewContractError("revision changed field is not registered: %s" % ", ".join(invalid))
+        try:
+            patch = RevisionPatch.from_dict(raw)
+        except RevisionPatchError as exc:
+            raise ReviewContractError(str(exc)) from exc
         return cls(
-            candidate=CandidateEnvelope.from_dict(raw["candidate"]),
-            base_digest=_required_string(raw["base_digest"], "revision.base_digest"),
-            changed_fields=changed,
-            resolved_objection_ids=_string_array(raw["resolved_objection_ids"], "resolved_objection_ids"),
-            reason=_required_string(raw["reason"], "revision.reason"),
+            candidate=None,
+            patch=patch,
+            base_digest=patch.base_digest,
+            changed_fields=patch.changed_fields,
+            resolved_objection_ids=patch.resolved_objection_ids,
+            reason=patch.reason,
         )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "candidate": self.candidate.to_dict(),
-            "base_digest": self.base_digest,
-            "changed_fields": list(self.changed_fields),
-            "resolved_objection_ids": list(self.resolved_objection_ids),
-            "reason": self.reason,
+            **self.patch.to_dict(),
         }
 
 
@@ -517,16 +515,27 @@ class ReviewPipeline:
                 break
             if round_index >= self.max_rounds:
                 break
-            revision = RevisionRecord.from_dict(
-                self.modifier.review(
-                    self._request(current, context, phase="revision", round_index=round_index)
-                )
+            patch_raw = self.modifier.review(
+                self._request(current, context, phase="revision", round_index=round_index)
             )
-            if revision.base_digest != self.base.digest:
+            parsed_patch = RevisionPatch.from_dict(patch_raw)
+            if parsed_patch.base_digest != self.base.digest:
                 raise ReviewContractError("revision cannot change the immutable campaign base")
-            if revision.candidate.candidate_id != candidate.candidate_id:
+            if parsed_patch.candidate_id != candidate.candidate_id:
                 raise ReviewContractError("revision cannot change candidate_id")
-            revised = revision.candidate
+            try:
+                source_proposal = proposal_from_candidate(current)
+                revised_proposal = apply_revision_patch(source_proposal, parsed_patch)
+                revised = canonical_candidate_from_proposal(current, revised_proposal, parsed_patch)
+            except RevisionPatchError as exc:
+                if current.provenance.get("student_proposal") is not None:
+                    raise ReviewContractError("revision patch could not produce a canonical Student Candidate: %s" % exc) from exc
+                try:
+                    revised = canonical_candidate_from_patch(current, parsed_patch)
+                except (TypeError, ValueError) as fallback_exc:
+                    raise ReviewContractError("revision patch could not produce a canonical Candidate: %s" % fallback_exc) from fallback_exc
+            except (TypeError, ValueError) as exc:
+                raise ReviewContractError("revision patch could not produce a canonical Candidate: %s" % exc) from exc
             if dict(revised.predicted_metric_delta) != dict(advocate.expected_metric_delta):
                 revised = CandidateEnvelope(
                     candidate_id=revised.candidate_id,
@@ -541,6 +550,14 @@ class ReviewPipeline:
                     provenance=revised.provenance,
                     predicted_metric_delta=dict(advocate.expected_metric_delta),
                 )
+            revision = RevisionRecord(
+                candidate=revised,
+                patch=parsed_patch,
+                base_digest=parsed_patch.base_digest,
+                changed_fields=parsed_patch.changed_fields,
+                resolved_objection_ids=parsed_patch.resolved_objection_ids,
+                reason=parsed_patch.reason,
+            )
             current = revised
         if final_critical is None:
             final_critical = critical_rounds[-1]

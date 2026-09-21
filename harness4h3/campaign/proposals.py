@@ -19,10 +19,15 @@ MUTATION_FIELDS = frozenset(
         "architecture.num_heads",
         "architecture.temporal_layers",
         "training.method",
+        "training.source_steps",
+        "training.target_steps",
+        "training.learning_rate",
+        "training.critic_learning_rate",
         "training_recipe",
         "distillation_strategy",
         "quantization",
         "deployment.precision",
+        "deployment.quantization",
         "runtime",
         "data_recipe",
     }
@@ -236,6 +241,22 @@ def validate_batch(
             candidate.digest(base)
         except (TypeError, ValueError):
             current.append("candidate digest could not be computed")
+        canonical = candidate.provenance.get("student_proposal")
+        if canonical is not None:
+            try:
+                from ..student.proposal import StudentProposal
+
+                proposal = StudentProposal.from_dict(canonical)
+                if candidate.proposal_digest != proposal.digest:
+                    current.append("proposal_digest does not match StudentProposal.digest")
+                if dict(candidate.architecture) != proposal.architecture.to_dict():
+                    current.append("architecture does not match StudentProposal")
+                if dict(candidate.training_recipe) != proposal.training.to_dict():
+                    current.append("training_recipe does not match StudentProposal")
+                if dict(candidate.deployment_recipe) != proposal.deployment.to_dict():
+                    current.append("deployment_recipe does not match StudentProposal")
+            except (TypeError, ValueError, KeyError):
+                current.append("canonical student_proposal is invalid")
     return ProposalValidationReport(tuple(dict.fromkeys(errors)), {
         key: tuple(dict.fromkeys(value)) for key, value in candidate_errors.items() if value
     })
