@@ -7,29 +7,19 @@ import argparse
 import json
 import math
 import statistics
+import sys
 import time
 from pathlib import Path
 from typing import Any, Mapping
 
-try:
-    from harness4h3.student.evaluator import StudentEvaluation, StudentEvaluator
-    from harness4h3.student.evaluation_manifest import EvaluationManifest
-    from harness4h3.student.gpu import GPUResourceUnavailable, release_controller_handoff, select_free_cuda_device
-    from harness4h3.student.inference import StudentGenerationError, generate_video
-    from harness4h3.student.metrics import MetricVerifierBank
-    from harness4h3.student.proposal import StudentProposal, StudentTarget
-    from harness4h3.student.quality import ClipTemporalQualityBackend, QualityBackendUnavailable
-except ModuleNotFoundError:  # direct invocation from the repository root
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from harness4h3.student.evaluator import StudentEvaluation, StudentEvaluator
-    from harness4h3.student.evaluation_manifest import EvaluationManifest
-    from harness4h3.student.gpu import GPUResourceUnavailable, release_controller_handoff, select_free_cuda_device
-    from harness4h3.student.inference import StudentGenerationError, generate_video
-    from harness4h3.student.metrics import MetricVerifierBank
-    from harness4h3.student.proposal import StudentProposal, StudentTarget
-    from harness4h3.student.quality import ClipTemporalQualityBackend, QualityBackendUnavailable
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from harness4h3.student.evaluator import StudentEvaluation, StudentEvaluator
+from harness4h3.student.evaluation_manifest import EvaluationManifest
+from harness4h3.student.gpu import GPUResourceUnavailable, release_controller_handoff, select_free_cuda_device
+from harness4h3.student.inference import StudentGenerationError, generate_video
+from harness4h3.student.metrics import MetricVerifierBank
+from harness4h3.student.proposal import StudentProposal, StudentTarget
+from harness4h3.student.quality import ClipTemporalQualityBackend, QualityBackendUnavailable
 
 
 def _write(path: Path, value: Mapping[str, Any]) -> None:

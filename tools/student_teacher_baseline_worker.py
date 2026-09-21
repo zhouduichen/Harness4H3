@@ -6,25 +6,17 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import sys
 import time
 from pathlib import Path
 from typing import Any, Mapping
 
-try:
-    from harness4h3.student.evaluation_manifest import EvaluationManifest
-    from harness4h3.student.gpu import select_free_cuda_device
-    from harness4h3.student.inference import decode_video_latent, load_h3_cache_item, write_video
-    from harness4h3.student.quality import ClipTemporalQualityBackend, QualityBackendUnavailable
-    from harness4h3.student.proposal import StudentTarget
-except ModuleNotFoundError:
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from harness4h3.student.evaluation_manifest import EvaluationManifest
-    from harness4h3.student.gpu import select_free_cuda_device
-    from harness4h3.student.inference import decode_video_latent, load_h3_cache_item, write_video
-    from harness4h3.student.quality import ClipTemporalQualityBackend, QualityBackendUnavailable
-    from harness4h3.student.proposal import StudentTarget
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from harness4h3.student.evaluation_manifest import EvaluationManifest
+from harness4h3.student.gpu import select_free_cuda_device
+from harness4h3.student.inference import decode_video_latent, load_h3_cache_item, write_video
+from harness4h3.student.quality import ClipTemporalQualityBackend, QualityBackendUnavailable
+from harness4h3.student.proposal import StudentTarget
 
 
 def _write(path: Path, value: Mapping[str, Any]) -> None:

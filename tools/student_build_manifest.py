@@ -5,15 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
-try:
-    from harness4h3.student.evaluation_manifest import build_manifest
-except ModuleNotFoundError:
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from harness4h3.student.evaluation_manifest import build_manifest
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from harness4h3.student.evaluation_manifest import build_manifest
 
 
 def main(argv=None) -> int:
