@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence
 
 from .compiler import CompileError, CompileManifest, StudentCompiler
 from .evaluator import StudentEvaluation, append_experience, make_experience_record
@@ -24,6 +24,14 @@ class StudentProposalProvider(Protocol):
     model_name: str
 
     def propose(self, context: Mapping[str, Any]) -> Mapping[str, Any]:
+        ...
+
+
+class StudentProposalBatchProvider(Protocol):
+    provider_name: str
+    model_name: str
+
+    def propose_batch(self, context: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
         ...
 
 
@@ -109,6 +117,24 @@ def student_proposal_json_schema(target: StudentTarget = StudentTarget()) -> Map
     }
 
 
+def student_proposal_batch_json_schema(target: StudentTarget = StudentTarget()) -> Mapping[str, Any]:
+    """Strict schema for one controller response containing a candidate batch."""
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "proposals": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 5,
+                "items": student_proposal_json_schema(target),
+            },
+        },
+        "required": ["proposals"],
+    }
+
+
 def _student_architect_prompt(context: Mapping[str, Any]) -> str:
     return (
         "You are the autonomous Student architect. Return exactly one JSON StudentProposal. "
@@ -129,6 +155,18 @@ def _student_architect_prompt(context: Mapping[str, Any]) -> str:
     )
 
 
+def _student_architect_batch_prompt(context: Mapping[str, Any]) -> str:
+    return (
+        "You are the autonomous Student architect. Return one JSON object with exactly a "
+        "proposals array containing 3 to 5 independent StudentProposal objects. "
+        "Do not emit code, shell commands, markdown, or explanations outside JSON. "
+        "Candidates must be materially different and must use only the registered graph, "
+        "training, and deployment fields. The Harness will reject invalid shapes, memory, "
+        "or 1B-2B parameter counts. Keep every candidate legal before returning. CONTEXT="
+        + json.dumps(dict(context), ensure_ascii=False, sort_keys=True)
+    )
+
+
 def _parse_student_response(raw: Mapping[str, Any], *, source: str) -> Mapping[str, Any]:
     try:
         if isinstance(raw.get("choices"), list) and raw["choices"]:
@@ -143,6 +181,16 @@ def _parse_student_response(raw: Mapping[str, Any], *, source: str) -> Mapping[s
     if not isinstance(parsed, Mapping):
         raise ValueError("proposal_invalid: %s response was not a JSON object" % source)
     return dict(parsed)
+
+
+def _parse_student_batch_response(raw: Mapping[str, Any], *, source: str) -> Sequence[Mapping[str, Any]]:
+    parsed = _parse_student_response(raw, source=source)
+    proposals = parsed.get("proposals")
+    if not isinstance(proposals, list) or not 3 <= len(proposals) <= 5:
+        raise ValueError("proposal_invalid: %s response must contain 3 to 5 proposals" % source)
+    if not all(isinstance(item, Mapping) for item in proposals):
+        raise ValueError("proposal_invalid: %s proposals must be JSON objects" % source)
+    return tuple(dict(item) for item in proposals)
 
 
 def _request_json_with_retry(request: urllib.request.Request, timeout_s: float) -> Mapping[str, Any]:
@@ -202,6 +250,27 @@ class OllamaStudentProposalProvider:
             raise ValueError("proposal_invalid: Ollama proposal request failed: %s" % exc) from exc
         return dict(parsed)
 
+    def propose_batch(self, context: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
+        payload = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": _student_architect_batch_prompt(context)}],
+            "stream": False,
+            "think": False,
+            "format": student_proposal_batch_json_schema(self.target),
+            "options": {"temperature": 0.4},
+        }
+        request = urllib.request.Request(
+            self.base_url + "/api/chat",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            raw = _request_json_with_retry(request, self.timeout_s)
+            return _parse_student_batch_response(raw, source="Ollama")
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("proposal_invalid: Ollama proposal batch request failed: %s" % exc) from exc
+
 
 class OpenAICompatibleStudentProposalProvider:
     """Use a local vLLM/OpenAI-compatible server for structured proposals."""
@@ -248,6 +317,36 @@ class OpenAICompatibleStudentProposalProvider:
         except (OSError, urllib.error.URLError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("proposal_invalid: OpenAI-compatible proposal request failed: %s" % exc) from exc
 
+    def propose_batch(self, context: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
+        schema = student_proposal_batch_json_schema(self.target)
+        payload = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": _student_architect_batch_prompt(context)}],
+            "temperature": 0.4,
+            "stream": False,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "student_proposal_batch", "strict": True, "schema": schema},
+            },
+        }
+        request = urllib.request.Request(
+            self.endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            raw = _request_json_with_retry(request, self.timeout_s)
+            return _parse_student_batch_response(raw, source="OpenAI-compatible")
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:2000]
+            except OSError:
+                detail = str(exc)
+            raise ValueError("proposal_invalid: OpenAI-compatible proposal batch request failed: HTTP %s: %s" % (exc.code, detail)) from exc
+        except (OSError, urllib.error.URLError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("proposal_invalid: OpenAI-compatible proposal batch request failed: %s" % exc) from exc
+
 
 def build_student_proposal_provider(
     provider: str,
@@ -274,6 +373,8 @@ class CampaignRound:
     evaluation: Optional[StudentEvaluation]
     failure_code: Optional[str]
     message: str
+    candidate_id: Optional[str] = None
+    parent_candidate_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -283,6 +384,11 @@ class CampaignResult:
     rounds: tuple[CampaignRound, ...]
     failure_code: Optional[str] = None
     message: str = ""
+    promotable: bool = False
+    target_satisfied: bool = False
+    candidate_decisions: tuple[Mapping[str, Any], ...] = ()
+    stop_reason: str = ""
+    trace_path: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -290,6 +396,11 @@ class CampaignResult:
             "rounds_completed": self.rounds_completed,
             "failure_code": self.failure_code,
             "message": self.message,
+            "promotable": self.promotable,
+            "target_satisfied": self.target_satisfied,
+            "candidate_decisions": [dict(item) for item in self.candidate_decisions],
+            "stop_reason": self.stop_reason,
+            "trace_path": self.trace_path,
             "rounds": [
                 {
                     "round_index": item.round_index,
@@ -299,6 +410,8 @@ class CampaignResult:
                     "evaluation": item.evaluation.to_dict() if item.evaluation else None,
                     "failure_code": item.failure_code,
                     "message": item.message,
+                    "candidate_id": item.candidate_id,
+                    "parent_candidate_id": item.parent_candidate_id,
                 }
                 for item in self.rounds
             ],
@@ -340,6 +453,15 @@ class StudentCampaign:
         max_failures: int = 4,
         min_rounds_before_success: int = 1,
         retention_handler: Optional[Callable[[TrainingResult, StudentEvaluation, str, str], None]] = None,
+        campaign_base: Optional[Any] = None,
+        capability_snapshot: Optional[Any] = None,
+        review_pipeline: Optional[Any] = None,
+        acceptance_gate: Optional[Any] = None,
+        hard_constraints: Optional[Mapping[str, Any]] = None,
+        objectives: Optional[Mapping[str, str]] = None,
+        max_candidates: int = 5,
+        min_candidates: int = 3,
+        fidelity_schedule: Sequence[str] = ("F1",),
     ):
         self.provider = provider
         self.compiler = compiler
@@ -352,12 +474,26 @@ class StudentCampaign:
         self.max_failures = int(max_failures)
         self.min_rounds_before_success = int(min_rounds_before_success)
         self.retention_handler = retention_handler
+        self.campaign_base = campaign_base
+        self.capability_snapshot = capability_snapshot
+        self.review_pipeline = review_pipeline
+        self.acceptance_gate = acceptance_gate
+        self.hard_constraints = dict(hard_constraints or {})
+        self.objectives = dict(objectives or {})
+        self.max_candidates = int(max_candidates)
+        self.min_candidates = int(min_candidates)
+        self.fidelity_schedule = tuple(str(item) for item in fidelity_schedule)
         if self.max_failures < 0:
             raise ValueError("max_failures must be non-negative")
         if self.min_rounds_before_success <= 0:
             raise ValueError("min_rounds_before_success must be positive")
+        if not 1 <= self.min_candidates <= self.max_candidates:
+            raise ValueError("candidate bounds are invalid")
+        if not self.fidelity_schedule:
+            raise ValueError("fidelity_schedule must not be empty")
         self.events_path = self.output_root / "campaign-events.jsonl"
         self.resume_path = self.output_root / "resume.json"
+        self.decision_trace_path = self.output_root / "decision-trace.jsonl"
 
     def _append_event(self, payload: Mapping[str, Any]) -> None:
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -440,6 +576,512 @@ class StudentCampaign:
     ) -> CampaignRound:
         return CampaignRound(round_index, proposal, compile_manifest, training, evaluation, code, message)
 
+    def _control_snapshot(self) -> Any:
+        from ..campaign.capabilities import CapabilitySnapshot
+
+        if self.capability_snapshot is None or not isinstance(self.capability_snapshot, CapabilitySnapshot):
+            raise ValueError("control-plane StudentCampaign requires a CapabilitySnapshot")
+        declared = self.campaign_base.capability_snapshot.get("digest")
+        if declared is not None and str(declared) != self.capability_snapshot.digest:
+            raise ValueError("capability snapshot does not match immutable campaign base")
+        return self.capability_snapshot
+
+    def _control_hard_constraints(self) -> Dict[str, Any]:
+        if self.hard_constraints:
+            constraints = dict(self.hard_constraints)
+        else:
+            target_profile = self.campaign_base.target_profile
+            raw_constraints = target_profile.get("constraints") if isinstance(target_profile, Mapping) else {}
+            constraints = dict(raw_constraints) if isinstance(raw_constraints, Mapping) else {}
+            quality = target_profile.get("quality") if isinstance(target_profile, Mapping) else {}
+            if isinstance(quality, Mapping) and quality.get("min_quality_score") is not None:
+                constraints["min_quality_score"] = quality["min_quality_score"]
+        # These are campaign invariants, not controller-selected objectives.
+        constraints.setdefault("video_decodable", True)
+        constraints.setdefault("evaluation_promotable", True)
+        return constraints
+
+    def _control_objectives(self) -> Dict[str, str]:
+        if self.objectives:
+            return dict(self.objectives)
+        raw = self.campaign_base.target_profile.get("objectives")
+        result: Dict[str, str] = {}
+        if isinstance(raw, Mapping):
+            for name, value in raw.items():
+                if isinstance(value, Mapping):
+                    direction = value.get("direction")
+                else:
+                    direction = value
+                if direction in {"maximize", "minimize"}:
+                    result[str(name)] = str(direction)
+        elif isinstance(raw, (list, tuple)):
+            for item in raw:
+                if isinstance(item, Mapping) and item.get("name") and item.get("direction") in {"maximize", "minimize"}:
+                    result[str(item["name"])] = str(item["direction"])
+        return result or {"quality": "maximize", "latency_s": "minimize", "peak_memory_gb": "minimize"}
+
+    def _control_batch(self, context: Mapping[str, Any], *, round_index: int, parent_id: str, parent_generation: int) -> Any:
+        from ..campaign.proposals import CandidateEnvelope, ProposalBatch
+
+        producer = getattr(self.provider, "propose_batch", None)
+        if callable(producer):
+            raw_items = producer(context)
+        else:
+            # This fallback is intentionally only a compatibility bridge. A
+            # real control-plane provider should implement propose_batch so the
+            # review and diversity contract is visible to the model.
+            raw_items = [self.provider.propose(context)]
+        if isinstance(raw_items, Mapping):
+            raw_items = raw_items.get("proposals")
+        if not isinstance(raw_items, (list, tuple)):
+            raise ValueError("proposal_invalid: batch provider must return a proposals array")
+        proposals = []
+        parse_errors = []
+        for index, raw in enumerate(raw_items, 1):
+            try:
+                proposal = raw if isinstance(raw, StudentProposal) else StudentProposal.from_dict(raw)
+                report = proposal.validate(self.target)
+                if not report.ok:
+                    raise ValueError("; ".join(report.errors))
+                proposals.append(proposal)
+            except (TypeError, ValueError, KeyError) as exc:
+                parse_errors.append("candidate %d: %s" % (index, exc))
+        if parse_errors:
+            raise ValueError("proposal_invalid: " + " | ".join(parse_errors))
+        candidates = []
+        for index, proposal in enumerate(proposals, 1):
+            proposal_parent = proposal.parent_proposal_id or parent_id
+            candidate_id = proposal.proposal_id
+            candidates.append(
+                CandidateEnvelope(
+                    candidate_id=candidate_id,
+                    parent_candidate_id=proposal_parent,
+                    generation=parent_generation + 1,
+                    experiment_id="%s:%s:%s" % (self.campaign_base.campaign_id, round_index, candidate_id),
+                    proposal_digest=proposal.digest,
+                    mutation_fields=(
+                        "architecture.hidden_size",
+                        "architecture.depth",
+                        "training.method",
+                        "deployment.precision",
+                        "quantization",
+                    ),
+                    architecture=proposal.architecture.to_dict(),
+                    training_recipe=proposal.training.to_dict(),
+                    deployment_recipe=proposal.deployment.to_dict(),
+                    provenance={
+                        "source": "student",
+                        "provider": str(getattr(self.provider, "provider_name", "unknown")),
+                        "model": str(getattr(self.provider, "model_name", "unknown")),
+                        "student_proposal": proposal.to_dict(),
+                        "batch_index": index,
+                    },
+                    predicted_metric_delta={},
+                )
+            )
+        return ProposalBatch(
+            batch_id="batch:%s:%04d" % (self.campaign_base.campaign_id, round_index),
+            round_id="R%04d" % round_index,
+            diagnosis=str(context.get("diagnosis") or "controller proposal batch"),
+            parent_selection_evidence_ids=("parent:%s" % parent_id,),
+            candidates=tuple(candidates),
+        )
+
+    @staticmethod
+    def _control_public_execution(execution: Mapping[str, Any]) -> Mapping[str, Any]:
+        return {str(key): value for key, value in execution.items() if not str(key).startswith("_")}
+
+    @staticmethod
+    def _control_best(items: Sequence[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+        if not items:
+            return None
+        return max(
+            items,
+            key=lambda item: (
+                bool(item.get("target_satisfied")),
+                bool(item.get("promotable")),
+                float((item.get("objective_values") or {}).get("quality", (item.get("objective_values") or {}).get("quality_score", 0.0)) or 0.0),
+                -float((item.get("objective_values") or {}).get("latency_s", float("inf")) or float("inf")),
+            ),
+        )
+
+    def _append_control_experience(
+        self,
+        candidate: Any,
+        evidence: Mapping[str, Any],
+        decision: Any,
+        *,
+        round_index: int,
+    ) -> None:
+        actual = {
+            name: item.value
+            for name, item in evidence.items()
+            if item.value is not None and item.metric_name not in {"video_decodable", "evaluation_promotable"}
+        }
+        predicted = dict(candidate.predicted_metric_delta)
+        delta = {
+            name: float(value) - float(predicted[name])
+            for name, value in actual.items()
+            if name in predicted and isinstance(predicted[name], (int, float))
+        }
+        record = {
+            "schema_version": 2,
+            "experience_id": "%s:%04d:%s" % (self.campaign_base.campaign_id, round_index, candidate.candidate_id),
+            "candidate_id": candidate.candidate_id,
+            "parent_candidate_id": candidate.parent_candidate_id,
+            "candidate_digest": candidate.digest(self.campaign_base),
+            "predicted_metric_delta": predicted,
+            "actual_metrics": actual,
+            "prediction_error": delta,
+            "promotable": bool(decision.promotable),
+            "target_satisfied": bool(decision.target_satisfied),
+            "failure_code": None if decision.feasible else "gate_rejected",
+        }
+        self.experience_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.experience_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def _run_control_plane(self, *, max_rounds: int) -> CampaignResult:
+        from ..campaign.adapters import StudentCampaignAdapter
+        from ..campaign.base import ActorIdentity
+        from ..campaign.events import DecisionTrace
+        from ..campaign.failures import FailureAttributor
+        from ..campaign.gates import AcceptanceGate, MetricEvidence
+        from ..campaign.proposals import validate_batch
+
+        if self.campaign_base is None:
+            raise ValueError("campaign base is required for control-plane execution")
+        snapshot = self._control_snapshot()
+        if self.review_pipeline is None:
+            raise ValueError("control-plane StudentCampaign requires an independent review_pipeline")
+        gate = self.acceptance_gate or AcceptanceGate()
+        trace = DecisionTrace(self.decision_trace_path, self.campaign_base)
+        existing = trace.read()
+        if not existing:
+            trace.append(
+                "campaign.created",
+                round_id=None,
+                experiment_id=None,
+                candidate_id=None,
+                parent_candidate_id=None,
+                actor=self.campaign_base.controller_identity,
+                payload={
+                    "base": self.campaign_base.to_dict(),
+                    "capability_snapshot_digest": snapshot.digest,
+                    "control_plane": "campaign-v1",
+                },
+                evidence_ids=(),
+            )
+            existing = trace.read()
+        completed_rounds = []
+        candidate_decisions = []
+        archive = []
+        seen_candidates = set()
+        parent_id = "M0000"
+        parent_generation = 0
+        start_round = 1
+        for event in existing:
+            if event.round_id and event.round_id.startswith("R"):
+                try:
+                    start_round = max(start_round, int(event.round_id[1:]) + 1)
+                except ValueError:
+                    pass
+            if event.event_type == "parent.selected":
+                selected = event.payload.get("candidate_id")
+                if selected:
+                    parent_id = str(selected)
+                    parent_generation = int(event.payload.get("generation", parent_generation))
+                    seen_candidates.add(parent_id)
+        adapter = StudentCampaignAdapter(self.compiler, self.worker, self.evaluator)
+        attributor = FailureAttributor()
+        hard_constraints = self._control_hard_constraints()
+        objectives = self._control_objectives()
+        last_failure = None
+        failure_rounds = 0
+        last_promotable = False
+        last_target_satisfied = False
+        stop_reason = "max_rounds"
+        for round_index in range(start_round, int(max_rounds) + 1):
+            round_id = "R%04d" % round_index
+            context = self._context(round_index, (), (), ())
+            try:
+                batch = self._control_batch(
+                    context,
+                    round_index=round_index,
+                    parent_id=parent_id,
+                    parent_generation=parent_generation,
+                )
+                trace.append(
+                    "proposal.generated",
+                    round_id=round_id,
+                    experiment_id=batch.batch_id,
+                    candidate_id=None,
+                    parent_candidate_id=parent_id,
+                    actor=self.campaign_base.controller_identity,
+                    payload=batch.to_dict(),
+                    evidence_ids=batch.parent_selection_evidence_ids,
+                )
+                report = validate_batch(
+                    batch,
+                    base=self.campaign_base,
+                    snapshot=snapshot,
+                    parent_ids={parent_id: parent_generation},
+                    min_candidates=self.min_candidates,
+                    max_candidates=self.max_candidates,
+                )
+                trace.append(
+                    "proposal.validated",
+                    round_id=round_id,
+                    experiment_id=batch.batch_id,
+                    candidate_id=None,
+                    parent_candidate_id=parent_id,
+                    actor=self.campaign_base.controller_identity,
+                    payload={"ok": report.ok, "errors": list(report.errors), "candidate_errors": {key: list(value) for key, value in report.candidate_errors.items()}},
+                    evidence_ids=batch.parent_selection_evidence_ids,
+                )
+                if not report.ok:
+                    raise ValueError("proposal_invalid: " + "; ".join(report.errors or ("candidate validation failed",)))
+            except (TypeError, ValueError, KeyError, OSError) as exc:
+                failure_rounds += 1
+                last_failure = "proposal_invalid"
+                report = attributor.attribute("proposal", {"failure_code": "proposal_invalid", "message": str(exc)}, ())
+                trace.append(
+                    "campaign.replanned",
+                    round_id=round_id,
+                    experiment_id=None,
+                    candidate_id=None,
+                    parent_candidate_id=parent_id,
+                    actor=self.campaign_base.controller_identity,
+                    payload={"failure": report.to_dict(), "action": "repropose_batch"},
+                    evidence_ids=(),
+                )
+                if failure_rounds > self.max_failures:
+                    stop_reason = "failure_budget_exhausted"
+                    break
+                continue
+
+            round_results = []
+            for candidate in batch.candidates:
+                if candidate.candidate_id in seen_candidates:
+                    candidate_decisions.append({"candidate_id": candidate.candidate_id, "promotable": False, "target_satisfied": False, "failure_code": "duplicate_candidate"})
+                    continue
+                seen_candidates.add(candidate.candidate_id)
+                try:
+                    review = self.review_pipeline.review(
+                        candidate,
+                        {
+                            "campaign_id": self.campaign_base.campaign_id,
+                            "evidence_ids": list(batch.parent_selection_evidence_ids),
+                            "hard_constraints": hard_constraints,
+                            "objectives": objectives,
+                            "diagnosis": batch.diagnosis,
+                        },
+                    )
+                    trace.append(
+                        "critic.completed",
+                        round_id=round_id,
+                        experiment_id=candidate.experiment_id,
+                        candidate_id=candidate.candidate_id,
+                        parent_candidate_id=candidate.parent_candidate_id,
+                        actor=self.campaign_base.critic_identity,
+                        payload=review.to_dict(),
+                        evidence_ids=review.advocate.supporting_evidence_ids,
+                    )
+                    reviewed_candidate = review.revision.candidate if review.revision is not None else candidate
+                    if review.revision is not None:
+                        trace.append(
+                            "proposal.revised",
+                            round_id=round_id,
+                            experiment_id=reviewed_candidate.experiment_id,
+                            candidate_id=reviewed_candidate.candidate_id,
+                            parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                            actor=self.campaign_base.critic_identity,
+                            payload=review.revision.to_dict(),
+                            evidence_ids=review.revision.resolved_objection_ids,
+                        )
+                    if not review.approved:
+                        decision = {
+                            "candidate_id": candidate.candidate_id,
+                            "parent_candidate_id": candidate.parent_candidate_id,
+                            "promotable": False,
+                            "target_satisfied": False,
+                            "failure_code": "review_rejected",
+                            "review": review.to_dict(),
+                        }
+                        candidate_decisions.append(decision)
+                        continue
+                    validation = adapter.validate(reviewed_candidate, self.output_root / round_id / candidate.candidate_id)
+                    trace.append(
+                        "training.started",
+                        round_id=round_id,
+                        experiment_id=reviewed_candidate.experiment_id,
+                        candidate_id=reviewed_candidate.candidate_id,
+                        parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                        actor=self.campaign_base.controller_identity,
+                        payload={"fidelity": self.fidelity_schedule[0], "validation": dict(validation)},
+                        evidence_ids=(str(validation.get("manifest_digest")),),
+                    )
+                    execution = adapter.execute(
+                        reviewed_candidate,
+                        self.fidelity_schedule[0],
+                        self.output_root / round_id / candidate.candidate_id,
+                    )
+                    public_execution = self._control_public_execution(execution)
+                    training_obj = execution.get("_training_result")
+                    evaluation_obj = execution.get("_evaluation")
+                    trace.append(
+                        "training.completed",
+                        round_id=round_id,
+                        experiment_id=reviewed_candidate.experiment_id,
+                        candidate_id=reviewed_candidate.candidate_id,
+                        parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                        actor=self.campaign_base.controller_identity,
+                        payload=public_execution.get("training") or {},
+                        evidence_ids=(str(public_execution.get("training", {}).get("child_checkpoint") or "training")),
+                    )
+                    if training_obj is None or getattr(training_obj, "status", "failed") != "success":
+                        failure = attributor.attribute("training", public_execution.get("training") or {"failure_code": "training_failed"}, ())
+                        decision = {"candidate_id": reviewed_candidate.candidate_id, "promotable": False, "target_satisfied": False, "failure_code": failure.failure_code, "failure": failure.to_dict()}
+                        candidate_decisions.append(decision)
+                        continue
+                    trace.append(
+                        "evaluation.completed",
+                        round_id=round_id,
+                        experiment_id=reviewed_candidate.experiment_id,
+                        candidate_id=reviewed_candidate.candidate_id,
+                        parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                        actor=self.campaign_base.evaluator_identity,
+                        payload=public_execution.get("evaluation") or {},
+                        evidence_ids=(str(public_execution.get("evaluation", {}).get("video_path") or "evaluation")),
+                    )
+                    evidence_items = list(adapter.verify(reviewed_candidate, execution, self.output_root / round_id / candidate.candidate_id))
+                    evaluation_valid = bool(getattr(evaluation_obj, "valid", False))
+                    evaluation_promotable = bool(getattr(evaluation_obj, "promotable", False))
+                    evidence_items.append(MetricEvidence("evaluation_promotable", "student-adapter-v1", str(self.output_root / round_id / candidate.candidate_id), 1.0 if evaluation_promotable else 0.0, evaluation_promotable, "student-evaluator", "server", True))
+                    evidence_map = {item.metric_name: item for item in evidence_items}
+                    if validation.get("graph_status") != "compiled":
+                        evidence_map["graph_valid"] = MetricEvidence("graph_valid", "student-adapter-v1", str(self.output_root / round_id / candidate.candidate_id), 0.0, False, "student-compiler", "server", True)
+                    else:
+                        evidence_map["graph_valid"] = MetricEvidence("graph_valid", "student-adapter-v1", str(self.output_root / round_id / candidate.candidate_id), 1.0, True, "student-compiler", "server", True)
+                    constraints = dict(hard_constraints)
+                    constraints.setdefault("graph_valid", True)
+                    decision_obj = gate.evaluate(
+                        reviewed_candidate,
+                        evidence_map,
+                        hard_constraints=constraints,
+                        objectives=objectives,
+                        min_rounds_met=round_index >= self.min_rounds_before_success,
+                    )
+                    decision = {
+                        "candidate_id": reviewed_candidate.candidate_id,
+                        "parent_candidate_id": reviewed_candidate.parent_candidate_id,
+                        "generation": reviewed_candidate.generation,
+                        "promotable": decision_obj.promotable,
+                        "target_satisfied": decision_obj.target_satisfied,
+                        "objective_values": dict(decision_obj.objective_values),
+                        "violations": list(decision_obj.violations),
+                        "reason": decision_obj.reason,
+                        "evidence": {key: value.to_dict() for key, value in evidence_map.items()},
+                        "predicted_metric_delta": dict(reviewed_candidate.predicted_metric_delta),
+                    }
+                    candidate_decisions.append(decision)
+                    self._append_control_experience(reviewed_candidate, evidence_map, decision_obj, round_index=round_index)
+                    trace.append(
+                        "gate.decided",
+                        round_id=round_id,
+                        experiment_id=reviewed_candidate.experiment_id,
+                        candidate_id=reviewed_candidate.candidate_id,
+                        parent_candidate_id=reviewed_candidate.parent_candidate_id,
+                        actor=self.campaign_base.evaluator_identity,
+                        payload={"decision": decision_obj.to_dict(), "candidate": reviewed_candidate.to_dict()},
+                        evidence_ids=decision_obj.evidence_ids,
+                    )
+                    round_results.append((reviewed_candidate, decision_obj, training_obj, evaluation_obj, validation))
+                except (TypeError, ValueError, KeyError, OSError) as exc:
+                    failure = attributor.attribute("execution", {"failure_code": "campaign_error", "message": str(exc)}, ())
+                    candidate_decisions.append({"candidate_id": candidate.candidate_id, "promotable": False, "target_satisfied": False, "failure_code": failure.failure_code, "failure": failure.to_dict()})
+
+            best = self._control_best([item for item in candidate_decisions if item.get("candidate_id") in {value.candidate_id for value in batch.candidates} and item.get("promotable")])
+            if best is not None:
+                last_promotable = True
+                selected = next(item for item in round_results if item[0].candidate_id == best["candidate_id"])
+                selected_candidate, selected_gate, selected_training, selected_evaluation, selected_validation = selected
+                parent_id = selected_candidate.candidate_id
+                parent_generation = selected_candidate.generation
+                trace.append(
+                    "parent.selected",
+                    round_id=round_id,
+                    experiment_id=selected_candidate.experiment_id,
+                    candidate_id=selected_candidate.candidate_id,
+                    parent_candidate_id=selected_candidate.parent_candidate_id,
+                    actor=self.campaign_base.controller_identity,
+                    payload={"candidate_id": parent_id, "generation": parent_generation, "reason": "best_feasible_candidate"},
+                    evidence_ids=selected_gate.evidence_ids,
+                )
+                completed_rounds.append(CampaignRound(round_index, self._proposal(selected_candidate.provenance.get("student_proposal")), None, selected_training, selected_evaluation, None, selected_gate.reason, selected_candidate.candidate_id, selected_candidate.parent_candidate_id))
+                last_target_satisfied = bool(best.get("target_satisfied"))
+                if last_target_satisfied:
+                    stop_reason = "target_satisfied"
+                    break
+            else:
+                failure_rounds += 1
+                last_failure = "candidate_gate_failed"
+                trace.append(
+                    "campaign.replanned",
+                    round_id=round_id,
+                    experiment_id=batch.batch_id,
+                    candidate_id=None,
+                    parent_candidate_id=parent_id,
+                    actor=self.campaign_base.controller_identity,
+                    payload={"action": "retain_parent_and_revise", "candidate_count": len(batch.candidates)},
+                    evidence_ids=(),
+                )
+                if failure_rounds > self.max_failures:
+                    stop_reason = "failure_budget_exhausted"
+                    break
+        if stop_reason == "max_rounds" and not last_target_satisfied:
+            trace.append(
+                "campaign.stopped",
+                round_id="R%04d" % min(int(max_rounds), max(1, start_round + len(completed_rounds))),
+                experiment_id=None,
+                candidate_id=parent_id if parent_id != "M0000" else None,
+                parent_candidate_id=None,
+                actor=self.campaign_base.controller_identity,
+                payload={"reason": stop_reason, "promotable": last_promotable, "target_satisfied": False},
+                evidence_ids=(),
+            )
+        elif last_target_satisfied:
+            trace.append(
+                "campaign.stopped",
+                round_id="R%04d" % max(start_round, start_round + len(completed_rounds) - 1),
+                experiment_id=None,
+                candidate_id=parent_id,
+                parent_candidate_id=None,
+                actor=self.campaign_base.controller_identity,
+                payload={"reason": stop_reason, "promotable": True, "target_satisfied": True},
+                evidence_ids=(),
+            )
+        return CampaignResult(
+            "target_satisfied" if last_target_satisfied else ("promotable" if last_promotable else "failed"),
+            len(completed_rounds),
+            tuple(completed_rounds),
+            last_failure,
+            stop_reason,
+            last_promotable,
+            last_target_satisfied,
+            tuple(dict(item) for item in candidate_decisions),
+            stop_reason,
+            str(self.decision_trace_path),
+        )
+
+    @staticmethod
+    def _proposal(value: Any) -> Optional[StudentProposal]:
+        if value is None:
+            return None
+        return value if isinstance(value, StudentProposal) else StudentProposal.from_dict(value)
+
     def _compile_round(self, proposal: StudentProposal, round_dir: Path) -> CompileManifest:
         compile_dir = round_dir / "compile"
         manifest_path = compile_dir / "compile_manifest.json"
@@ -457,6 +1099,8 @@ class StudentCampaign:
     def run(self, *, max_rounds: int) -> CampaignResult:
         if int(max_rounds) <= 0:
             raise ValueError("max_rounds must be positive")
+        if self.campaign_base is not None:
+            return self._run_control_plane(max_rounds=int(max_rounds))
         self.output_root.mkdir(parents=True, exist_ok=True)
         start_round, persisted_failures, persisted_seen = self._load_resume()
         failures: list[Mapping[str, Any]] = persisted_failures
@@ -594,8 +1238,10 @@ __all__ = [
     "OllamaStudentProposalProvider",
     "build_student_proposal_provider",
     "StudentCampaign",
+    "StudentProposalBatchProvider",
     "StudentProposalProvider",
     "StudentRoundEvaluator",
     "StudentRoundWorker",
     "student_proposal_json_schema",
+    "student_proposal_batch_json_schema",
 ]

@@ -29,6 +29,12 @@ MUTATION_FIELDS = frozenset(
 )
 
 
+_CAPABILITY_ALIASES = {
+    "velocity_distill": "distill",
+    "progressive_distill": "step_distill",
+}
+
+
 class ProposalValidationError(ValueError):
     """Raised for malformed proposal data, before semantic report validation."""
 
@@ -222,8 +228,10 @@ def validate_batch(
             if field_name not in MUTATION_FIELDS:
                 current.append("mutation field is not registered")
         method = candidate.training_recipe.get("method") or candidate.provenance.get("operator")
-        if method is not None and not snapshot.is_available(str(method)):
-            current.append("capability is unavailable: %s" % method)
+        if method is not None:
+            capability_name = _CAPABILITY_ALIASES.get(str(method), str(method))
+            if not snapshot.is_available(capability_name) and not snapshot.is_available(str(method)):
+                current.append("capability is unavailable: %s" % method)
         try:
             candidate.digest(base)
         except (TypeError, ValueError):

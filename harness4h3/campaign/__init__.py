@@ -1,6 +1,7 @@
 """Shared contracts for verifier-grounded autonomous campaigns."""
 
 from .base import ActorIdentity, CampaignBase, CampaignBaseError, canonical_digest, canonical_json
+from .adapters import CandidateExecutor, LegacyH3CampaignAdapter, StudentCampaignAdapter
 from .capabilities import Capability, CapabilityRegistry, CapabilitySnapshot
 from .events import DecisionEvent, DecisionTrace, TraceIntegrityError
 from .failures import FailureAttributor, FailureReport
@@ -18,6 +19,7 @@ from .reviews import (
 
 __all__ = [
     "ActorIdentity",
+    "CandidateExecutor",
     "CampaignBase",
     "CampaignBaseError",
     "Capability",
@@ -34,6 +36,7 @@ __all__ = [
     "AcceptanceGate",
     "GateDecision",
     "MetricEvidence",
+    "LegacyH3CampaignAdapter",
     "pareto_dominates",
     "TraceIntegrityError",
     "ProposalBatch",
@@ -43,6 +46,7 @@ __all__ = [
     "ReviewIdentityError",
     "ReviewPipeline",
     "RevisionRecord",
+    "StudentCampaignAdapter",
     "canonical_digest",
     "canonical_json",
     "validate_batch",
