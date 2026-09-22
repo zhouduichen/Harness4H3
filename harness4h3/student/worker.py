@@ -562,6 +562,19 @@ class StudentTrainWorker:
             if "teacher_world_size" in load_parameters:
                 load_kwargs["teacher_world_size"] = int(teacher_world_size)
             teacher = load_teacher(teacher_checkpoint, selected_teacher_device, **load_kwargs)
+            if not self.backend.offline_simulation:
+                if not isinstance(teacher, TeacherServiceHandle) or not teacher.sharded:
+                    raise StudentTrainingError(
+                        "teacher_not_sharded",
+                        "production real H3 training requires the collective FSDP Teacher service",
+                    )
+                if teacher.world_size != TeacherService.REQUIRED_WORLD_SIZE or len(teacher.devices) != TeacherService.REQUIRED_WORLD_SIZE:
+                    raise StudentTrainingError(
+                        "teacher_world_size_mismatch",
+                        "production real H3 training requires exactly three Teacher ranks",
+                    )
+                if str(selected_student_device) in set(teacher.devices):
+                    raise StudentTrainingError("teacher_student_gpu_overlap", "Student GPU overlaps a Teacher GPU")
             teacher_service = teacher if isinstance(teacher, TeacherServiceHandle) else None
             student = self.backend.build_student(proposal, self.target, selected_student_device)
             student.train(True)
