@@ -33,6 +33,15 @@ def _sha256(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _target_from_latent_options(latent_height: int | None, latent_width: int | None) -> StudentTarget:
+    target_kwargs = {}
+    if latent_height is not None:
+        target_kwargs["latent_height"] = latent_height
+    if latent_width is not None:
+        target_kwargs["latent_width"] = latent_width
+    return StudentTarget(**target_kwargs)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Smoke-test the collective online H3 Teacher")
     parser.add_argument("--checkpoint", required=True)
@@ -41,6 +50,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--devices", required=True, help="exactly three distinct cuda:N values")
     parser.add_argument("--student-device", default="", help="optional Student GPU used for overlap assertion")
+    parser.add_argument(
+        "--latent-height",
+        type=int,
+        default=None,
+        help="H3 cache latent height; required when it differs from the default StudentTarget",
+    )
+    parser.add_argument(
+        "--latent-width",
+        type=int,
+        default=None,
+        help="H3 cache latent width; required when it differs from the default StudentTarget",
+    )
     parser.add_argument("--seed", type=int, default=20260920)
     args = parser.parse_args(argv)
     result_path = Path(args.output).resolve()
@@ -53,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.student_device and args.student_device in devices:
             raise ValueError("Student GPU overlaps a Teacher GPU")
         checkpoint = Path(args.checkpoint).resolve()
-        target = StudentTarget()
+        target = _target_from_latent_options(args.latent_height, args.latent_width)
         input_device = torch.device(devices[0])
         cache = load_h3_cache_item(Path(args.cache_dir), target, torch.device("cpu"), torch.bfloat16)
         if cache.get("audio_latent") is None:
