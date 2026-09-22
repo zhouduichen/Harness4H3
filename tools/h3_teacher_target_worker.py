@@ -11,24 +11,22 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
-from safetensors.torch import load_file
-
 try:
     from h3_real_train_worker import (
+        _construct_model,
         _init_distributed,
         _import_comfy,
         _install_termination_handlers,
-        _load_model_config,
         _make_batch,
         _prepare_cache,
         _wrap_fsdp,
     )
 except ModuleNotFoundError:
     from tools.h3_real_train_worker import (
+        _construct_model,
         _init_distributed,
         _import_comfy,
         _install_termination_handlers,
-        _load_model_config,
         _make_batch,
         _prepare_cache,
         _wrap_fsdp,
@@ -42,24 +40,20 @@ def _write_json(path: Path, value: dict) -> None:
     temporary.replace(path)
 
 
-def _construct_teacher_model(api, checkpoint: Path, rank: int) -> torch.nn.Module:
-    """Use the proven no-init/rank-0-load FSDP construction path."""
+def _construct_teacher_model(
+    api,
+    checkpoint: Path,
+    rank: int,
+    device: Optional[torch.device] = None,
+) -> torch.nn.Module:
+    """Use the shared H3 constructor with rank-0 checkpoint loading."""
 
-    config = _load_model_config(checkpoint)
-    with torch.device("cpu"):
-        model = api["MiniMaxH3Model"](
-            **config,
-            dtype=torch.bfloat16,
-            device=torch.device("cpu"),
-            operations=api["ops"].disable_weight_init,
-        )
-    if rank == 0:
-        state = load_file(str(checkpoint), device="cpu")
-        missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
-        del state
-        if missing or unexpected:
-            raise RuntimeError("teacher/model key mismatch; missing=%s unexpected=%s" % (missing[:3], unexpected[:3]))
-    return model
+    return _construct_model(
+        api,
+        Path(checkpoint).resolve(),
+        device or torch.device("cuda", int(rank)),
+        load_checkpoint=(int(rank) == 0),
+    )
 
 
 def _run(args: argparse.Namespace) -> int:

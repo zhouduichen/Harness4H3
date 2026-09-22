@@ -173,10 +173,10 @@ def _construct_teacher_model(
     """Use the validated H3 constructor with rank-0 checkpoint loading."""
 
     try:
-        from tools.h3_real_train_worker import _construct_model
+        from tools.h3_teacher_target_worker import _construct_teacher_model as construct_teacher_model
     except ModuleNotFoundError:  # direct invocation from tools/ or an installed checkout
-        from h3_real_train_worker import _construct_model
-    return _construct_model(api, checkpoint, device, load_checkpoint=(int(rank) == 0))
+        from h3_teacher_target_worker import _construct_teacher_model as construct_teacher_model
+    return construct_teacher_model(api, checkpoint, rank, device)
 
 
 def _fsdp_rank_main(
