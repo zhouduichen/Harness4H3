@@ -42,19 +42,31 @@ student:
     model: qwen3.5-controller
     base_url: http://127.0.0.1:8000/v1
     timeout_s: 600
-  # These may be the same serving backend with different model identities, or
-  # separate advocate/critical/revision checkpoints for cross-model review.
-  advocate_model: qwen3.5-advocate
-  critical_model: qwen3.5-critical
-  revision_model: qwen3.5-revision
+  # Review roles remain independent even when they share one serving model.
+  advocate_model: qwen3.5-controller
+  critical_model: qwen3.5-controller
+  revision_model: qwen3.5-controller
+  # Optional ablation overrides can select separate model names per role.
   # This must be a trusted, fixed evaluator entrypoint on the remote host.
   evaluation_command:
     - /home/intern/miniconda3/envs/comfy/bin/python
     - /home/intern/huangjiahao/Harness4H3/tools/student_evaluate_worker.py
-  # Optional but required for TARGET_SATISFIED: a trusted target-device
-  # adapter that writes the exact EdgeEvidence contract to --result.
+  # Required for TARGET_SATISFIED together with the profile below: a trusted
+  # target-device adapter that writes the exact EdgeEvidence contract.
   # target_device_command: [/absolute/path/to/trusted_target_device_adapter]
-  # target_device_id: edge-device-v1
+  target_device:
+    id: edge-device-v1
+    runtime_backend: trusted-runtime-v1
+    max_latency_s: 1.0
+    max_memory_gb: 6.0
+    max_energy_j: 20.0
+    max_thermal_c: 75.0
+    max_model_size_gb: 2.0
+    supported_precision: [bf16, fp16]
+    supported_quantization: [none, int8]
+    resolution: [256, 256]
+    frames: 5
+    sampling_steps: 4
   target:
     min_params: 1000000000
     max_params: 2000000000

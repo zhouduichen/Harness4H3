@@ -14,13 +14,14 @@ from typing import Any, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness4h3.student.evaluation_manifest import EvaluationManifest
-from harness4h3.student.gpu import select_free_cuda_device
+from harness4h3.student.gpu import select_free_cuda_device, select_teacher_gpu_devices
 from harness4h3.student.inference import (
     decode_video_latent,
     load_h3_cache_item,
-    sample_h3_latent_with_role,
+    sample_h3_latent_with_predictor,
     write_video,
 )
+from harness4h3.student.teacher_service import TeacherService, TeacherServiceHandle
 from harness4h3.student.quality import ClipTemporalQualityBackend, QualityBackendUnavailable
 from harness4h3.student.proposal import StudentTarget
 from harness4h3.campaign.base import sha256_path
@@ -54,6 +55,9 @@ def main(argv=None) -> int:
     parser.add_argument("--condition-dim", type=int, default=5120)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--wait-for-gpu-s", type=int, default=600)
+    parser.add_argument("--teacher-world-size", type=int, default=3)
+    parser.add_argument("--teacher-rank-min-free-memory-gb", type=float, default=20.0)
+    parser.add_argument("--teacher-devices", default="", help="comma-separated cuda:N values; otherwise select three GPUs")
     parser.add_argument("--sampling-steps", type=int, default=4)
     parser.add_argument("--seed", type=int, default=20260920)
     parser.add_argument(
@@ -64,6 +68,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     output_dir = Path(args.output).resolve()
     result_path = Path(args.result).resolve()
+    teacher_service: TeacherServiceHandle | None = None
     try:
         import torch
 
@@ -73,7 +78,24 @@ def main(argv=None) -> int:
             raise ValueError("--teacher is required for h3_teacher_generation_baseline")
         teacher_checkpoint_sha256 = sha256_path(Path(args.teacher)) if args.teacher else None
         clip_model_hash = sha256_path(Path(args.clip_model_path))
-        device_name = select_free_cuda_device(8.0, args.wait_for_gpu_s) if args.device == "auto" else args.device
+        if args.baseline_kind == "h3_teacher_generation_baseline" and args.teacher_world_size != TeacherService.REQUIRED_WORLD_SIZE:
+            raise ValueError("h3_teacher_generation_baseline requires teacher-world-size=3")
+        if args.baseline_kind == "h3_teacher_generation_baseline" and args.device == "auto":
+            teacher_devices = select_teacher_gpu_devices(
+                args.teacher_world_size,
+                args.teacher_rank_min_free_memory_gb,
+                args.wait_for_gpu_s,
+            )
+        else:
+            if args.teacher_devices:
+                teacher_devices = tuple(item.strip() for item in args.teacher_devices.split(",") if item.strip())
+            else:
+                teacher_devices = (select_free_cuda_device(8.0, args.wait_for_gpu_s) if args.device == "auto" else args.device,)
+        if args.baseline_kind == "h3_teacher_generation_baseline" and len(teacher_devices) != 3:
+            raise ValueError("h3_teacher_generation_baseline requires three distinct Teacher GPUs")
+        if len(set(teacher_devices)) != len(teacher_devices) or any(not item.startswith("cuda:") for item in teacher_devices):
+            raise ValueError("Teacher devices must be distinct explicit cuda:N values")
+        device_name = teacher_devices[0]
         device = torch.device(device_name)
         quality_backend = ClipTemporalQualityBackend(args.clip_model_path, device=args.quality_device)
         target = StudentTarget(
@@ -87,14 +109,14 @@ def main(argv=None) -> int:
         latencies = []
         peak_memory_gb = 0.0
         model_load_time_s = 0.0
-        teacher_adapter = None
-        teacher_role = None
         if args.baseline_kind == "h3_teacher_generation_baseline":
-            from h3_training.adapters.real_h3 import RealMiniMaxH3Adapter
-
             model_load_started = time.perf_counter()
-            teacher_adapter = RealMiniMaxH3Adapter(Path(args.comfyui_root), device=str(device), dtype=torch.bfloat16)
-            teacher_role = teacher_adapter.load_role(Path(args.teacher), trainable=False)
+            teacher_service = TeacherService(
+                Path(args.teacher),
+                Path(args.comfyui_root),
+                teacher_devices,
+                dtype=torch.bfloat16,
+            ).start()
             model_load_time_s = time.perf_counter() - model_load_started
         for case in manifest.cases:
             cache_key = str(Path(case.cache_path).resolve())
@@ -104,9 +126,8 @@ def main(argv=None) -> int:
                 if args.baseline_kind == "h3_teacher_generation_baseline" and cache_item.get("audio_latent") is None:
                     raise ValueError("H3 teacher baseline requires audio latent in cache item %s" % cache_key)
                 if args.baseline_kind == "h3_teacher_generation_baseline":
-                    latent, sampling_latency = sample_h3_latent_with_role(
-                        teacher_adapter,
-                        teacher_role,
+                    latent, sampling_latency = sample_h3_latent_with_predictor(
+                        teacher_service,
                         cache_item["prompt"],
                         tuple(cache_item["latent"].shape),
                         tuple(cache_item["audio_latent"].shape),
@@ -156,6 +177,13 @@ def main(argv=None) -> int:
                 del frames, latent
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
+        teacher_forward_count = int(teacher_service.forward_count) if teacher_service is not None else 0
+        teacher_peak_memory_gb = float(teacher_service.teacher_peak_memory_gb) if teacher_service is not None else 0.0
+        teacher_ranks_used = sorted(teacher_service.ranks_used) if teacher_service is not None else []
+        teacher_sharded = bool(teacher_service.sharded) if teacher_service is not None else False
+        peak_memory_gb = max(peak_memory_gb, teacher_peak_memory_gb)
+        if teacher_service is not None:
+            teacher_service.close()
         quality = float(statistics.mean(float(item["quality"]["aggregate"]) for item in cases))
         hardware = {
             "latency_s": float(statistics.median(latencies)),
@@ -203,6 +231,14 @@ def main(argv=None) -> int:
             "quality_backend": "clip_temporal",
             "quality": {"score": quality, "score_type": "clip_temporal", "cases": cases},
             "hardware": hardware,
+            "teacher_service": {
+                "sharded": teacher_sharded,
+                "world_size": len(teacher_devices),
+                "devices": list(teacher_devices),
+                "ranks_used": teacher_ranks_used,
+                "forward_count": teacher_forward_count,
+                "peak_memory_gb": teacher_peak_memory_gb,
+            },
             "optimization_metrics": {
                 "quality": quality,
                 "latency": hardware["latency_ms"],
@@ -214,9 +250,13 @@ def main(argv=None) -> int:
         _write(output_dir / "teacher-baseline.json", payload)
         return 0
     except QualityBackendUnavailable as exc:
+        if teacher_service is not None:
+            teacher_service.close()
         _write(result_path, {"status": "failed", "failure_code": "quality_evaluator_unavailable", "message": str(exc)})
         return 1
     except Exception as exc:
+        if teacher_service is not None:
+            teacher_service.close()
         _write(result_path, {"status": "failed", "failure_code": "teacher_baseline_failed", "message": str(exc)})
         return 1
 

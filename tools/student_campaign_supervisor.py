@@ -57,8 +57,9 @@ def main(argv=None) -> int:
             max_failures=config.max_failures,
             min_rounds_before_success=config.min_rounds_before_success,
             retention_handler=RemoteStudentRetention(config, client).retain,
+            target_device_profile=config.target_device,
         )
-        if config.target_device_command and config.target_device_id:
+        if config.target_device_command and config.target_device_id and config.target_device is not None:
             campaign_kwargs["target_device_evaluator"] = RemoteTargetDeviceEvaluator(config, client)
         if config.quality_backend == "clip_temporal":
             teacher_baseline = RemoteStudentBaseline(config, client).run()

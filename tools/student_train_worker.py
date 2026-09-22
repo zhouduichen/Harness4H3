@@ -151,8 +151,8 @@ def main(argv=None) -> int:
     parser.add_argument("--parent-checkpoint", default="")
     parser.add_argument("--parent-candidate-id", default="")
     args = parser.parse_args(argv)
-    if args.teacher_world_size < 2 or args.teacher_world_size > 3:
-        parser.error("--teacher-world-size must be between 2 and 3")
+    if args.teacher_world_size != 3:
+        parser.error("--teacher-world-size must be exactly 3")
     manifest_path = Path(args.manifest).resolve()
     result_path = Path(args.result).resolve()
     handoff_acquired = False

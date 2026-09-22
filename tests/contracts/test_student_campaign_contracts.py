@@ -14,6 +14,8 @@ from harness4h3.campaign.reviews import ReviewPipeline, review_json_schema
 from harness4h3.student.campaign import StudentCampaign, student_proposal_json_schema
 from harness4h3.student.fidelity import FidelityGate, stage_spec
 from harness4h3.student.proposal import ProposalValidationError, StudentProposal, StudentTarget
+from harness4h3.student.edge import FakeTargetDeviceRunner, TargetDeviceEvaluator
+from harness4h3.student.target import TargetDeviceProfile
 from harness4h3.student.worker import StudentTrainWorker, TrainingResult
 from tests.unit.test_student_proposal import valid_payload
 
@@ -125,7 +127,7 @@ def test_campaign_does_not_start_f2_after_f1_gate_failure(tmp_path):
     assert worker.fidelities and set(worker.fidelities) == {"F1"}
 
 
-def test_edge_evidence_is_required_for_target_satisfied():
+def test_edge_evidence_is_required_for_target_satisfied(tmp_path: Path):
     candidate = _candidate_envelope()
     evidence = {
         "quality": MetricEvidence("quality", "v1", "quality", 0.8, True, "server", "server"),
@@ -138,7 +140,30 @@ def test_edge_evidence_is_required_for_target_satisfied():
     assert result.promotable is True
     assert result.target_satisfied is False
     evidence["edge_evidence_complete"] = MetricEvidence("edge_evidence_complete", "v1", "edge-device", 1.0, True, "edge-runtime", "edge-device")
-    result = gate.evaluate(candidate, evidence, hard_constraints={"min_quality_score": 0.7}, objectives={"quality": "maximize"}, min_rounds_met=True)
+    checkpoint = tmp_path / "contract-student.safetensors"
+    checkpoint.write_bytes(b"contract-student")
+    try:
+        edge = TargetDeviceEvaluator(FakeTargetDeviceRunner(), target_device_id="edge-device").evaluate(
+            checkpoint, {"proposal_digest": "contract"}, tmp_path / "contract-edge"
+        )
+        evidence.update({item.metric_name: item.to_metric_evidence() for item in edge})
+    finally:
+        checkpoint.unlink(missing_ok=True)
+    profile = TargetDeviceProfile(
+        id="edge-device",
+        runtime_backend="fake-runtime",
+        max_latency_s=0.02,
+        max_memory_gb=1.0,
+        max_energy_j=2.0,
+        max_thermal_c=60.0,
+        max_model_size_gb=1.0,
+        supported_precision=("bf16",),
+        supported_quantization=("none",),
+        resolution=(512, 512),
+        frames=5,
+        sampling_steps=1,
+    )
+    result = gate.evaluate(candidate, evidence, hard_constraints={"min_quality_score": 0.7}, objectives={"quality": "maximize"}, min_rounds_met=True, target_device_profile=profile)
     assert result.target_satisfied is True
 
 

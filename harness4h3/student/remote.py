@@ -225,6 +225,10 @@ class RemoteStudentBaseline:
             self.config.worker_device,
             "--wait-for-gpu-s",
             "600",
+            "--teacher-world-size",
+            str(self.config.teacher_world_size),
+            "--teacher-rank-min-free-memory-gb",
+            str(self.config.teacher_rank_min_free_memory_gb),
         )
         self.client.run(command, timeout_s=max(3600.0, self.config.controller.timeout_s * 20), check=False)
         raw = self.client.read_json(result_path)
@@ -239,8 +243,8 @@ class RemoteTargetDeviceEvaluator:
     def __init__(self, config: StudentCampaignConfig, client: SSHClient):
         self.config = config
         self.client = client
-        if not config.target_device_command or not config.target_device_id:
-            raise ValueError("target-device command and device id are required")
+        if not config.target_device_command or not config.target_device_id or config.target_device is None:
+            raise ValueError("target-device command, device id, and TargetDeviceProfile are required")
 
     def evaluate(self, checkpoint: Path, proposal: Any, round_dir: Path) -> tuple[EdgeEvidence, ...]:
         remote_dir = str(PurePosixPath(self.config.remote_campaign_root) / round_dir.name)
@@ -269,7 +273,7 @@ class RemoteTargetDeviceEvaluator:
         if not isinstance(raw_evidence, list):
             raise ValueError("target-device result must contain an evidence array")
         evidence = tuple(EdgeEvidence.from_dict(item) for item in raw_evidence)
-        return validate_edge_evidence(evidence, target_device_id=self.config.target_device_id)
+        return validate_edge_evidence(evidence, target_device_id=self.config.target_device.id)
 
 
 class RemoteStudentRetention:

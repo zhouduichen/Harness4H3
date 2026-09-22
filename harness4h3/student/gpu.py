@@ -120,6 +120,39 @@ def select_free_cuda_device(min_free_memory_gb: float, wait_s: int) -> str:
     return select_free_cuda_devices((float(min_free_memory_gb),), wait_s)[0]
 
 
+def select_teacher_gpu_devices(
+    world_size: int,
+    min_free_memory_gb: float,
+    wait_s: int,
+    *,
+    visible_devices: Optional[Sequence[str]] = None,
+) -> tuple[str, ...]:
+    """Select exactly ``world_size`` distinct GPUs for a sharded Teacher."""
+
+    world_size = int(world_size)
+    minimum = float(min_free_memory_gb)
+    if world_size != 3 or minimum <= 0:
+        raise ValueError("online H3 Teacher requires world_size=3 and a positive memory floor")
+    allowed = set(str(item) for item in visible_devices) if visible_devices is not None else None
+    deadline = time.monotonic() + max(0, int(wait_s))
+    last_status = "nvidia-smi returned fewer than three eligible GPUs"
+    while True:
+        try:
+            available = list(_query_free_memory())
+        except (OSError, subprocess.SubprocessError) as exc:
+            available = []
+            last_status = "unable to query nvidia-smi: %s" % exc
+        if allowed is not None:
+            available = [item for item in available if item[0] in allowed]
+        selected = [item for item in sorted(available, key=lambda item: item[1], reverse=True) if item[1] >= minimum]
+        if len(selected) >= world_size:
+            return tuple(item[0] for item in selected[:world_size])
+        last_status = "fewer than three Teacher GPUs satisfy %.3f GiB" % minimum
+        if time.monotonic() >= deadline:
+            raise GPUResourceUnavailable("Teacher GPU lease timeout after %ss: %s" % (int(wait_s), last_status))
+        time.sleep(min(30.0, max(1.0, deadline - time.monotonic())))
+
+
 def _query_free_memory() -> tuple[tuple[str, float], ...]:
     """Return visible CUDA devices and free memory in GiB."""
 
@@ -272,5 +305,6 @@ __all__ = [
     "release_controller_handoff",
     "select_free_cuda_device",
     "select_free_cuda_devices",
+    "select_teacher_gpu_devices",
     "select_role_gpu_allocation",
 ]

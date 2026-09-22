@@ -13,6 +13,7 @@ from .proposal import (
 from .campaign import StudentProposalBatchProvider, build_student_control_plane, student_proposal_batch_json_schema
 from .fidelity import FidelityGate, FidelityGateDecision, stage_spec
 from .worker import FidelitySpec, fidelity_spec
+from .target import TargetDeviceProfile
 
 __all__ = [
     "ArchitectureSpec",
@@ -31,4 +32,5 @@ __all__ = [
     "FidelityGate",
     "FidelityGateDecision",
     "stage_spec",
+    "TargetDeviceProfile",
 ]

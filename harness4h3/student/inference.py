@@ -224,6 +224,54 @@ def sample_h3_latent_with_role(
     return video, time.perf_counter() - started
 
 
+def sample_h3_latent_with_predictor(
+    predictor: Any,
+    prompt: torch.Tensor,
+    video_shape: tuple[int, ...],
+    audio_shape: tuple[int, ...],
+    device: torch.device,
+    *,
+    sampling_steps: int,
+    seed: int,
+    dtype: torch.dtype = torch.bfloat16,
+) -> tuple[torch.Tensor, float]:
+    """Sample with the collective online Teacher request boundary.
+
+    This is deliberately the same shifted H3 schedule and scheduler update as
+    ``sample_h3_latent_with_role``; only the prediction provider changes from
+    a local full model to the three-rank FSDP service.
+    """
+
+    if int(sampling_steps) <= 0:
+        raise StudentGenerationError("invalid_sampling_steps", "sampling_steps must be positive")
+
+    def shifted(value: float, amount: float) -> float:
+        return amount * value / (1.0 + (amount - 1.0) * value)
+
+    base = [1.0 - index / float(sampling_steps) for index in range(int(sampling_steps) + 1)]
+    video_sigmas = tuple(shifted(value, 12.0) for value in base)
+    audio_sigmas = tuple(shifted(value, 3.0) for value in base)
+    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    video = torch.randn(video_shape, generator=generator, device="cpu", dtype=torch.float32).to(device=device, dtype=dtype)
+    audio = torch.randn(audio_shape, generator=generator, device="cpu", dtype=torch.float32).to(device=device, dtype=dtype)
+    conditioning = Conditioning(prompt.to(device=device, dtype=dtype))
+    started = time.perf_counter()
+    with torch.inference_mode():
+        for index in range(int(sampling_steps)):
+            timestep = ModalTimesteps(
+                video=torch.full((video.shape[0],), float(video_sigmas[index]), device=device, dtype=torch.float32),
+                audio=torch.full((audio.shape[0],), float(audio_sigmas[index]), device=device, dtype=torch.float32),
+            )
+            prediction = predictor.predict(
+                ModalLatents(video=video, audio=audio), timestep, conditioning
+            )
+            if prediction.video is None or prediction.audio is None:
+                raise StudentGenerationError("h3_teacher_output_missing", "online H3 Teacher returned incomplete output")
+            video = video + (video_sigmas[index] - video_sigmas[index + 1]) * prediction.video.to(device=device, dtype=dtype)
+            audio = audio + (audio_sigmas[index] - audio_sigmas[index + 1]) * prediction.audio.to(device=device, dtype=dtype)
+    return video, time.perf_counter() - started
+
+
 def decode_video_latent(comfyui_root: Path, vae_name: str, latent: torch.Tensor) -> torch.Tensor:
     root = str(Path(comfyui_root).resolve())
     if root not in sys.path:
@@ -360,5 +408,6 @@ __all__ = [
     "sample_student_latent",
     "sample_h3_latent",
     "sample_h3_latent_with_role",
+    "sample_h3_latent_with_predictor",
     "write_video",
 ]

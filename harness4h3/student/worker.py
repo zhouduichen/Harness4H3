@@ -111,6 +111,9 @@ class TrainingResult:
     student_device: str = ""
     teacher_ranks_used: tuple[int, ...] = ()
     online_forward: bool = False
+    teacher_sharded: bool = False
+    teacher_forward_count: int = 0
+    teacher_peak_memory_gb: float = 0.0
     stage_lineage: tuple[Mapping[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -537,6 +540,18 @@ class StudentTrainWorker:
             teacher_sha256 = sha256_file(teacher_checkpoint)
             selected_student_device = torch.device(student_device or device or ("cuda" if torch.cuda.is_available() else "cpu"))
             selected_teacher_device = torch.device(teacher_device or selected_student_device)
+            selected_teacher_names = tuple(str(item) for item in teacher_devices)
+            if selected_student_device.type == "cuda" and str(selected_student_device) in selected_teacher_names:
+                return self._failure(
+                    manifest,
+                    started,
+                    "teacher_student_gpu_overlap",
+                    "Student GPU overlaps a Teacher GPU",
+                    parent_sha256=teacher_sha256,
+                    offline_simulation=self.backend.offline_simulation,
+                    algorithm_name=algorithm_name,
+                    fidelity=fidelity,
+                )
             if (selected_student_device.type == "cuda" or selected_teacher_device.type == "cuda") and not torch.cuda.is_available():
                 return self._failure(manifest, started, "device_unavailable", "CUDA is not available", parent_sha256=teacher_sha256, offline_simulation=self.backend.offline_simulation, algorithm_name=algorithm_name, fidelity=fidelity)
             load_teacher = self.backend.load_teacher
@@ -695,6 +710,9 @@ class StudentTrainWorker:
             teacher_device_names = tuple(getattr(teacher, "devices", tuple(str(item) for item in teacher_devices)))
             teacher_rank_usage = tuple(sorted(teacher_service.ranks_used)) if teacher_service is not None else ()
             online_teacher_forward = teacher_service is not None
+            teacher_sharded = bool(getattr(teacher_service, "sharded", False)) if teacher_service is not None else False
+            teacher_forward_count = int(getattr(teacher_service, "forward_count", 0)) if teacher_service is not None else 0
+            teacher_peak_memory = float(getattr(teacher_service, "teacher_peak_memory_gb", 0.0)) if teacher_service is not None else 0.0
             if teacher_service is not None:
                 teacher_service.close()
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -716,6 +734,9 @@ class StudentTrainWorker:
                 "teacher_ranks_used": ",".join(str(item) for item in teacher_rank_usage),
                 "student_device": str(selected_student_device),
                 "online_forward": str(online_teacher_forward).lower(),
+                "teacher_sharded": str(teacher_sharded).lower(),
+                "teacher_forward_count": str(teacher_forward_count),
+                "teacher_peak_memory_gb": str(teacher_peak_memory),
                 "stage_lineage": json.dumps(list(stage_lineage), sort_keys=True),
             }
             self.backend.save_student(student, child_path, metadata)
@@ -764,6 +785,9 @@ class StudentTrainWorker:
                 student_device=str(selected_student_device),
                 teacher_ranks_used=teacher_rank_usage,
                 online_forward=online_teacher_forward,
+                teacher_sharded=teacher_sharded,
+                teacher_forward_count=teacher_forward_count,
+                teacher_peak_memory_gb=teacher_peak_memory,
                 stage_lineage=tuple(stage_lineage),
             )
         except StudentTrainingError as exc:
@@ -826,14 +850,12 @@ class RealH3TeacherBackend:
         self.adapter = RealMiniMaxH3Adapter(self.comfyui_root, device=str(device), dtype=self.dtype)
         devices = tuple(str(item) for item in teacher_devices) or self.teacher_devices
         world_size = int(teacher_world_size or self.teacher_world_size or len(devices) or 1)
-        if devices and len(devices) > 1:
-            if len(devices) != world_size:
-                raise StudentTrainingError(
-                    "teacher_world_size_mismatch",
-                    "Teacher device count does not match world size",
-                )
-            return TeacherService(checkpoint, self.comfyui_root, devices, dtype=self.dtype).start()
-        return self.adapter.load_role(Path(checkpoint), trainable=False)
+        if world_size != TeacherService.REQUIRED_WORLD_SIZE or len(devices) != TeacherService.REQUIRED_WORLD_SIZE:
+            raise StudentTrainingError(
+                "teacher_world_size_mismatch",
+                "real online H3 Teacher requires exactly three distinct devices/ranks",
+            )
+        return TeacherService(checkpoint, self.comfyui_root, devices, dtype=self.dtype).start()
 
     def build_student(self, proposal: StudentProposal, target: StudentTarget, device: torch.device) -> nn.Module:
         return build_student(proposal, device=device, target=target).to(dtype=self.dtype)

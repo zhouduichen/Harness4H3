@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -21,6 +21,7 @@ EDGE_METRICS = (
     "edge_memory",
     "edge_energy",
     "edge_thermal",
+    "edge_model_size",
 )
 
 
@@ -41,6 +42,7 @@ class EdgeEvidence:
     measurement_reference: str
     metric_version: str = "edge-v1"
     hard: bool = True
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.metric_name not in EDGE_METRICS:
@@ -58,6 +60,7 @@ class EdgeEvidence:
             evidence_source="target-device",
             device_profile_id=self.target_device_id,
             hard=self.hard,
+            metadata=dict(self.metadata),
         )
 
     @classmethod
@@ -79,6 +82,7 @@ class EdgeEvidence:
             measurement_reference=str(raw["measurement_reference"]),
             metric_version=str(raw.get("metric_version", "edge-v1")),
             hard=bool(raw.get("hard", True)),
+            metadata=dict(raw.get("metadata") or {}),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -90,6 +94,7 @@ class EdgeEvidence:
             "measurement_reference": self.measurement_reference,
             "metric_version": self.metric_version,
             "hard": self.hard,
+            "metadata": dict(self.metadata),
         }
 
 
@@ -129,11 +134,14 @@ class TargetDeviceRunner(Protocol):
 class TargetDeviceEvaluator:
     """Run the complete target-device artifact path and emit edge-only evidence."""
 
-    def __init__(self, runner: TargetDeviceRunner, *, target_device_id: str):
+    def __init__(self, runner: TargetDeviceRunner, *, target_device_id: str, profile: Any = None):
         self.runner = runner
         self.target_device_id = str(target_device_id).strip()
         if not self.target_device_id:
             raise ValueError("target_device_id must not be empty")
+        self.profile = profile
+        if profile is not None and str(profile.id) != self.target_device_id:
+            raise ValueError("target-device evaluator id does not match TargetDeviceProfile")
 
     def evaluate(self, checkpoint: Path, proposal: Any, round_dir: Path) -> tuple[EdgeEvidence, ...]:
         checkpoint = Path(checkpoint).resolve()
@@ -152,6 +160,10 @@ class TargetDeviceEvaluator:
         if not deployment_id:
             raise ValueError("target device deployment returned no identity")
         measurements = dict(self.runner.benchmark(deployment_id, compiled, output_dir / "benchmark", proposal_payload))
+        required_measurements = ("latency_s", "memory_gb", "energy_j", "thermal_c", "model_size_gb")
+        missing = [name for name in required_measurements if measurements.get(name) is None]
+        if missing:
+            raise ValueError("target device benchmark is missing: %s" % ", ".join(missing))
         artifact_hash = artifact_sha256(compiled)
         reference = str(output_dir / "benchmark" / "edge-evidence.json")
         payload = {
@@ -171,9 +183,28 @@ class TargetDeviceEvaluator:
             "edge_memory": float(measurements["memory_gb"]),
             "edge_energy": float(measurements["energy_j"]),
             "edge_thermal": float(measurements["thermal_c"]),
+            "edge_model_size": float(measurements["model_size_gb"]),
+        }
+        deployment = proposal_payload.get("deployment") if isinstance(proposal_payload, Mapping) else {}
+        deployment = deployment if isinstance(deployment, Mapping) else {}
+        profile = self.profile
+        metadata = {
+            "runtime_backend": str(
+                measurements.get("runtime_backend")
+                or (getattr(profile, "runtime_backend", "") if profile is not None else "")
+            ),
+            "precision": str(measurements.get("precision") or deployment.get("precision") or ""),
+            "quantization": str(measurements.get("quantization") or deployment.get("quantization") or ""),
+            "resolution": measurements.get(
+                "resolution", list(getattr(profile, "resolution", ())) if profile is not None else None
+            ),
+            "frames": measurements.get("frames", getattr(profile, "frames", None) if profile is not None else None),
+            "sampling_steps": measurements.get(
+                "sampling_steps", getattr(profile, "sampling_steps", None) if profile is not None else None
+            ),
         }
         return tuple(
-            EdgeEvidence(name, value, artifact_hash, self.target_device_id, reference)
+            EdgeEvidence(name, value, artifact_hash, self.target_device_id, reference, metadata=metadata)
             for name, value in values.items()
         )
 
@@ -208,10 +239,22 @@ class FakeTargetDeviceRunner:
         (output_dir / "deployment.json").write_text("{\"status\": \"deployed\"}\n", encoding="utf-8")
         return "fake-edge-deployment"
 
-    def benchmark(self, deployment_id: str, compiled: Path, output_dir: Path, proposal: Mapping[str, Any]) -> Mapping[str, float]:
+    def benchmark(self, deployment_id: str, compiled: Path, output_dir: Path, proposal: Mapping[str, Any]) -> Mapping[str, Any]:
         del deployment_id, compiled, proposal
         output_dir.mkdir(parents=True, exist_ok=True)
-        return {"latency_s": 0.0125, "memory_gb": 0.5, "energy_j": 1.25, "thermal_c": 48.0}
+        return {
+            "latency_s": 0.0125,
+            "memory_gb": 0.5,
+            "energy_j": 1.25,
+            "thermal_c": 48.0,
+            "model_size_gb": 0.5,
+            "runtime_backend": "fake-runtime",
+            "precision": "bf16",
+            "quantization": "none",
+            "resolution": [512, 512],
+            "frames": 5,
+            "sampling_steps": 1,
+        }
 
 
 __all__ = [

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from .proposals import CandidateEnvelope
@@ -19,6 +19,7 @@ class MetricEvidence:
     evidence_source: str
     device_profile_id: str
     hard: bool = False
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in ("metric_name", "metric_version", "input_reference", "evidence_source", "device_profile_id"):
@@ -67,6 +68,7 @@ _ALIASES = {
     "latency_s": "latency_s",
     "memory": "peak_memory_gb",
     "peak_memory_gb": "peak_memory_gb",
+    "training_peak_memory_gb": "peak_memory_gb",
     "size": "model_size_gb",
     "model_size_gb": "model_size_gb",
     "energy": "energy_j",
@@ -82,6 +84,7 @@ _EDGE_REQUIRED_EVIDENCE = (
     "edge_memory",
     "edge_energy",
     "edge_thermal",
+    "edge_model_size",
 )
 
 
@@ -128,13 +131,13 @@ class AcceptanceGate:
         hard_constraints: Mapping[str, Any],
         objectives: Mapping[str, str],
         min_rounds_met: bool,
+        target_device_profile: Optional[Any] = None,
     ) -> GateDecision:
         violations = []
         evidence_ids = []
         edge_complete = _edge_evidence_complete(evidence)
         edge_metric_for = {
             "latency_s": "edge_latency",
-            "peak_memory_gb": "edge_memory",
             "energy_j": "edge_energy",
         }
         for item in evidence.values():
@@ -161,6 +164,78 @@ class AcceptanceGate:
                 violations.append(str(constraint))
             elif direction is None and bool(threshold) != bool(value):
                 violations.append(str(constraint))
+
+        profile_passed = False
+        profile_missing_or_incomplete = False
+        if target_device_profile is None:
+            profile_missing_or_incomplete = True
+        elif not edge_complete:
+            profile_missing_or_incomplete = True
+        else:
+            profile = target_device_profile
+            edge_devices = {
+                item.device_profile_id
+                for item in evidence.values()
+                if str(item.metric_name).startswith("edge_")
+            }
+            if edge_devices != {str(profile.id)}:
+                violations.append("target_device_identity")
+            profile_checks = (
+                ("edge_latency", float(profile.max_latency_s), "max"),
+                ("edge_memory", float(profile.max_edge_memory_gb), "max"),
+                ("edge_energy", float(profile.max_energy_j), "max"),
+                ("edge_thermal", float(profile.max_thermal_c), "max"),
+                ("edge_model_size", float(profile.max_model_size_gb), "max"),
+            )
+            profile_passed = True
+            for metric_name, limit, direction in profile_checks:
+                item = _find_evidence(evidence, metric_name)
+                if item is None or item.value is None or not item.valid:
+                    violations.append("%s:missing_or_invalid" % metric_name)
+                    profile_passed = False
+                    continue
+                if direction == "max" and float(item.value) > limit:
+                    violations.append("target_%s" % metric_name)
+                    profile_passed = False
+            metadata = next(
+                (
+                    dict(item.metadata)
+                    for item in evidence.values()
+                    if item.metric_name == "edge_device" and item.metadata
+                ),
+                {},
+            )
+            if metadata.get("runtime_backend") and metadata["runtime_backend"] != profile.runtime_backend:
+                violations.append("target_runtime_backend")
+                profile_passed = False
+            if metadata.get("precision") and metadata["precision"] not in profile.supported_precision:
+                violations.append("target_precision")
+                profile_passed = False
+            if metadata.get("quantization") and metadata["quantization"] not in profile.supported_quantization:
+                violations.append("target_quantization")
+                profile_passed = False
+            if metadata.get("resolution") is not None:
+                try:
+                    if tuple(int(item) for item in metadata["resolution"]) != tuple(profile.resolution):
+                        violations.append("target_resolution")
+                        profile_passed = False
+                except (TypeError, ValueError):
+                    violations.append("target_resolution")
+                    profile_passed = False
+            for name, expected in (("frames", profile.frames), ("sampling_steps", profile.sampling_steps)):
+                if metadata.get(name) is not None and int(metadata[name]) != int(expected):
+                    violations.append("target_%s" % name)
+                    profile_passed = False
+            candidate_deployment = getattr(candidate, "deployment_recipe", {})
+            if isinstance(candidate_deployment, Mapping):
+                precision = candidate_deployment.get("precision")
+                quantization = candidate_deployment.get("quantization")
+                if precision and str(precision) not in profile.supported_precision:
+                    violations.append("target_precision")
+                    profile_passed = False
+                if quantization and str(quantization) not in profile.supported_quantization:
+                    violations.append("target_quantization")
+                    profile_passed = False
         objective_values: Dict[str, float] = {}
         if not violations:
             for objective in objectives:
@@ -169,12 +244,14 @@ class AcceptanceGate:
                     objective_values[str(objective)] = float(item.value)
         feasible = not violations
         promotable = feasible
-        target_satisfied = feasible and promotable and bool(min_rounds_met) and edge_complete
+        target_satisfied = feasible and promotable and bool(min_rounds_met) and edge_complete and profile_passed
         reason = "feasible" if feasible else "hard_constraint_failure"
         if feasible and not min_rounds_met:
             reason = "promotable_before_target_satisfied"
         elif feasible and not edge_complete:
             reason = "promotable_for_edge_test"
+        elif feasible and (profile_missing_or_incomplete or not profile_passed):
+            reason = "target_device_profile_failure"
         return GateDecision(
             feasible=feasible,
             promotable=promotable,

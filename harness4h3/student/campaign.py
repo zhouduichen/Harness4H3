@@ -85,7 +85,7 @@ def build_student_control_plane(
             "latency_verified": True,
             "memory_verified": True,
             "model_size_verified": True,
-            "max_peak_memory_gb": float(config.target.max_peak_memory_gb),
+            "max_training_peak_memory_gb": float(config.target.max_training_peak_memory_gb),
         },
         "objectives": {
             "quality": "maximize",
@@ -94,6 +94,8 @@ def build_student_control_plane(
             "model_size_gb": "minimize",
         },
     }
+    target_device = getattr(config, "target_device", None)
+    target_profile["target_device"] = target_device.to_dict() if target_device is not None else None
     if quality_floor is not None:
         target_profile["constraints"]["min_quality_score"] = quality_floor
     verifier_bank = {
@@ -118,15 +120,13 @@ def build_student_control_plane(
     )
     provider_name = str(getattr(provider, "provider_name", "openai_compatible"))
     model_name = str(getattr(provider, "model_name", "student-review-model"))
-    advocate_model = str(getattr(config, "advocate_model", "") or (model_name + "::advocate"))
+    advocate_model = str(getattr(config, "advocate_model", "") or model_name)
     critic_model = str(
         getattr(config, "critical_model", "")
         or getattr(config, "critic_model", "")
-        or (model_name + "::critical")
+        or model_name
     )
-    modifier_model = str(getattr(config, "revision_model", "") or (model_name + "::revision"))
-    if len({advocate_model, critic_model, modifier_model}) != 3:
-        raise ValueError("review actors must use distinct model identities")
+    modifier_model = str(getattr(config, "revision_model", "") or model_name)
     base_url = str(getattr(provider, "base_url", "http://127.0.0.1:11434"))
     timeout_s = float(getattr(provider, "timeout_s", 180.0))
     advocate_identity = ActorIdentity("student-advocate", advocate_model, "llm-advocate-v1")
@@ -669,6 +669,7 @@ class StudentCampaign:
         min_rounds_before_success: int = 1,
         retention_handler: Optional[Callable[[TrainingResult, StudentEvaluation, str, str], None]] = None,
         target_device_evaluator: Optional[Any] = None,
+        target_device_profile: Optional[Any] = None,
         campaign_base: Optional[Any] = None,
         capability_snapshot: Optional[Any] = None,
         review_pipeline: Optional[Any] = None,
@@ -695,6 +696,7 @@ class StudentCampaign:
         self.min_rounds_before_success = int(min_rounds_before_success)
         self.retention_handler = retention_handler
         self.target_device_evaluator = target_device_evaluator
+        self.target_device_profile = target_device_profile
         self.campaign_base = campaign_base
         self.capability_snapshot = capability_snapshot
         self.review_pipeline = review_pipeline
@@ -1677,6 +1679,7 @@ class StudentCampaign:
                         hard_constraints=constraints,
                         objectives=objectives,
                         min_rounds_met=round_index >= self.min_rounds_before_success,
+                        target_device_profile=self.target_device_profile,
                     )
                     evaluation_failure = None
                     if not evaluation_valid or not evaluation_promotable:

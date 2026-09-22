@@ -11,6 +11,7 @@ import yaml
 
 from ..remote.ssh import RemoteConfig
 from .proposal import StudentTarget
+from .target import TargetDeviceProfile
 
 
 class StudentConfigError(ValueError):
@@ -82,6 +83,7 @@ class StudentCampaignConfig:
     max_rounds: int
     max_failures: int
     max_steps: int
+    target_device: Optional[TargetDeviceProfile] = None
     fidelity_schedule: Tuple[str, ...] = ("F1", "F2", "F3")
     min_rounds_before_success: int = 1
     teacher_world_size: int = 3
@@ -113,6 +115,7 @@ class StudentCampaignConfig:
         value["evaluation_command"] = list(self.evaluation_command)
         value["baseline_command"] = list(self.baseline_command)
         value["target_device_command"] = list(self.target_device_command)
+        value["target_device"] = self.target_device.to_dict() if self.target_device is not None else None
         value["remote"] = asdict(self.remote)
         return value
 
@@ -147,6 +150,15 @@ def _target(raw: Any) -> StudentTarget:
         raise StudentConfigError("invalid student.target: %s" % exc) from exc
 
 
+def _target_device(raw: Any) -> Optional[TargetDeviceProfile]:
+    if raw is None:
+        return None
+    try:
+        return TargetDeviceProfile.from_mapping(_mapping(raw, "student.target_device"))
+    except (TypeError, ValueError) as exc:
+        raise StudentConfigError("invalid student.target_device: %s" % exc) from exc
+
+
 def _under(remote: RemoteConfig, path: str, name: str) -> None:
     try:
         if not remote._under_any_root(path):
@@ -168,6 +180,7 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
     if not goal:
         raise StudentConfigError("student.goal must not be empty")
     target = _target(student.get("target", {}))
+    target_device = _target_device(student.get("target_device"))
     teacher_checkpoint = _absolute_remote(student.get("teacher_checkpoint"), "student.teacher_checkpoint")
     h3_cache_dir = _absolute_remote(student.get("h3_cache_dir"), "student.h3_cache_dir")
     worker_entrypoint = _absolute_remote(student.get("worker_entrypoint"), "student.worker_entrypoint")
@@ -300,6 +313,11 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         raise StudentConfigError(
             "student.target_device_command and student.target_device_id must be configured together"
         )
+    if target_device is not None:
+        if target_device_id and target_device_id != target_device.id:
+            raise StudentConfigError("student.target_device_id must match student.target_device.id")
+        if target_device_command and not target_device_id:
+            target_device_id = target_device.id
     review_models = _mapping(student.get("review_models", {}), "student.review_models")
     unknown_review_models = sorted(set(review_models) - {"advocate", "critic", "critical", "revision"})
     if unknown_review_models:
@@ -308,26 +326,24 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         )
     advocate_model = str(
         student.get("advocate_model", review_models.get("advocate", ""))
-        or (controller.model + "::advocate")
+        or controller.model
     ).strip()
     configured_critic = student.get(
         "critical_model",
         student.get("critic_model", review_models.get("critical", review_models.get("critic", ""))),
     )
-    critic_model = str(configured_critic or (controller.model + "::critical")).strip()
+    critic_model = str(configured_critic or controller.model).strip()
     revision_model = str(
         student.get("revision_model", review_models.get("revision", ""))
-        or (controller.model + "::revision")
+        or controller.model
     ).strip()
-    if len({advocate_model, critic_model, revision_model}) != 3:
-        raise StudentConfigError("student.review_models must provide three distinct model identities")
     try:
         teacher_world_size = int(student.get("teacher_world_size", 3))
         teacher_rank_min_free_memory_gb = float(student.get("teacher_rank_min_free_memory_gb", 20.0))
     except (TypeError, ValueError) as exc:
         raise StudentConfigError("student distributed teacher limits are invalid") from exc
-    if teacher_world_size < 2 or teacher_world_size > 3 or teacher_rank_min_free_memory_gb <= 0:
-        raise StudentConfigError("student distributed teacher limits are invalid")
+    if teacher_world_size != 3 or teacher_rank_min_free_memory_gb <= 0:
+        raise StudentConfigError("student distributed teacher requires exactly three ranks")
     handoff_raw = _mapping(student.get("controller_handoff", {}), "student.controller_handoff")
     controller_hold_file = handoff_raw.get("hold_file")
     controller_release_file = handoff_raw.get("release_file")
@@ -365,6 +381,7 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         max_rounds=max_rounds,
         max_failures=max_failures,
         max_steps=max_steps,
+        target_device=target_device,
         fidelity_schedule=fidelity_schedule,
         min_rounds_before_success=min_rounds_before_success,
         teacher_world_size=teacher_world_size,

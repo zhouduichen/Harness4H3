@@ -27,10 +27,20 @@ def test_in_process_teacher_service_round_robin_uses_every_rank():
     try:
         outputs = [handle.predict(noisy, timestep, conditioning) for _ in range(6)]
         assert handle.world_size == 3
+        assert handle.sharded is False
         assert handle.ranks_used == {0, 1, 2}
         assert [float(output.video.flatten()[0]) for output in outputs] == [0.0, 1.0, 2.0, 0.0, 1.0, 2.0]
     finally:
         handle.close()
+
+
+def test_real_teacher_service_requires_exactly_three_distinct_cuda_devices(tmp_path):
+    checkpoint = tmp_path / "teacher.safetensors"
+    checkpoint.write_bytes(b"checkpoint")
+    with pytest.raises(ValueError, match="exactly three"):
+        TeacherService(checkpoint, tmp_path, ("cuda:0", "cuda:1"))
+    with pytest.raises(ValueError, match="distinct"):
+        TeacherService(checkpoint, tmp_path, ("cuda:0", "cuda:0", "cuda:1"))
 
 
 def test_closed_teacher_service_rejects_forward():
