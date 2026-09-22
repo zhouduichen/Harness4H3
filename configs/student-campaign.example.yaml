@@ -81,7 +81,9 @@ remote:
   host: Jiayu-intern
   ssh_port: 30902
   harness_root: /home/intern/huangjiahao/Harness4H3
-  model_root: /data/models/MiniMax-H3
+  # Keep the shared model root broad enough to include the fixed CLIP verifier
+  # at /data/models/clip-vit-large-patch14-336 as well as MiniMax-H3 assets.
+  model_root: /data/models
   comfyui_root: /home/intern/huangjiahao/ComfyUI
   comfyui_port: 8188
   python: /home/intern/miniconda3/envs/comfy/bin/python

@@ -47,6 +47,14 @@ def test_student_campaign_config_requires_fixed_worker_and_real_evaluator(tmp_pa
         load_student_campaign_config(_write_config(tmp_path, worker_entrypoint="relative.py"))
 
 
+def test_student_campaign_example_config_loads_with_shared_model_root():
+    config_path = Path(__file__).parents[2] / "configs" / "student-campaign.example.yaml"
+    config = load_student_campaign_config(config_path)
+    assert config.remote.model_root == "/data/models"
+    assert config.clip_model_path == "/data/models/clip-vit-large-patch14-336"
+    assert config.target_device is not None
+
+
 def test_remote_paths_cannot_escape_configured_roots(tmp_path):
     with pytest.raises(StudentConfigError, match="escapes"):
         load_student_campaign_config(_write_config(tmp_path, teacher_checkpoint="/tmp/teacher.safetensors"))
