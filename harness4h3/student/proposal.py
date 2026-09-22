@@ -84,6 +84,12 @@ class StudentTarget:
     min_depth: int = 12
     max_depth: int = 48
 
+    @property
+    def max_training_peak_memory_gb(self) -> float:
+        """Training-device admission limit; edge memory lives on TargetDeviceProfile."""
+
+        return float(self.max_peak_memory_gb)
+
     def __post_init__(self) -> None:
         for name in (
             "min_params",
