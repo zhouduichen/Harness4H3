@@ -229,6 +229,12 @@ class RemoteStudentBaseline:
             str(self.config.teacher_world_size),
             "--teacher-rank-min-free-memory-gb",
             str(self.config.teacher_rank_min_free_memory_gb),
+            "--controller-hold-file",
+            self.config.controller_hold_file or "",
+            "--controller-release-file",
+            self.config.controller_release_file or "",
+            "--controller-worker-lease-file",
+            self.config.controller_worker_lease_file or "",
         )
         self.client.run(command, timeout_s=max(3600.0, self.config.controller.timeout_s * 20), check=False)
         raw = self.client.read_json(result_path)

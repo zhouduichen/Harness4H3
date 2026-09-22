@@ -14,7 +14,13 @@ from typing import Any, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness4h3.student.evaluation_manifest import EvaluationManifest
-from harness4h3.student.gpu import select_free_cuda_device, select_teacher_gpu_devices
+from harness4h3.student.gpu import (
+    acquire_controller_handoff,
+    publish_worker_gpu_lease,
+    release_controller_handoff,
+    select_free_cuda_device,
+    select_teacher_gpu_devices,
+)
 from harness4h3.student.inference import (
     decode_video_latent,
     load_h3_cache_item,
@@ -58,6 +64,9 @@ def main(argv=None) -> int:
     parser.add_argument("--teacher-world-size", type=int, default=3)
     parser.add_argument("--teacher-rank-min-free-memory-gb", type=float, default=20.0)
     parser.add_argument("--teacher-devices", default="", help="comma-separated cuda:N values; otherwise select three GPUs")
+    parser.add_argument("--controller-hold-file", default="")
+    parser.add_argument("--controller-release-file", default="")
+    parser.add_argument("--controller-worker-lease-file", default="")
     parser.add_argument("--sampling-steps", type=int, default=4)
     parser.add_argument("--seed", type=int, default=20260920)
     parser.add_argument(
@@ -69,6 +78,7 @@ def main(argv=None) -> int:
     output_dir = Path(args.output).resolve()
     result_path = Path(args.result).resolve()
     teacher_service: TeacherServiceHandle | None = None
+    handoff_acquired = False
     try:
         import torch
 
@@ -81,6 +91,12 @@ def main(argv=None) -> int:
         if args.baseline_kind == "h3_teacher_generation_baseline" and args.teacher_world_size != TeacherService.REQUIRED_WORLD_SIZE:
             raise ValueError("h3_teacher_generation_baseline requires teacher-world-size=3")
         if args.baseline_kind == "h3_teacher_generation_baseline" and args.device == "auto":
+            acquire_controller_handoff(
+                args.controller_hold_file or None,
+                args.controller_release_file or None,
+                args.controller_worker_lease_file or None,
+            )
+            handoff_acquired = True
             teacher_devices = select_teacher_gpu_devices(
                 args.teacher_world_size,
                 args.teacher_rank_min_free_memory_gb,
@@ -95,6 +111,8 @@ def main(argv=None) -> int:
             raise ValueError("h3_teacher_generation_baseline requires three distinct Teacher GPUs")
         if len(set(teacher_devices)) != len(teacher_devices) or any(not item.startswith("cuda:") for item in teacher_devices):
             raise ValueError("Teacher devices must be distinct explicit cuda:N values")
+        if handoff_acquired:
+            publish_worker_gpu_lease(args.controller_worker_lease_file or None, teacher_devices)
         device_name = teacher_devices[0]
         device = torch.device(device_name)
         quality_backend = ClipTemporalQualityBackend(args.clip_model_path, device=args.quality_device)
@@ -184,6 +202,12 @@ def main(argv=None) -> int:
         peak_memory_gb = max(peak_memory_gb, teacher_peak_memory_gb)
         if teacher_service is not None:
             teacher_service.close()
+        if handoff_acquired:
+            release_controller_handoff(
+                args.controller_hold_file or None,
+                args.controller_release_file or None,
+                args.controller_worker_lease_file or None,
+            )
         quality = float(statistics.mean(float(item["quality"]["aggregate"]) for item in cases))
         hardware = {
             "latency_s": float(statistics.median(latencies)),
@@ -252,11 +276,23 @@ def main(argv=None) -> int:
     except QualityBackendUnavailable as exc:
         if teacher_service is not None:
             teacher_service.close()
+        if handoff_acquired:
+            release_controller_handoff(
+                args.controller_hold_file or None,
+                args.controller_release_file or None,
+                args.controller_worker_lease_file or None,
+            )
         _write(result_path, {"status": "failed", "failure_code": "quality_evaluator_unavailable", "message": str(exc)})
         return 1
     except Exception as exc:
         if teacher_service is not None:
             teacher_service.close()
+        if handoff_acquired:
+            release_controller_handoff(
+                args.controller_hold_file or None,
+                args.controller_release_file or None,
+                args.controller_worker_lease_file or None,
+            )
         _write(result_path, {"status": "failed", "failure_code": "teacher_baseline_failed", "message": str(exc)})
         return 1
 
