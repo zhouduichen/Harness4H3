@@ -90,18 +90,23 @@ def main(argv=None) -> int:
         clip_model_hash = sha256_path(Path(args.clip_model_path))
         if args.baseline_kind == "h3_teacher_generation_baseline" and args.teacher_world_size != TeacherService.REQUIRED_WORLD_SIZE:
             raise ValueError("h3_teacher_generation_baseline requires teacher-world-size=3")
-        if args.baseline_kind == "h3_teacher_generation_baseline" and args.device == "auto":
+        if args.baseline_kind == "h3_teacher_generation_baseline":
             acquire_controller_handoff(
                 args.controller_hold_file or None,
                 args.controller_release_file or None,
                 args.controller_worker_lease_file or None,
             )
             handoff_acquired = True
-            teacher_devices = select_teacher_gpu_devices(
-                args.teacher_world_size,
-                args.teacher_rank_min_free_memory_gb,
-                args.wait_for_gpu_s,
-            )
+            if args.device == "auto":
+                teacher_devices = select_teacher_gpu_devices(
+                    args.teacher_world_size,
+                    args.teacher_rank_min_free_memory_gb,
+                    args.wait_for_gpu_s,
+                )
+            else:
+                teacher_devices = tuple(item.strip() for item in args.teacher_devices.split(",") if item.strip())
+                if not teacher_devices:
+                    raise ValueError("explicit H3 baseline device requires --teacher-devices with three cuda:N values")
         else:
             if args.teacher_devices:
                 teacher_devices = tuple(item.strip() for item in args.teacher_devices.split(",") if item.strip())
