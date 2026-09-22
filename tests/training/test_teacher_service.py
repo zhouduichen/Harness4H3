@@ -29,6 +29,7 @@ def test_in_process_teacher_service_round_robin_uses_every_rank():
         assert handle.world_size == 3
         assert handle.sharded is False
         assert handle.ranks_used == {0, 1, 2}
+        assert handle.rank_forward_counts == {0: 2, 1: 2, 2: 2}
         assert [float(output.video.flatten()[0]) for output in outputs] == [0.0, 1.0, 2.0, 0.0, 1.0, 2.0]
     finally:
         handle.close()

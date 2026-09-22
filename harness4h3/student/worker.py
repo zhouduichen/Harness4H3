@@ -114,6 +114,7 @@ class TrainingResult:
     teacher_sharded: bool = False
     teacher_forward_count: int = 0
     teacher_peak_memory_gb: float = 0.0
+    teacher_rank_forward_counts: tuple[tuple[int, int], ...] = ()
     stage_lineage: tuple[Mapping[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -726,6 +727,11 @@ class StudentTrainWorker:
             teacher_sharded = bool(getattr(teacher_service, "sharded", False)) if teacher_service is not None else False
             teacher_forward_count = int(getattr(teacher_service, "forward_count", 0)) if teacher_service is not None else 0
             teacher_peak_memory = float(getattr(teacher_service, "teacher_peak_memory_gb", 0.0)) if teacher_service is not None else 0.0
+            teacher_rank_forward_counts = (
+                tuple(sorted((int(rank), int(count)) for rank, count in teacher_service.rank_forward_counts.items()))
+                if teacher_service is not None
+                else ()
+            )
             if teacher_service is not None:
                 teacher_service.close()
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -750,6 +756,7 @@ class StudentTrainWorker:
                 "teacher_sharded": str(teacher_sharded).lower(),
                 "teacher_forward_count": str(teacher_forward_count),
                 "teacher_peak_memory_gb": str(teacher_peak_memory),
+                "teacher_rank_forward_counts": json.dumps(list(teacher_rank_forward_counts), sort_keys=True),
                 "stage_lineage": json.dumps(list(stage_lineage), sort_keys=True),
             }
             self.backend.save_student(student, child_path, metadata)
@@ -801,6 +808,7 @@ class StudentTrainWorker:
                 teacher_sharded=teacher_sharded,
                 teacher_forward_count=teacher_forward_count,
                 teacher_peak_memory_gb=teacher_peak_memory,
+                teacher_rank_forward_counts=teacher_rank_forward_counts,
                 stage_lineage=tuple(stage_lineage),
             )
         except StudentTrainingError as exc:
