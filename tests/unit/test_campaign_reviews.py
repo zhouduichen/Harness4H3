@@ -135,6 +135,30 @@ def test_review_identity_must_differ_from_controller_and_evaluator():
         )
 
 
+def test_review_roles_may_share_model_with_distinct_identities():
+    base = make_base()
+    shared_model = "shared-review-model"
+    advocate = ScriptedAdvocate(valid_advocate())
+    advocate.identity = ActorIdentity("review-advocate", shared_model, "prompt-advocate-v1")
+    critical = ScriptedCritical([critical_raw()])
+    critical.identity = ActorIdentity("review-critical", shared_model, "prompt-critical-v1")
+    modifier = ScriptedModifier(valid_candidate())
+    modifier.identity = ActorIdentity("review-revision", shared_model, "prompt-revision-v1")
+
+    pipeline = ReviewPipeline(
+        advocate=advocate,
+        critical=critical,
+        modifier=modifier,
+        base=base,
+        max_rounds=1,
+    )
+
+    result = pipeline.review(valid_candidate(), {})
+    assert result.approved is True
+    assert len({advocate.identity, critical.identity, modifier.identity}) == 3
+    assert {item.model for item in (advocate.identity, critical.identity, modifier.identity)} == {shared_model}
+
+
 def test_report_parsers_reject_unknown_fields_and_invalid_categories():
     raw = valid_advocate()
     raw["unknown"] = True

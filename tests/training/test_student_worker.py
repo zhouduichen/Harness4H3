@@ -8,6 +8,7 @@ from safetensors.torch import save_file
 from harness4h3.student.compiler import StudentCompiler
 from harness4h3.student.model import build_smoke_student
 from harness4h3.student.proposal import StudentProposal, StudentTarget
+from harness4h3.student.teacher_service import TeacherService
 from harness4h3.student.worker import StudentBatch, StudentTrainWorker
 from tests.unit.test_student_proposal import valid_payload
 
@@ -43,6 +44,14 @@ class FakeBackend:
             str(path),
             metadata={str(key): str(value) for key, value in metadata.items()},
         )
+
+
+class NonShardedProductionBackend(FakeBackend):
+    offline_simulation = False
+
+    def load_teacher(self, checkpoint, device, *, teacher_devices=(), teacher_world_size=1):
+        del checkpoint, device, teacher_devices, teacher_world_size
+        return TeacherService.from_predictors([lambda noisy, timestep, conditioning: None])
 
 
 def compile_manifest(tmp_path):
@@ -82,6 +91,19 @@ def test_worker_refuses_manifest_digest_mismatch(tmp_path):
         assert "manifest_digest_mismatch" in str(exc)
     else:
         raise AssertionError("tampered manifest should not load")
+
+
+def test_production_worker_rejects_non_sharded_teacher(tmp_path):
+    teacher = tmp_path / "teacher.safetensors"
+    save_file({"teacher": torch.ones(1)}, str(teacher))
+
+    result = StudentTrainWorker(NonShardedProductionBackend()).run(
+        compile_manifest(tmp_path), teacher, tmp_path / "child", max_steps=1, device="cpu"
+    )
+
+    assert result.status == "failed"
+    assert result.failure_code == "teacher_not_sharded"
+    assert result.offline_simulation is False
 
 
 def test_progressive_worker_publishes_each_child_as_next_teacher(tmp_path):

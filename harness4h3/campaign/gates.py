@@ -110,8 +110,14 @@ def _constraint_metric(name: str) -> Tuple[str, Optional[str]]:
 
 def _edge_evidence_complete(evidence: Mapping[str, MetricEvidence]) -> bool:
     explicit = _find_evidence(evidence, "edge_evidence_complete")
-    if explicit is not None and explicit.value is not None and explicit.valid and float(explicit.value) > 0:
-        return explicit.device_profile_id != "server"
+    if explicit is not None:
+        if (
+            explicit.value is None
+            or not explicit.valid
+            or float(explicit.value) <= 0
+            or explicit.device_profile_id == "server"
+        ):
+            return False
     return all(
         (item := _find_evidence(evidence, name)) is not None
         and item.value is not None
@@ -197,33 +203,48 @@ class AcceptanceGate:
                 if direction == "max" and float(item.value) > limit:
                     violations.append("target_%s" % metric_name)
                     profile_passed = False
-            metadata = next(
-                (
-                    dict(item.metadata)
-                    for item in evidence.values()
-                    if item.metric_name == "edge_device" and item.metadata
-                ),
-                {},
+            device_item = _find_evidence(evidence, "edge_device")
+            metadata = dict(device_item.metadata) if device_item is not None else {}
+            required_metadata = (
+                "runtime_backend",
+                "precision",
+                "quantization",
+                "resolution",
+                "frames",
+                "sampling_steps",
             )
-            if metadata.get("runtime_backend") and metadata["runtime_backend"] != profile.runtime_backend:
+            missing_metadata = [
+                name for name in required_metadata
+                if name not in metadata or metadata[name] is None or metadata[name] == ""
+            ]
+            for name in missing_metadata:
+                violations.append("target_%s:missing_or_invalid" % name)
+                profile_passed = False
+            runtime_backend = metadata.get("runtime_backend")
+            if runtime_backend != profile.runtime_backend:
                 violations.append("target_runtime_backend")
                 profile_passed = False
-            if metadata.get("precision") and metadata["precision"] not in profile.supported_precision:
+            precision = metadata.get("precision")
+            if precision not in profile.supported_precision:
                 violations.append("target_precision")
                 profile_passed = False
-            if metadata.get("quantization") and metadata["quantization"] not in profile.supported_quantization:
+            quantization = metadata.get("quantization")
+            if quantization not in profile.supported_quantization:
                 violations.append("target_quantization")
                 profile_passed = False
-            if metadata.get("resolution") is not None:
-                try:
-                    if tuple(int(item) for item in metadata["resolution"]) != tuple(profile.resolution):
-                        violations.append("target_resolution")
-                        profile_passed = False
-                except (TypeError, ValueError):
-                    violations.append("target_resolution")
-                    profile_passed = False
+            try:
+                resolution = tuple(int(item) for item in metadata["resolution"])
+            except (KeyError, TypeError, ValueError):
+                resolution = None
+            if resolution != tuple(profile.resolution):
+                violations.append("target_resolution")
+                profile_passed = False
             for name, expected in (("frames", profile.frames), ("sampling_steps", profile.sampling_steps)):
-                if metadata.get(name) is not None and int(metadata[name]) != int(expected):
+                try:
+                    actual = int(metadata[name])
+                except (KeyError, TypeError, ValueError):
+                    actual = None
+                if isinstance(metadata.get(name), bool) or actual != int(expected):
                     violations.append("target_%s" % name)
                     profile_passed = False
             candidate_deployment = getattr(candidate, "deployment_recipe", {})

@@ -127,7 +127,7 @@ class TargetDeviceRunner(Protocol):
     def deploy(self, compiled: Path, output_dir: Path, proposal: Mapping[str, Any]) -> str:
         ...
 
-    def benchmark(self, deployment_id: str, compiled: Path, output_dir: Path, proposal: Mapping[str, Any]) -> Mapping[str, float]:
+    def benchmark(self, deployment_id: str, compiled: Path, output_dir: Path, proposal: Mapping[str, Any]) -> Mapping[str, Any]:
         ...
 
 
@@ -160,8 +160,26 @@ class TargetDeviceEvaluator:
         if not deployment_id:
             raise ValueError("target device deployment returned no identity")
         measurements = dict(self.runner.benchmark(deployment_id, compiled, output_dir / "benchmark", proposal_payload))
-        required_measurements = ("latency_s", "memory_gb", "energy_j", "thermal_c", "model_size_gb")
-        missing = [name for name in required_measurements if measurements.get(name) is None]
+        required_measurements = (
+            "latency_s",
+            "memory_gb",
+            "energy_j",
+            "thermal_c",
+            "model_size_gb",
+            "runtime_backend",
+            "precision",
+            "quantization",
+            "resolution",
+            "frames",
+            "sampling_steps",
+        )
+        missing = [
+            name for name in required_measurements
+            if name not in measurements
+            or measurements[name] is None
+            or measurements[name] == ""
+            or (name == "resolution" and not measurements[name])
+        ]
         if missing:
             raise ValueError("target device benchmark is missing: %s" % ", ".join(missing))
         artifact_hash = artifact_sha256(compiled)
@@ -185,23 +203,13 @@ class TargetDeviceEvaluator:
             "edge_thermal": float(measurements["thermal_c"]),
             "edge_model_size": float(measurements["model_size_gb"]),
         }
-        deployment = proposal_payload.get("deployment") if isinstance(proposal_payload, Mapping) else {}
-        deployment = deployment if isinstance(deployment, Mapping) else {}
-        profile = self.profile
         metadata = {
-            "runtime_backend": str(
-                measurements.get("runtime_backend")
-                or (getattr(profile, "runtime_backend", "") if profile is not None else "")
-            ),
-            "precision": str(measurements.get("precision") or deployment.get("precision") or ""),
-            "quantization": str(measurements.get("quantization") or deployment.get("quantization") or ""),
-            "resolution": measurements.get(
-                "resolution", list(getattr(profile, "resolution", ())) if profile is not None else None
-            ),
-            "frames": measurements.get("frames", getattr(profile, "frames", None) if profile is not None else None),
-            "sampling_steps": measurements.get(
-                "sampling_steps", getattr(profile, "sampling_steps", None) if profile is not None else None
-            ),
+            "runtime_backend": str(measurements["runtime_backend"]).strip(),
+            "precision": str(measurements["precision"]).strip(),
+            "quantization": str(measurements["quantization"]).strip(),
+            "resolution": measurements["resolution"],
+            "frames": measurements["frames"],
+            "sampling_steps": measurements["sampling_steps"],
         }
         return tuple(
             EdgeEvidence(name, value, artifact_hash, self.target_device_id, reference, metadata=metadata)
