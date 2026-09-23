@@ -13,6 +13,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# The SSH worker is launched by absolute path without changing the remote
+# working directory.  Put this checkout ahead of any installed Harness4H3
+# package so the entrypoint and its StudentTrainWorker contract stay in sync.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 try:
     from harness4h3.student.compiler import CompileManifest
     from harness4h3.student.gpu import (
