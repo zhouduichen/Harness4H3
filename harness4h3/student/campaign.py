@@ -409,6 +409,15 @@ def _parse_student_batch_response(raw: Mapping[str, Any], *, source: str) -> Seq
                 architecture = dict(architecture)
                 architecture["temporal_layers"] = parsed_layers
                 candidate["architecture"] = architecture
+            if isinstance(architecture, Mapping):
+                depth = architecture.get("depth")
+                layers = architecture.get("temporal_layers")
+                if isinstance(depth, int) and not isinstance(depth, bool) and isinstance(layers, list):
+                    valid_layers = [layer for layer in layers if isinstance(layer, int) and not isinstance(layer, bool) and 0 <= layer < depth]
+                    if len(valid_layers) != len(layers):
+                        architecture = dict(architecture)
+                        architecture["temporal_layers"] = valid_layers
+                        candidate["architecture"] = architecture
         deployment = candidate.get("deployment")
         # Some controller checkpoints append an advisory memory estimate to
         # deployment. It is not a trusted StudentProposal field and must never
