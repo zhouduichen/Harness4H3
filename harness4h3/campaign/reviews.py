@@ -161,7 +161,10 @@ def _review_prompt(role: str, request: Mapping[str, Any]) -> str:
     else:
         instruction = (
             "Act as an independent Revision agent. Return only a RevisionPatch with JSON-Pointer "
-            "operations over architecture, training, or deployment fields. Preserve candidate_id "
+            "operations over the executable proposal roots /architecture, /training, or "
+            "/deployment. The Candidate display uses architecture, training_recipe, and "
+            "deployment_recipe names, but patch paths MUST use /architecture, /training, and "
+            "/deployment; never use *_recipe roots. Preserve candidate_id "
             "and immutable campaign base digest. Never return a complete CandidateEnvelope, edit "
             "parent/generation/Teacher identity, TargetProfile, VerifierBank, or any final gate. "
             "Return exactly these keys: candidate_id (string), base_digest (string), operations "

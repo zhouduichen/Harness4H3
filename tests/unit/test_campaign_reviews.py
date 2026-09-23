@@ -180,3 +180,11 @@ def test_critical_llm_review_has_room_for_complete_json():
     )
     _endpoint, payload = critical._endpoint_and_payload({"candidate": valid_candidate().to_dict()})
     assert payload["max_tokens"] == 1024
+
+
+def test_revision_prompt_names_executable_proposal_roots():
+    from harness4h3.campaign.reviews import _review_prompt
+
+    prompt = _review_prompt("revision", {"candidate": valid_candidate().to_dict()})
+    assert "/architecture, /training, or /deployment" in prompt
+    assert "never use *_recipe roots" in prompt
