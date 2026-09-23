@@ -219,6 +219,12 @@ class StructuredLLMReviewAgent:
             }
         else:
             endpoint = self.base_url + ("/chat/completions" if self.base_url.endswith("/v1") else "/v1/chat/completions")
+            # Critical reports contain several independent arrays and are
+            # routinely longer than an Advocate/Revision report.  A shared
+            # 512-token cap lets vLLM truncate a valid JSON object halfway
+            # through (finish_reason=length), which then looks like a parser
+            # failure and needlessly replans the experiment.
+            max_tokens = 1024 if self.role == "critical" else 512
             payload = {
                 "model": self.model_name,
                 "messages": [
@@ -226,7 +232,7 @@ class StructuredLLMReviewAgent:
                     {"role": "user", "content": prompt},
                 ],
                 "temperature": 0.0,
-                "max_tokens": 512,
+                "max_tokens": max_tokens,
                 "chat_template_kwargs": {"enable_thinking": False},
                 # vLLM's nested guided-json compiler is slow on this remote
                 # controller. The typed report parser below remains the

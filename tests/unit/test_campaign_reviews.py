@@ -12,6 +12,7 @@ from harness4h3.campaign.reviews import (
     ReviewIdentityError,
     ReviewPipeline,
     RevisionRecord,
+    StructuredLLMReviewAgent,
 )
 from tests.unit.campaign_fixtures import make_base
 
@@ -168,3 +169,14 @@ def test_report_parsers_reject_unknown_fields_and_invalid_categories():
     invalid["objection_categories"] = ["invented_category"]
     with pytest.raises(ReviewContractError, match="category"):
         CriticalReport.from_dict(invalid)
+
+
+def test_critical_llm_review_has_room_for_complete_json():
+    critical = StructuredLLMReviewAgent(
+        ActorIdentity("review-critical", "model-c", "prompt-critical-v1"),
+        "critical",
+        model_name="model-c",
+        base_url="http://127.0.0.1:8000/v1",
+    )
+    _endpoint, payload = critical._endpoint_and_payload({"candidate": valid_candidate().to_dict()})
+    assert payload["max_tokens"] == 1024
