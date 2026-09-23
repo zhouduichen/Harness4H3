@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -79,6 +80,49 @@ class FakeWorker:
             peak_memory_gb=4.0,
             changed_parameter_count=1,
             offline_simulation=True,
+        )
+
+
+class RestartAwareWorker(FakeWorker):
+    def __init__(self):
+        self.parent_hashes = []
+        self.calls = 0
+
+    def run(
+        self,
+        manifest,
+        round_dir,
+        *,
+        parent_checkpoint=None,
+        parent_candidate_id=None,
+        parent_checkpoint_sha256=None,
+        fidelity="F1",
+    ):
+        del parent_candidate_id, fidelity
+        self.calls += 1
+        self.parent_hashes.append(parent_checkpoint_sha256)
+        checkpoint = Path(round_dir) / "student.safetensors"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(("child-%d" % self.calls).encode("utf-8"))
+        checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+        return TrainingResult(
+            status="success",
+            proposal_digest=manifest.proposal_digest,
+            compiler_digest=manifest.manifest_digest,
+            parent_sha256=parent_checkpoint_sha256 or "0" * 64,
+            child_sha256=checkpoint_sha256,
+            child_checkpoint=str(checkpoint),
+            full_precision_checkpoint=str(checkpoint),
+            full_precision_sha256=checkpoint_sha256,
+            optimizer_steps=1,
+            initial_loss=1.0,
+            final_loss=0.5,
+            gradient_norm=1.0,
+            wall_time_s=0.1,
+            peak_memory_gb=4.0,
+            changed_parameter_count=1,
+            offline_simulation=True,
+            fidelity="F1",
         )
 
 
@@ -226,6 +270,42 @@ def test_control_plane_recovery_keeps_parent_until_verified_child(tmp_path):
     archive = [json.loads(line) for line in (tmp_path / "archive.jsonl").read_text().splitlines()]
     assert any(item["archive_kind"] == "failure" for item in archive)
     assert any(item["archive_kind"] == "pareto" for item in archive)
+
+
+def test_campaign_restart_restores_and_verifies_selected_parent_checkpoint(tmp_path):
+    snapshot = CapabilitySnapshot((
+        Capability("distill", "training", "scripted", {}, "V2", True, ""),
+        Capability("dmd2", "training", "scripted", {}, "V2", True, ""),
+    ))
+    base = make_base(
+        target_profile={"id": "edge", "quality": {"min_quality_score": 0.7}},
+        capability_snapshot=snapshot.to_dict(),
+    )
+    worker = RestartAwareWorker()
+
+    first = StudentCampaign(
+        BatchProvider(), FakeCompiler(), worker, FakeEvaluator(), output_root=tmp_path,
+        campaign_base=base, capability_snapshot=snapshot,
+        review_pipeline=ReviewPipeline(Advocate(), Critical(), Modifier(), base, max_rounds=1),
+        fidelity_schedule=("F1",),
+    ).run(max_rounds=1)
+    assert first.status == "PROMOTABLE"
+    selected = [
+        json.loads(line)
+        for line in (tmp_path / "decision-trace.jsonl").read_text().splitlines()
+        if json.loads(line)["event_type"] == "parent.selected"
+    ][-1]
+    expected_parent_sha256 = selected["payload"]["inheritance_checkpoint_sha256"]
+    assert expected_parent_sha256
+
+    second = StudentCampaign(
+        BatchProvider(), FakeCompiler(), worker, FakeEvaluator(), output_root=tmp_path,
+        campaign_base=base, capability_snapshot=snapshot,
+        review_pipeline=ReviewPipeline(Advocate(), Critical(), Modifier(), base, max_rounds=1),
+        fidelity_schedule=("F1",),
+    ).run(max_rounds=2)
+    assert second.status == "PROMOTABLE"
+    assert expected_parent_sha256 in worker.parent_hashes
 
 
 def _edge_profile() -> TargetDeviceProfile:

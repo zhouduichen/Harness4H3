@@ -77,6 +77,7 @@ def test_fidelity_is_cumulative_and_gate_failure_is_fail_closed():
     assert (f1.train_steps, f2.train_steps, f3.train_steps) == (64, 64, 128)
     assert (f1.cumulative_train_steps, f2.cumulative_train_steps, f3.cumulative_train_steps) == (64, 128, 256)
     assert (f1.evaluation_cases, f2.seed_count, f3.verifier_strength) == (1, 2, "full")
+    assert (f1.gpu_budget, f2.gpu_budget, f3.gpu_budget) == (1, 1, 2)
 
     evidence = (
         MetricEvidence("video_decodable", "v1", "video", 1.0, True, "evaluator", "server", True),

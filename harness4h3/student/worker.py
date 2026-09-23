@@ -85,6 +85,7 @@ class TrainingResult:
     failure_code: Optional[str] = None
     message: str = ""
     full_precision_checkpoint: Optional[str] = None
+    full_precision_sha256: Optional[str] = None
     quantized_checkpoint: Optional[str] = None
     quantization: str = "none"
     model_size_bytes: Optional[int] = None
@@ -102,6 +103,7 @@ class TrainingResult:
     seed_count: int = 0
     verifier_strength: str = ""
     timeout_s: float = 0.0
+    gpu_budget: int = 0
     total_parameter_count: int = 0
     inheritance_ratio: float = 0.0
     initialization_mode: str = "fresh_init"
@@ -377,6 +379,7 @@ class FidelitySpec:
     seed_count: int
     verifier_strength: str
     timeout_s: float
+    gpu_budget: int = 1
 
 
 def fidelity_spec(max_steps: int, fidelity: str) -> FidelitySpec:
@@ -393,6 +396,7 @@ def fidelity_spec(max_steps: int, fidelity: str) -> FidelitySpec:
         seed_count={"F1": 1, "F2": 2, "F3": 4}[name],
         verifier_strength={"F1": "cheap", "F2": "semantic", "F3": "full"}[name],
         timeout_s={"F1": 900.0, "F2": 1800.0, "F3": 3600.0}[name],
+        gpu_budget={"F1": 1, "F2": 1, "F3": 2}[name],
     )
 
 
@@ -531,6 +535,7 @@ class StudentTrainWorker:
         train_steps: Optional[int] = None,
         parent_checkpoint: Optional[Path] = None,
         parent_candidate_id: Optional[str] = None,
+        parent_checkpoint_sha256: Optional[str] = None,
         fidelity: str = "F1",
     ) -> TrainingResult:
         started = time.perf_counter()
@@ -602,6 +607,11 @@ class StudentTrainWorker:
             else:
                 parent_sha256 = teacher_sha256
                 total_parameter_count = sum(int(parameter.numel()) for parameter in student.parameters())
+            if parent_checkpoint_sha256 is not None and str(parent_checkpoint_sha256) != str(parent_sha256):
+                raise StudentTrainingError(
+                    "parent_checkpoint_integrity",
+                    "parent checkpoint SHA256 does not match the selected parent evidence",
+                )
             spec = fidelity_spec(int(max_steps if max_steps is not None else 256), fidelity)
             configured_steps = int(train_steps if train_steps is not None else (max_steps if max_steps is not None else 256))
             if configured_steps <= 0:
@@ -818,6 +828,7 @@ class StudentTrainWorker:
                     teacher_service.close()
                 return self._failure(manifest, started, "quantization_unsupported", "int4 Student quantization is not supported", parent_sha256=parent_sha256, offline_simulation=self.backend.offline_simulation, parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None, parent_inherited=bool(inherit_parent), inherited_parameter_count=inherited_parameter_count, algorithm_name=algorithm_name, algorithm_path=algorithm_path, algorithm_dispatch=dispatch, fidelity=fidelity)
             child_sha256 = sha256_file(child_for_evaluation)
+            full_precision_sha256 = sha256_file(full_precision_path)
             if child_sha256 == parent_sha256:
                 if teacher_service is not None:
                     teacher_service.close()
@@ -830,6 +841,7 @@ class StudentTrainWorker:
                 gradient_norm=maximum_gradient_norm, wall_time_s=time.perf_counter() - started,
                 peak_memory_gb=float(peak), changed_parameter_count=changed,
                 offline_simulation=bool(self.backend.offline_simulation), full_precision_checkpoint=str(full_precision_path),
+                full_precision_sha256=full_precision_sha256,
                 quantized_checkpoint=str(quantized_path) if quantized_path else None,
                 quantization=proposal.deployment.quantization, model_size_bytes=child_for_evaluation.stat().st_size,
                 parent_kind=parent_kind, parent_checkpoint=str(parent_checkpoint) if parent_checkpoint else None,
@@ -842,6 +854,7 @@ class StudentTrainWorker:
                 seed_count=spec.seed_count,
                 verifier_strength=spec.verifier_strength,
                 timeout_s=spec.timeout_s,
+                gpu_budget=spec.gpu_budget,
                 total_parameter_count=total_parameter_count,
                 inheritance_ratio=(float(inherited_parameter_count) / float(total_parameter_count)) if total_parameter_count else 0.0,
                 initialization_mode=("full_resume" if inherited_parameter_count == total_parameter_count and total_parameter_count else "partial_transfer" if inherited_parameter_count else "fresh_init"),

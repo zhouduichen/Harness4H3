@@ -31,6 +31,7 @@ class CandidateExecutor(Protocol):
         *,
         parent_checkpoint: str | Path | None = None,
         parent_candidate_id: str | None = None,
+        parent_checkpoint_sha256: str | None = None,
     ) -> Mapping[str, Any]:
         ...
 
@@ -65,6 +66,7 @@ class StudentCampaignAdapter:
         train_steps: int | None = None,
         parent_checkpoint: str | Path | None,
         parent_candidate_id: str | None,
+        parent_checkpoint_sha256: str | None,
     ) -> TrainingResult:
         """Call old test doubles and the new parent-aware worker safely."""
 
@@ -79,6 +81,8 @@ class StudentCampaignAdapter:
             kwargs["parent_checkpoint"] = parent_checkpoint
         if "parent_candidate_id" in parameters:
             kwargs["parent_candidate_id"] = parent_candidate_id
+        if "parent_checkpoint_sha256" in parameters:
+            kwargs["parent_checkpoint_sha256"] = parent_checkpoint_sha256
         return run(compile_manifest, round_dir, **kwargs)
 
     def _run_evaluator(
@@ -113,6 +117,7 @@ class StudentCampaignAdapter:
         train_steps: int | None = None,
         parent_checkpoint: str | Path | None = None,
         parent_candidate_id: str | None = None,
+        parent_checkpoint_sha256: str | None = None,
     ) -> Mapping[str, Any]:
         parsed = self._proposal(proposal)
         round_dir = Path(round_dir)
@@ -124,6 +129,7 @@ class StudentCampaignAdapter:
             train_steps=train_steps,
             parent_checkpoint=parent_checkpoint,
             parent_candidate_id=parent_candidate_id,
+            parent_checkpoint_sha256=parent_checkpoint_sha256,
         )
         if not isinstance(training, TrainingResult):
             raise ValueError("Student worker must return TrainingResult")
@@ -187,6 +193,7 @@ class StudentCampaignAdapter:
         train_steps: int | None = None,
         parent_checkpoint: str | Path | None = None,
         parent_candidate_id: str | None = None,
+        parent_checkpoint_sha256: str | None = None,
     ) -> Mapping[str, Any]:
         raw = candidate.provenance.get("student_proposal")
         if raw is None:
@@ -198,6 +205,7 @@ class StudentCampaignAdapter:
             train_steps=train_steps,
             parent_checkpoint=parent_checkpoint,
             parent_candidate_id=parent_candidate_id,
+            parent_checkpoint_sha256=parent_checkpoint_sha256,
         )
 
     def validate(self, candidate: CandidateEnvelope, round_dir: Path) -> Mapping[str, Any]:
@@ -219,6 +227,7 @@ class StudentCampaignAdapter:
         *,
         parent_checkpoint: str | Path | None = None,
         parent_candidate_id: str | None = None,
+        parent_checkpoint_sha256: str | None = None,
     ) -> Mapping[str, Any]:
         return self.run_candidate(
             candidate,
@@ -227,6 +236,7 @@ class StudentCampaignAdapter:
             round_dir=round_dir,
             parent_checkpoint=parent_checkpoint,
             parent_candidate_id=parent_candidate_id,
+            parent_checkpoint_sha256=parent_checkpoint_sha256,
         )
 
     def verify(self, candidate: CandidateEnvelope, execution: Mapping[str, Any], round_dir: Path) -> Tuple[MetricEvidence, ...]:

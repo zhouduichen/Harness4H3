@@ -34,6 +34,7 @@ class RemoteStudentWorker:
         train_steps: int | None = None,
         parent_checkpoint: str | Path | None = None,
         parent_candidate_id: str | None = None,
+        parent_checkpoint_sha256: str | None = None,
         fidelity: str = "F1",
     ) -> TrainingResult:
         remote_dir = self._remote_round_dir(round_dir)
@@ -88,6 +89,8 @@ class RemoteStudentWorker:
             command += ("--train-steps", str(int(train_steps)))
         if parent_checkpoint:
             command += ("--parent-checkpoint", str(parent_checkpoint))
+        if parent_checkpoint_sha256:
+            command += ("--parent-checkpoint-sha256", str(parent_checkpoint_sha256))
         self.client.run(command, timeout_s=max(3600.0, self.config.controller.timeout_s * 20), check=False)
         raw = self.client.read_json(remote_result)
         if not isinstance(raw, Mapping):

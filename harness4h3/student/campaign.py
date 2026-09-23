@@ -210,6 +210,7 @@ class StudentRoundWorker(Protocol):
         *,
         parent_checkpoint: Optional[str | Path] = None,
         parent_candidate_id: Optional[str] = None,
+        parent_checkpoint_sha256: Optional[str] = None,
         fidelity: str = "F1",
     ) -> TrainingResult:
         ...
@@ -1291,6 +1292,7 @@ class StudentCampaign:
         parent_id = "M0000"
         parent_generation = 0
         parent_checkpoint = self.parent_checkpoint
+        parent_checkpoint_sha256 = None
         start_round = 1
         for event in existing:
             if event.round_id and event.round_id.startswith("R"):
@@ -1312,6 +1314,15 @@ class StudentCampaign:
                     if not selected_checkpoint:
                         raise ValueError("parent.selected is missing executable child_checkpoint")
                     parent_checkpoint = str(selected_checkpoint)
+                    selected_sha256 = event.payload.get("inheritance_checkpoint_sha256")
+                    if selected_sha256:
+                        selected_path = Path(parent_checkpoint)
+                        if selected_path.is_file():
+                            from .worker import sha256_file
+
+                            if sha256_file(selected_path) != str(selected_sha256):
+                                raise ValueError("parent_checkpoint_integrity: selected checkpoint content changed")
+                        parent_checkpoint_sha256 = str(selected_sha256)
         adapter = StudentCampaignAdapter(self.compiler, self.worker, self.evaluator)
         attributor = FailureAttributor()
         hard_constraints = self._control_hard_constraints()
@@ -1481,6 +1492,7 @@ class StudentCampaign:
                     training_obj = None
                     evaluation_obj = None
                     fidelity_parent_checkpoint = parent_checkpoint
+                    fidelity_parent_checkpoint_sha256 = parent_checkpoint_sha256
                     fidelity_parent_candidate_id = parent_id
                     fidelity_history = []
                     fidelity_gate_decision = None
@@ -1502,8 +1514,9 @@ class StudentCampaign:
                                     "cumulative_train_steps": spec.cumulative_train_steps,
                                     "evaluation_cases": spec.evaluation_cases,
                                     "seed_count": spec.seed_count,
-                                    "verifier_strength": spec.verifier_strength,
-                                    "timeout_s": spec.timeout_s,
+                                "verifier_strength": spec.verifier_strength,
+                                "timeout_s": spec.timeout_s,
+                                "gpu_budget": spec.gpu_budget,
                                 },
                                 "validation": dict(validation),
                             },
@@ -1516,6 +1529,7 @@ class StudentCampaign:
                             train_steps=spec.train_steps,
                             parent_checkpoint=fidelity_parent_checkpoint,
                             parent_candidate_id=fidelity_parent_candidate_id,
+                            parent_checkpoint_sha256=fidelity_parent_checkpoint_sha256,
                         )
                         public_execution = self._control_public_execution(execution)
                         training_obj = execution.get("_training_result")
@@ -1534,8 +1548,9 @@ class StudentCampaign:
                                     "cumulative_train_steps": spec.cumulative_train_steps,
                                     "evaluation_cases": spec.evaluation_cases,
                                     "seed_count": spec.seed_count,
-                                    "verifier_strength": spec.verifier_strength,
-                                    "timeout_s": spec.timeout_s,
+                            "verifier_strength": spec.verifier_strength,
+                            "timeout_s": spec.timeout_s,
+                            "gpu_budget": spec.gpu_budget,
                                 },
                                 "parent_checkpoint": fidelity_parent_checkpoint,
                                 "parent_candidate_id": fidelity_parent_candidate_id,
@@ -1559,6 +1574,7 @@ class StudentCampaign:
                                 getattr(training_obj, "full_precision_checkpoint", None)
                                 or getattr(training_obj, "child_checkpoint", None)
                             )
+                            fidelity_parent_checkpoint_sha256 = getattr(training_obj, "full_precision_sha256", None)
                             fidelity_parent_candidate_id = reviewed_candidate.candidate_id
                         trace.append(
                             "training.completed",
@@ -1633,7 +1649,7 @@ class StudentCampaign:
                             for key in (
                                 "train_steps", "cumulative_train_steps", "optimizer_steps",
                                 "optimizer_steps_by_role", "initial_loss", "final_loss",
-                                "gradient_norm", "peak_memory_gb",
+                                "gradient_norm", "peak_memory_gb", "gpu_budget",
                             )
                             if training_payload.get(key) is not None
                         },
@@ -1865,6 +1881,7 @@ class StudentCampaign:
                     getattr(selected_training, "full_precision_checkpoint", None)
                     or getattr(selected_training, "child_checkpoint", None)
                 )
+                parent_checkpoint_sha256 = getattr(selected_training, "full_precision_sha256", None)
                 self.parent_checkpoint = parent_checkpoint
                 self._control_parent_metrics = {
                     str(key): float(value) for key, value in selected_gate.objective_values.items()
@@ -1883,6 +1900,7 @@ class StudentCampaign:
                         "reason": "best_feasible_candidate",
                         "parent_checkpoint": getattr(selected_training, "parent_checkpoint", None),
                         "inheritance_checkpoint": parent_checkpoint,
+                        "inheritance_checkpoint_sha256": parent_checkpoint_sha256,
                         "child_checkpoint": getattr(selected_training, "child_checkpoint", None),
                         "evaluation_checkpoint": getattr(selected_training, "child_checkpoint", None),
                         "child_sha256": getattr(selected_training, "child_sha256", None),

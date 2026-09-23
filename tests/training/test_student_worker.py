@@ -73,7 +73,30 @@ def test_worker_writes_changed_child_and_training_evidence(tmp_path):
     assert result.changed_parameter_count > 0
     assert result.quantization == "int8"
     assert Path(result.full_precision_checkpoint).is_file()
+    assert result.full_precision_sha256
     assert Path(result.quantized_checkpoint).is_file()
+
+
+def test_worker_rejects_a_parent_checkpoint_that_changed_since_selection(tmp_path):
+    teacher = tmp_path / "teacher.safetensors"
+    save_file({"teacher": torch.ones(1)}, str(teacher))
+    manifest = compile_manifest(tmp_path)
+    first = StudentTrainWorker(FakeBackend()).run(
+        manifest, teacher, tmp_path / "first-child", max_steps=2, device="cpu"
+    )
+    assert first.status == "success"
+    resumed = StudentTrainWorker(FakeBackend()).run(
+        manifest,
+        teacher,
+        tmp_path / "resumed-child",
+        max_steps=2,
+        device="cpu",
+        parent_checkpoint=Path(first.full_precision_checkpoint),
+        parent_candidate_id="student_0001",
+        parent_checkpoint_sha256="0" * 64,
+    )
+    assert resumed.status == "failed"
+    assert resumed.failure_code == "parent_checkpoint_integrity"
 
 
 def test_worker_refuses_manifest_digest_mismatch(tmp_path):

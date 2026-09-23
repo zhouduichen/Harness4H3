@@ -155,6 +155,7 @@ def main(argv=None) -> int:
     parser.add_argument("--train-steps", type=int, default=None)
     parser.add_argument("--fidelity", default="F1")
     parser.add_argument("--parent-checkpoint", default="")
+    parser.add_argument("--parent-checkpoint-sha256", default="")
     parser.add_argument("--parent-candidate-id", default="")
     args = parser.parse_args(argv)
     if args.teacher_world_size != 3:
@@ -219,6 +220,7 @@ def main(argv=None) -> int:
             teacher_world_size=args.teacher_world_size,
             parent_checkpoint=Path(args.parent_checkpoint) if args.parent_checkpoint else None,
             parent_candidate_id=args.parent_candidate_id or None,
+            parent_checkpoint_sha256=args.parent_checkpoint_sha256 or None,
             fidelity=args.fidelity,
         )
         if result.status == "success":
