@@ -188,3 +188,4 @@ def test_revision_prompt_names_executable_proposal_roots():
     prompt = _review_prompt("revision", {"candidate": valid_candidate().to_dict()})
     assert "/architecture, /training, or /deployment" in prompt
     assert "never use *_recipe roots" in prompt
+    assert "Never invent fp8, int4" in prompt
