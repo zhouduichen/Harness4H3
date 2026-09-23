@@ -26,12 +26,12 @@ from harness4h3.student.edge import EdgeEvidence
 from harness4h3.student.inference import (
     decode_video_latent,
     load_h3_cache_item,
-    load_student_model,
     sample_student_latent,
     write_video,
 )
 from harness4h3.student.proposal import StudentProposal, StudentTarget
 from harness4h3.student.quantization import load_student_state, quantize_checkpoint
+from harness4h3.student.runtime_quantization import load_runtime_quantized_model
 
 
 def _sha256(path: Path) -> str:
@@ -260,7 +260,7 @@ def _run(args: argparse.Namespace) -> int:
         prompt = load_h3_cache_item(
             Path(args.cache_dir), target, runtime_device, dtype
         )["prompt"]
-        model = load_student_model(proposal, compiled, target, runtime_device)
+        model = load_runtime_quantized_model(proposal, compiled, target, runtime_device)
 
         # A deployed target runtime keeps the Student and VAE resident after
         # deployment. Warm once outside the measured interval so target
@@ -319,7 +319,8 @@ def _run(args: argparse.Namespace) -> int:
             "latency_boundary": "student_sampling_plus_vae_decode_and_video_write",
             "energy_boundary": "student_sampling_plus_vae_decode_and_video_write",
             "runtime_resident": True,
-            "quantization_mode": quantization_mode,
+            "quantization_mode": "runtime_int8_weight_only",
+            "artifact_quantization_mode": quantization_mode,
             "gpu_measurement": gpu_measurement,
         }
         benchmark_path = benchmark_dir / "benchmark.json"
