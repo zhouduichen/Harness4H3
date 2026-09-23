@@ -251,6 +251,17 @@ class StructuredLLMReviewAgent:
             try:
                 return json.loads(content)
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                # Some local checkpoints still wrap the object in a short
+                # prose/preamble despite the JSON-only instruction. Extract
+                # only the outermost object; typed role validation remains
+                # authoritative after this compatibility step.
+                start = content.find("{")
+                end = content.rfind("}")
+                if start >= 0 and end > start:
+                    try:
+                        return json.loads(content[start : end + 1])
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
                 raise ReviewLLMError("review response content is not JSON") from exc
         return content
 
