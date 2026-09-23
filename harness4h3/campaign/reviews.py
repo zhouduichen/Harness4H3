@@ -309,14 +309,18 @@ class StructuredLLMReviewAgent:
     def review(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         last_error: Optional[ReviewLLMError] = None
         required = set(review_json_schema(self.role).get("required", ()))
-        for attempt in range(6):
+        # The controller is deliberately stopped while the training worker
+        # owns the GPUs.  A cold vLLM restart can take several minutes, so a
+        # short retry budget turns an infrastructure handoff into a false
+        # candidate failure.
+        for attempt in range(12):
             if attempt:
                 # The server-local controller is intentionally stopped during
                 # training/evaluation handoff. Give its launcher time to
                 # cold-start before turning a transient connection refusal
                 # into a candidate failure.
                 if last_error is not None and "request failed" in str(last_error):
-                    time.sleep(min(20.0, 5.0 * attempt))
+                    time.sleep(min(30.0, 5.0 * attempt))
                 attempt_request = {
                     key: request[key]
                     for key in ("phase", "review_round", "base_digest", "candidate")
@@ -352,12 +356,12 @@ class StructuredLLMReviewAgent:
                 return normalized
             except ReviewLLMError as exc:
                 last_error = exc
-                if attempt < 5:
+                if attempt < 11:
                     continue
                 raise
             except (OSError, urllib.error.URLError, urllib.error.HTTPError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 last_error = ReviewLLMError("%s review request failed: %s" % (self.role, exc))
-                if attempt < 5:
+                if attempt < 11:
                     continue
                 raise last_error from exc
         if last_error is not None:
