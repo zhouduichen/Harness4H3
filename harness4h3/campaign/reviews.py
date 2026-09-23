@@ -131,7 +131,9 @@ def review_json_schema(role: str) -> Mapping[str, Any]:
 
 def _review_prompt(role: str, request: Mapping[str, Any]) -> str:
     candidate = request.get("candidate")
-    context = json.dumps(dict(request), ensure_ascii=False, sort_keys=True)
+    context_request = dict(request)
+    context_request.pop("candidate", None)
+    context = json.dumps(context_request, ensure_ascii=False, sort_keys=True)
     if role == "advocate":
         instruction = (
             "Act as the Advocate for this candidate. Build the strongest evidence-grounded case "
@@ -526,12 +528,18 @@ class ReviewPipeline:
 
     def _request(self, candidate: CandidateEnvelope, context: Mapping[str, Any], *, phase: str, round_index: int) -> Dict[str, Any]:
         request = copy.deepcopy(dict(context)) if isinstance(context, Mapping) else {}
+        candidate_payload = candidate.to_dict()
+        provenance = candidate_payload.get("provenance")
+        if isinstance(provenance, Mapping) and "student_proposal" in provenance:
+            provenance = dict(provenance)
+            provenance.pop("student_proposal", None)
+            candidate_payload["provenance"] = provenance
         request.update(
             {
                 "phase": phase,
                 "review_round": round_index,
                 "base_digest": self.base.digest,
-                "candidate": candidate.to_dict(),
+                "candidate": candidate_payload,
             }
         )
         return request
