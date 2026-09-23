@@ -384,7 +384,20 @@ def _parse_student_batch_response(raw: Mapping[str, Any], *, source: str) -> Seq
         raise ValueError("proposal_invalid: %s response must contain 3 to 5 proposals" % source)
     if not all(isinstance(item, Mapping) for item in proposals):
         raise ValueError("proposal_invalid: %s proposals must be JSON objects" % source)
-    return tuple(dict(item) for item in proposals)
+    normalized = []
+    for item in proposals:
+        candidate = dict(item)
+        deployment = candidate.get("deployment")
+        # Some controller checkpoints append an advisory memory estimate to
+        # deployment. It is not a trusted StudentProposal field and must never
+        # reach compile/training, so remove only this known non-authoritative
+        # annotation before the strict local validator runs.
+        if isinstance(deployment, Mapping) and "memory" in deployment:
+            deployment = dict(deployment)
+            deployment.pop("memory", None)
+            candidate["deployment"] = deployment
+        normalized.append(candidate)
+    return tuple(normalized)
 
 
 def _request_json_with_retry(request: urllib.request.Request, timeout_s: float) -> Mapping[str, Any]:
