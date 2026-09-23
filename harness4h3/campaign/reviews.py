@@ -36,6 +36,10 @@ OBJECTION_CATEGORIES = frozenset(
     }
 )
 
+_OBJECTION_CATEGORY_ALIASES = {
+    "architecture/algorithm_incompatibility": "architecture_algorithm_incompatibility",
+}
+
 
 class ReviewContractError(ValueError):
     """Raised when an agent emits malformed or unsafe review data."""
@@ -347,7 +351,10 @@ class CriticalReport:
             "target_device_risks", "required_revisions", "hard_objection",
         )
         _strict_keys(raw, fields, "critical report")
-        categories = _string_array(raw["objection_categories"], "objection_categories")
+        categories = tuple(
+            _OBJECTION_CATEGORY_ALIASES.get(category, category)
+            for category in _string_array(raw["objection_categories"], "objection_categories")
+        )
         unknown = sorted(set(categories) - OBJECTION_CATEGORIES)
         if unknown:
             raise ReviewContractError("unknown objection category: %s" % ", ".join(unknown))
