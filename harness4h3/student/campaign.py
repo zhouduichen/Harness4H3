@@ -483,10 +483,11 @@ class OpenAICompatibleStudentProposalProvider:
             "max_tokens": 2048,
             "stream": False,
             "chat_template_kwargs": {"enable_thinking": False},
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "student_proposal", "strict": True, "schema": schema},
-            },
+            # vLLM's full structured-output compiler is prohibitively slow for this
+            # nested proposal schema on the remote Qwen controller.  Keep the
+            # response JSON-constrained, then apply the authoritative schema and
+            # campaign validation locally before any candidate can run.
+            "response_format": {"type": "json_object"},
         }
         request = urllib.request.Request(
             self.endpoint,
@@ -518,10 +519,7 @@ class OpenAICompatibleStudentProposalProvider:
             "max_tokens": 2048,
             "stream": False,
             "chat_template_kwargs": {"enable_thinking": False},
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "student_proposal_batch", "strict": True, "schema": schema},
-            },
+            "response_format": {"type": "json_object"},
         }
         request = urllib.request.Request(
             self.endpoint,
