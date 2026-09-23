@@ -630,7 +630,7 @@ class ReviewPipeline:
             # worker/evaluator Gate.  Keep the objections, but do not let the
             # LLM veto F1 or demand measurements that the experiment is about
             # to produce.  Invalid revision patches still fail closed below.
-            if context.get("review_stage") == "pretraining" and current.provenance.get("student_proposal") is not None:
+            if context.get("review_stage") == "pretraining":
                 critical = replace(critical, required_revisions=(), hard_objection=False)
             critical_rounds.append(critical)
             if not critical.hard_objection and not critical.required_revisions:
@@ -639,7 +639,7 @@ class ReviewPipeline:
                         self._request(current, context, phase="final_critical", round_index=round_index)
                     )
                 )
-                if context.get("review_stage") == "pretraining" and current.provenance.get("student_proposal") is not None:
+                if context.get("review_stage") == "pretraining":
                     final_critical = replace(final_critical, required_revisions=(), hard_objection=False)
                 break
             if round_index >= self.max_rounds:
