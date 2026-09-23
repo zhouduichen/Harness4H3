@@ -23,7 +23,13 @@ from typing import Any, Mapping, Optional
 import torch
 
 from harness4h3.student.edge import EdgeEvidence
-from harness4h3.student.inference import generate_video
+from harness4h3.student.inference import (
+    decode_video_latent,
+    load_h3_cache_item,
+    load_student_model,
+    sample_student_latent,
+    write_video,
+)
 from harness4h3.student.proposal import StudentProposal, StudentTarget
 from harness4h3.student.quantization import load_student_state, quantize_checkpoint
 
@@ -139,6 +145,59 @@ def _build_target(args: argparse.Namespace) -> StudentTarget:
     )
 
 
+def _steady_state_generation(
+    proposal: StudentProposal,
+    model: torch.nn.Module,
+    prompt: torch.Tensor,
+    target: StudentTarget,
+    comfyui_root: Path,
+    vae_name: str,
+    output_path: Path,
+    device: torch.device,
+    *,
+    seed: int,
+) -> Mapping[str, Any]:
+    """Run one generation with the deployed Student and VAE already resident.
+
+    ``generate_video`` deliberately owns model loading for the server
+    evaluator.  A target runtime is different: deployment loads the Student
+    once and keeps both the Student and VAE resident between invocations.  The
+    measured interval must therefore begin at Student sampling and end after
+    VAE decode/video materialization, so the power and latency boundaries are
+    the same and exclude runtime loading.
+    """
+
+    started = time.perf_counter()
+    latent = sample_student_latent(model, prompt, proposal, target, device, seed=seed)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    sampling_latency = time.perf_counter() - started
+
+    decode_started = time.perf_counter()
+    frames = decode_video_latent(comfyui_root, vae_name, latent)
+    write_video(frames, output_path)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    decode_latency = time.perf_counter() - decode_started
+    peak_memory_gb = (
+        float(torch.cuda.max_memory_allocated(device) / (1024**3))
+        if device.type == "cuda"
+        else 0.0
+    )
+    return {
+        "video_path": str(Path(output_path).resolve()),
+        "latency_s": float(sampling_latency + decode_latency),
+        "sampling_latency_s": float(sampling_latency),
+        "decode_latency_s": float(decode_latency),
+        "generation_latency_s": float(sampling_latency + decode_latency),
+        "peak_memory_gb": peak_memory_gb,
+        "frame_count": int(frames.shape[0]),
+        "resolution": [int(frames.shape[2]), int(frames.shape[1])],
+        "checkpoint_bytes": 0,
+        "device": str(device),
+    }
+
+
 def _run(args: argparse.Namespace) -> int:
     result_path = Path(args.result).resolve()
     output_dir = Path(args.output).resolve()
@@ -195,42 +254,49 @@ def _run(args: argparse.Namespace) -> int:
         benchmark_dir.mkdir(parents=True, exist_ok=True)
         selected_device = str(args.device)
         gpu_index = _gpu_index(selected_device)
-        torch.cuda.set_device(torch.device(selected_device))
-        torch.cuda.reset_peak_memory_stats(torch.device(selected_device))
-        # A deployed target runtime keeps its VAE resident after deployment.
-        # Warm it once outside the measured interval so target latency/energy
-        # describe steady-state generation, while the measured run still
-        # includes the real Student sampler and VAE decode.
-        warmup_generation = generate_video(
+        runtime_device = torch.device(selected_device)
+        torch.cuda.set_device(runtime_device)
+        dtype = torch.bfloat16 if proposal.deployment.precision == "bf16" else torch.float16
+        prompt = load_h3_cache_item(
+            Path(args.cache_dir), target, runtime_device, dtype
+        )["prompt"]
+        model = load_student_model(proposal, compiled, target, runtime_device)
+
+        # A deployed target runtime keeps the Student and VAE resident after
+        # deployment. Warm once outside the measured interval so target
+        # latency/energy describe steady-state generation; the measured run
+        # still includes the real Student sampler and VAE decode.
+        warmup_generation = _steady_state_generation(
             proposal,
-            compiled,
+            model,
+            prompt,
             target,
             Path(args.comfyui_root),
-            Path(args.cache_dir),
             args.vae_name,
             benchmark_dir / "warmup-generation.mp4",
-            device=selected_device,
+            runtime_device,
             seed=int(args.seed),
         )
-        torch.cuda.synchronize(torch.device(selected_device))
-        torch.cuda.reset_peak_memory_stats(torch.device(selected_device))
+        torch.cuda.synchronize(runtime_device)
+        torch.cuda.reset_peak_memory_stats(runtime_device)
         sampler = _GpuSampler(gpu_index, args.measurement_interval_s)
         sampler.start()
-        generation = generate_video(
+        generation = _steady_state_generation(
             proposal,
-            compiled,
+            model,
+            prompt,
             target,
             Path(args.comfyui_root),
-            Path(args.cache_dir),
             args.vae_name,
             benchmark_dir / "student-generation.mp4",
-            device=selected_device,
+            runtime_device,
             seed=int(args.seed),
         )
+        generation["checkpoint_bytes"] = int(compiled.stat().st_size)
         gpu_measurement = sampler.stop()
         peak_memory_gb = float(generation.get("peak_memory_gb", 0.0))
         if peak_memory_gb <= 0:
-            peak_memory_gb = float(torch.cuda.max_memory_allocated(torch.device(selected_device)) / (1024**3))
+            peak_memory_gb = float(torch.cuda.max_memory_allocated(runtime_device) / (1024**3))
         benchmark = {
             "deployment_id": deployment_id,
             "artifact_sha256": compiled_sha,
@@ -249,7 +315,10 @@ def _run(args: argparse.Namespace) -> int:
             "sampling_steps": int(proposal.training.target_steps),
             "generation": dict(generation),
             "warmup_generation": dict(warmup_generation),
-            "measurement_mode": "steady_state_after_runtime_warmup",
+            "measurement_mode": "steady_state_resident_student_and_vae",
+            "latency_boundary": "student_sampling_plus_vae_decode_and_video_write",
+            "energy_boundary": "student_sampling_plus_vae_decode_and_video_write",
+            "runtime_resident": True,
             "quantization_mode": quantization_mode,
             "gpu_measurement": gpu_measurement,
         }
