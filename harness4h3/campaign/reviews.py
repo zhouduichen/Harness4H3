@@ -266,28 +266,50 @@ class StructuredLLMReviewAgent:
         return content
 
     def review(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
-        endpoint, payload = self._endpoint_and_payload(request)
-        http_request = urllib.request.Request(
-            endpoint,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={"Accept": "application/json", "Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(http_request, timeout=self.timeout_s) as response:
-                raw = json.loads(response.read().decode("utf-8"))
-        except (OSError, urllib.error.URLError, urllib.error.HTTPError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ReviewLLMError("%s review request failed: %s" % (self.role, exc)) from exc
-        parsed = self._content(raw if isinstance(raw, Mapping) else {})
-        if not isinstance(parsed, Mapping):
-            raise ReviewLLMError("%s review response must be a JSON object" % self.role)
-        normalized = dict(parsed)
-        # Older controller prompts called the advocate's bottleneck narrative
-        # "advocacy_case" in addition to the typed bottleneck field. It is
-        # non-authoritative metadata; the typed report remains strict.
-        if self.role == "advocate":
-            normalized.pop("advocacy_case", None)
-        return normalized
+        last_error: Optional[ReviewLLMError] = None
+        required = set(review_json_schema(self.role).get("required", ()))
+        for attempt in range(2):
+            attempt_request = dict(request)
+            if attempt:
+                attempt_request["_retry_instruction"] = (
+                    "The previous review response was unusable. Repeat exactly the required keys "
+                    "and return one JSON object with no prose or extra fields."
+                )
+            endpoint, payload = self._endpoint_and_payload(attempt_request)
+            http_request = urllib.request.Request(
+                endpoint,
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(http_request, timeout=self.timeout_s) as response:
+                    raw = json.loads(response.read().decode("utf-8"))
+                parsed = self._content(raw if isinstance(raw, Mapping) else {})
+                if not isinstance(parsed, Mapping):
+                    raise ReviewLLMError("%s review response must be a JSON object" % self.role)
+                normalized = dict(parsed)
+                # Older controller prompts called the advocate's bottleneck
+                # narrative "advocacy_case" in addition to the typed field.
+                if self.role == "advocate":
+                    normalized.pop("advocacy_case", None)
+                if attempt == 0 and (not required.issubset(normalized) or set(normalized) - required):
+                    last_error = ReviewLLMError("%s review response did not match its required keys" % self.role)
+                    continue
+                return normalized
+            except ReviewLLMError as exc:
+                last_error = exc
+                if attempt == 0:
+                    continue
+                raise
+            except (OSError, urllib.error.URLError, urllib.error.HTTPError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                last_error = ReviewLLMError("%s review request failed: %s" % (self.role, exc))
+                if attempt == 0:
+                    continue
+                raise last_error from exc
+        if last_error is not None:
+            raise last_error
+        raise ReviewLLMError("%s review request failed without a response" % self.role)
 
 
 def _required_string(value: Any, name: str) -> str:
