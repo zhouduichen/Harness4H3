@@ -197,6 +197,23 @@ def _run(args: argparse.Namespace) -> int:
         gpu_index = _gpu_index(selected_device)
         torch.cuda.set_device(torch.device(selected_device))
         torch.cuda.reset_peak_memory_stats(torch.device(selected_device))
+        # A deployed target runtime keeps its VAE resident after deployment.
+        # Warm it once outside the measured interval so target latency/energy
+        # describe steady-state generation, while the measured run still
+        # includes the real Student sampler and VAE decode.
+        warmup_generation = generate_video(
+            proposal,
+            compiled,
+            target,
+            Path(args.comfyui_root),
+            Path(args.cache_dir),
+            args.vae_name,
+            benchmark_dir / "warmup-generation.mp4",
+            device=selected_device,
+            seed=int(args.seed),
+        )
+        torch.cuda.synchronize(torch.device(selected_device))
+        torch.cuda.reset_peak_memory_stats(torch.device(selected_device))
         sampler = _GpuSampler(gpu_index, args.measurement_interval_s)
         sampler.start()
         generation = generate_video(
@@ -231,6 +248,8 @@ def _run(args: argparse.Namespace) -> int:
             "frames": int(target.latent_frames),
             "sampling_steps": int(proposal.training.target_steps),
             "generation": dict(generation),
+            "warmup_generation": dict(warmup_generation),
+            "measurement_mode": "steady_state_after_runtime_warmup",
             "quantization_mode": quantization_mode,
             "gpu_measurement": gpu_measurement,
         }
