@@ -270,7 +270,20 @@ class StudentAlgorithmAdapter(DenoisingModelAdapter):
                     raise TrainingFailure("teacher_prediction_shape_mismatch", "promoted Student teacher output does not match latent shape")
                 return ModalPrediction(video=output)
             if self.teacher_predictor is not None:
-                prediction = self.teacher_predictor.predict(noisy, timestep, conditioning)
+                full_noisy = noisy
+                if full_noisy.audio is None and self._teacher_audio_clean is not None:
+                    audio_noise = self._teacher_audio_noise
+                    audio_timestep = timestep.audio if timestep.audio is not None else self._teacher_audio_timestep
+                    if audio_noise is not None and audio_timestep is not None:
+                        full_noisy = ModalLatents(
+                            video=noisy.video,
+                            audio=self.add_noise(
+                                ModalLatents(audio=self._teacher_audio_clean.to(device=noisy.video.device, dtype=noisy.video.dtype)),
+                                ModalLatents(audio=audio_noise.to(device=noisy.video.device, dtype=noisy.video.dtype)),
+                                ModalTimesteps(audio=audio_timestep.to(device=noisy.video.device)),
+                            ).audio,
+                        )
+                prediction = self.teacher_predictor.predict(full_noisy, timestep, conditioning)
                 return ModalPrediction(
                     video=prediction.video.to(device=noisy.video.device, dtype=noisy.video.dtype)
                     if prediction.video is not None else None,
@@ -950,6 +963,15 @@ class RealH3TeacherBackend:
         if not paths:
             raise StudentTrainingError("cache_missing", "no H3 cache items under %s" % self.cache_dir)
         generator = torch.Generator(device="cpu").manual_seed(20260920)
+
+        def to_student(value: Optional[torch.Tensor], dtype: torch.dtype) -> Optional[torch.Tensor]:
+            if value is None:
+                return None
+            # Teacher tensors originate on cuda:0.  A direct BF16 peer copy to
+            # the Student card has produced non-finite conditioning on this
+            # host, so make the small batch transfer explicit through CPU.
+            return value.detach().to(device="cpu", dtype=dtype).to(device=device, dtype=dtype)
+
         for index in range(max_steps):
             raw = torch.load(paths[index % len(paths)], map_location="cpu", weights_only=False)
             prepared = self.adapter.prepare_batch(raw, generator)
@@ -958,14 +980,14 @@ class RealH3TeacherBackend:
             if prepared.latents.video is None or prepared.noise.video is None or prepared.timesteps.video is None:
                 raise StudentTrainingError("invalid_h3_batch", "H3 batch lacks video tensors")
             yield StudentBatch(
-                latent=prepared.latents.video.to(device=device, dtype=self.dtype),
-                conditioning=prepared.conditioning.text.to(device=device, dtype=self.dtype),
-                timestep=prepared.timesteps.video.to(device=device, dtype=torch.float32),
+                latent=to_student(prepared.latents.video, self.dtype),
+                conditioning=to_student(prepared.conditioning.text, self.dtype),
+                timestep=to_student(prepared.timesteps.video, torch.float32),
                 target=None,
-                audio_latent=prepared.latents.audio.to(device=device, dtype=self.dtype) if prepared.latents.audio is not None else None,
-                audio_noise=prepared.noise.audio.to(device=device, dtype=self.dtype) if prepared.noise.audio is not None else None,
-                noise=prepared.noise.video.to(device=device, dtype=self.dtype),
-                audio_timestep=prepared.timesteps.audio.to(device=device, dtype=torch.float32) if prepared.timesteps.audio is not None else None,
+                audio_latent=to_student(prepared.latents.audio, self.dtype),
+                audio_noise=to_student(prepared.noise.audio, self.dtype),
+                noise=to_student(prepared.noise.video, self.dtype),
+                audio_timestep=to_student(prepared.timesteps.audio, torch.float32),
             )
 
     def save_student(self, student: nn.Module, path: Path, metadata: Mapping[str, str]) -> None:

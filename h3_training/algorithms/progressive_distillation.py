@@ -112,9 +112,17 @@ class ProgressiveDistillation(TrainingMethod):
 
     @staticmethod
     def _times(batch_size: int, video_sigma, audio_sigma, device) -> ModalTimesteps:
+        # A video-only Student can still be trained against the multimodal H3
+        # Teacher.  When no separate audio schedule is declared, reuse the
+        # video sigma so the Teacher request carries a valid audio timestep;
+        # the configured audio loss weight still controls whether audio is
+        # optimized or merely transported.
+        effective_audio_sigma = audio_sigma if audio_sigma is not None else video_sigma
         return ModalTimesteps(
             video=torch.full((batch_size,), 1.0 - video_sigma, device=device) if video_sigma is not None else None,
-            audio=torch.full((batch_size,), 1.0 - audio_sigma, device=device) if audio_sigma is not None else None,
+            audio=torch.full((batch_size,), 1.0 - effective_audio_sigma, device=device)
+            if effective_audio_sigma is not None
+            else None,
         )
 
     @staticmethod

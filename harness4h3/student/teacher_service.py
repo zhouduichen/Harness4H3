@@ -169,14 +169,16 @@ def _construct_teacher_model(
     checkpoint: Path,
     device: torch.device,
     rank: int,
+    *,
+    load_checkpoint: bool,
 ) -> torch.nn.Module:
-    """Use the validated H3 constructor with rank-0 checkpoint loading."""
+    """Use the validated H3 constructor with explicit checkpoint loading."""
 
     try:
         from tools.h3_teacher_target_worker import _construct_teacher_model as construct_teacher_model
     except ModuleNotFoundError:  # direct invocation from tools/ or an installed checkout
         from h3_teacher_target_worker import _construct_teacher_model as construct_teacher_model
-    return construct_teacher_model(api, checkpoint, rank, device)
+    return construct_teacher_model(api, checkpoint, rank, device, load_checkpoint=load_checkpoint)
 
 
 def _fsdp_rank_main(
@@ -190,6 +192,7 @@ def _fsdp_rank_main(
     distributed_timeout_s: float,
     request_queue: Any,
     response_queue: Any,
+    load_checkpoint_all_ranks: bool,
 ) -> None:
     """Run one rank of one collective FSDP-sharded online H3 Teacher."""
 
@@ -219,6 +222,7 @@ def _fsdp_rank_main(
             Path(checkpoint).resolve(),
             device,
             rank,
+            load_checkpoint=bool(load_checkpoint_all_ranks or rank == 0),
         )
         fsdp_model = _wrap_fsdp(
             model,
@@ -384,6 +388,7 @@ class TeacherService:
         dtype: torch.dtype = torch.bfloat16,
         start_timeout_s: float = 180.0,
         distributed_timeout_s: float = 180.0,
+        load_checkpoint_all_ranks: bool = True,
     ) -> None:
         self.checkpoint = Path(checkpoint).resolve()
         self.comfyui_root = Path(comfyui_root).resolve()
@@ -391,6 +396,7 @@ class TeacherService:
         self.dtype = dtype
         self.start_timeout_s = float(start_timeout_s)
         self.distributed_timeout_s = float(distributed_timeout_s)
+        self.load_checkpoint_all_ranks = bool(load_checkpoint_all_ranks)
         if len(self.devices) != self.REQUIRED_WORLD_SIZE:
             raise ValueError("online H3 Teacher requires exactly three devices/ranks")
         if len(set(self.devices)) != len(self.devices):
@@ -461,6 +467,7 @@ class TeacherService:
                     self.distributed_timeout_s,
                     request_queue,
                     response_queue,
+                    self.load_checkpoint_all_ranks,
                 ),
                 daemon=True,
             )

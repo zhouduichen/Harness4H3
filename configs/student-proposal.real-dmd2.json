@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "proposal_id": "student_real_dmd2_f1",
+  "parent_proposal_id": null,
+  "teacher": {
+    "checkpoint": "minimax_h3",
+    "adapter": "minimax_h3"
+  },
+  "architecture": {
+    "family": "video_latent_dit",
+    "latent_channels": 24,
+    "hidden_size": 1920,
+    "depth": 24,
+    "num_heads": 30,
+    "mlp_ratio": 4.0,
+    "spatial_patch": 2,
+    "temporal_patch": 1,
+    "temporal_layers": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+    "conditioning": "ada_norm_zero",
+    "norm": "rmsnorm",
+    "activation": "silu"
+  },
+  "training": {
+    "method": "dmd2",
+    "source_steps": 32,
+    "target_steps": 8,
+    "max_steps": 4,
+    "learning_rate": 0.000001,
+    "critic_learning_rate": 0.000001
+  },
+  "deployment": {
+    "precision": "bf16",
+    "quantization": "int8"
+  }
+}

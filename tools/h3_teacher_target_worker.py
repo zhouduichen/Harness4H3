@@ -45,14 +45,15 @@ def _construct_teacher_model(
     checkpoint: Path,
     rank: int,
     device: Optional[torch.device] = None,
+    load_checkpoint: Optional[bool] = None,
 ) -> torch.nn.Module:
-    """Use the shared H3 constructor with rank-0 checkpoint loading."""
+    """Use the shared H3 constructor, optionally loading on every rank."""
 
     return _construct_model(
         api,
         Path(checkpoint).resolve(),
         device or torch.device("cuda", int(rank)),
-        load_checkpoint=(int(rank) == 0),
+        load_checkpoint=(int(rank) == 0) if load_checkpoint is None else bool(load_checkpoint),
     )
 
 

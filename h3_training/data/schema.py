@@ -19,7 +19,12 @@ def _validate_tensor(name: str, value: Optional[Tensor]) -> None:
     if not isinstance(value, Tensor):
         raise TypeError(f"{name} must be a torch.Tensor")
     if value.is_floating_point() and not torch.isfinite(value).all():
-        raise ValueError(f"{name} must contain only finite values")
+        finite = torch.isfinite(value)
+        raise ValueError(
+            f"{name} must contain only finite values"
+            f" (dtype={value.dtype}, device={value.device}, shape={tuple(value.shape)}"
+            f", nonfinite={int((~finite).sum().item())})"
+        )
 
 
 @dataclass(frozen=True)

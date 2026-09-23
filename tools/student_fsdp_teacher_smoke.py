@@ -51,6 +51,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--devices", required=True, help="exactly three distinct cuda:N values")
     parser.add_argument("--student-device", default="", help="optional Student GPU used for overlap assertion")
     parser.add_argument(
+        "--startup-timeout-s",
+        type=float,
+        default=600.0,
+        help="maximum time allowed for all three real Teacher ranks to load and become ready",
+    )
+    parser.add_argument(
+        "--distributed-timeout-s",
+        type=float,
+        default=600.0,
+        help="distributed collective timeout, including slow first-time checkpoint loading",
+    )
+    parser.add_argument(
         "--latent-height",
         type=int,
         default=None,
@@ -88,7 +100,13 @@ def main(argv: list[str] | None = None) -> int:
             video=torch.full((1,), 0.5, device=input_device, dtype=torch.float32),
             audio=torch.full((1,), 0.75, device=input_device, dtype=torch.float32),
         )
-        service = TeacherService(checkpoint, Path(args.comfyui_root), devices).start()
+        service = TeacherService(
+            checkpoint,
+            Path(args.comfyui_root),
+            devices,
+            start_timeout_s=float(args.startup_timeout_s),
+            distributed_timeout_s=float(args.distributed_timeout_s),
+        ).start()
         forward_started = time.perf_counter()
         prediction = service.predict(noisy, timestep, conditioning)
         forward_latency_s = time.perf_counter() - forward_started
