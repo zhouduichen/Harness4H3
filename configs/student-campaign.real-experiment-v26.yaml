@@ -14,9 +14,9 @@ student:
   teacher_world_size: 3
   teacher_rank_min_free_memory_gb: 20.0
   controller_handoff:
-    hold_file: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full-v26/.controller-handoff-hold.json
-    release_file: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full-v26/.controller-release.json
-    worker_lease_file: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full-v26/.h3-worker-gpu-lease.json
+    hold_file: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full-v25/.controller-handoff-hold.json
+    release_file: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full-v25/.controller-release.json
+    worker_lease_file: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full-v25/.h3-worker-gpu-lease.json
   remote_campaign_root: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full-v26
   remote_config_path: /home/intern/huangjiahao/Harness4H3-codex-20260923/configs/student-campaign.real-experiment-v26.yaml
   vae_name: minimax_h3_video_vae_fp16.safetensors
