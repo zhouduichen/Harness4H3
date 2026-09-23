@@ -206,16 +206,17 @@ class StructuredLLMReviewAgent:
             endpoint = self.base_url + ("/chat/completions" if self.base_url.endswith("/v1") else "/v1/chat/completions")
             payload = {
                 "model": self.model_name,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [
+                    {"role": "system", "content": "Return JSON only. Do not emit markdown, tools, or executable code."},
+                    {"role": "user", "content": prompt},
+                ],
                 "temperature": 0.0,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "student_%s_review" % self.role,
-                        "strict": True,
-                        "schema": schema,
-                    },
-                },
+                "max_tokens": 512,
+                "chat_template_kwargs": {"enable_thinking": False},
+                # vLLM's nested guided-json compiler is slow on this remote
+                # controller. The typed report parser below remains the
+                # authoritative review contract.
+                "response_format": {"type": "json_object"},
             }
         return endpoint, payload
 
