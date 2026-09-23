@@ -390,7 +390,8 @@ def _parse_student_batch_response(raw: Mapping[str, Any], *, source: str) -> Seq
         # A few controller checkpoints emit the same advisory estimate at the
         # proposal root instead of inside deployment. It is not executable
         # schema, so discard it before authoritative validation as well.
-        candidate.pop("memory", None)
+        for legacy_key in ("memory", "graph", "id", "progressive_distillation"):
+            candidate.pop(legacy_key, None)
         deployment = candidate.get("deployment")
         # Some controller checkpoints append an advisory memory estimate to
         # deployment. It is not a trusted StudentProposal field and must never
