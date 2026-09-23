@@ -412,7 +412,12 @@ class EdgeSelectionEvaluator(FakeEvaluator):
 class EdgeSelectionRunner(FakeTargetDeviceRunner):
     def benchmark(self, deployment_id, compiled, output_dir, proposal):
         result = dict(super().benchmark(deployment_id, compiled, output_dir, proposal))
-        result["latency_s"] = 0.018 if compiled.read_bytes() == b"edge-a" else 0.010
+        if compiled.read_bytes() == b"edge-a":
+            # Candidate A is faster on the server but slower on the target;
+            # its lower edge memory keeps both candidates Pareto-feasible.
+            result.update({"latency_s": 0.018, "memory_gb": 0.4})
+        else:
+            result.update({"latency_s": 0.010, "memory_gb": 0.9})
         return result
 
 
@@ -451,5 +456,5 @@ def test_parent_selection_uses_edge_latency_after_edge_evidence(tmp_path):
     assert result.status == "TARGET_SATISFIED"
     events = [json.loads(line) for line in (tmp_path / "decision-trace.jsonl").read_text().splitlines()]
     selected = [item for item in events if item["event_type"] == "parent.selected"][-1]
-    assert selected["candidate_id"] != "student_0011"
-    assert selected["payload"]["candidate_id"] != "student_0011"
+    assert selected["candidate_id"] in {"student_0012", "student_0013"}
+    assert selected["payload"]["candidate_id"] in {"student_0012", "student_0013"}
