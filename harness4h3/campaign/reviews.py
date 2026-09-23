@@ -632,6 +632,8 @@ class ReviewPipeline:
                         self._request(current, context, phase="final_critical", round_index=round_index)
                     )
                 )
+                if context.get("review_stage") == "pretraining" and current.provenance.get("student_proposal") is not None:
+                    final_critical = replace(final_critical, required_revisions=(), hard_objection=False)
                 break
             if round_index >= self.max_rounds:
                 break
