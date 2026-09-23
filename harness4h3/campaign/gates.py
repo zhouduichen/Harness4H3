@@ -143,15 +143,11 @@ def _constraint_metric(name: str) -> Tuple[str, Optional[str]]:
 
 
 def _edge_evidence_complete(evidence: Mapping[str, MetricEvidence]) -> bool:
-    explicit = _find_evidence(evidence, "edge_evidence_complete")
-    if explicit is not None:
-        if (
-            explicit.value is None
-            or not explicit.valid
-            or float(explicit.value) <= 0
-            or explicit.device_profile_id == "server"
-        ):
-            return False
+    """Derive completion from the full artifact-backed edge metric tuple.
+
+    A server-produced completion marker is never accepted as a substitute
+    for export, runtime, and target-device measurements.
+    """
     return all(
         (item := _find_evidence(evidence, name)) is not None
         and item.value is not None

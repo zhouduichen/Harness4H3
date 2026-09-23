@@ -133,13 +133,11 @@ def test_edge_evidence_is_required_for_target_satisfied(tmp_path: Path):
         "quality": MetricEvidence("quality", "v1", "quality", 0.8, True, "server", "server"),
         "video_decodable": MetricEvidence("video_decodable", "v1", "video", 1.0, True, "server", "server", True),
         "evaluation_promotable": MetricEvidence("evaluation_promotable", "v1", "evaluation", 1.0, True, "server", "server", True),
-        "edge_evidence_complete": MetricEvidence("edge_evidence_complete", "v1", "edge", 0.0, False, "server", "server"),
     }
     gate = AcceptanceGate()
     result = gate.evaluate(candidate, evidence, hard_constraints={"min_quality_score": 0.7}, objectives={"quality": "maximize"}, min_rounds_met=True)
     assert result.promotable is True
     assert result.target_satisfied is False
-    evidence["edge_evidence_complete"] = MetricEvidence("edge_evidence_complete", "v1", "edge-device", 1.0, True, "edge-runtime", "edge-device")
     checkpoint = tmp_path / "contract-student.safetensors"
     checkpoint.write_bytes(b"contract-student")
     try:

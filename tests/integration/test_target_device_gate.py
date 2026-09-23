@@ -99,7 +99,7 @@ def test_target_device_profile_failure_is_not_target_satisfied(tmp_path: Path):
     assert "target_edge_model_size" in decision.violations
 
 
-def test_edge_complete_marker_cannot_bypass_missing_edge_metric(tmp_path: Path):
+def test_partial_edge_evidence_cannot_satisfy_gate(tmp_path: Path):
     checkpoint = tmp_path / "student.safetensors"
     checkpoint.write_bytes(b"student-checkpoint")
     edge = TargetDeviceEvaluator(FakeTargetDeviceRunner(), target_device_id="fake-edge-v1").evaluate(
@@ -107,9 +107,6 @@ def test_edge_complete_marker_cannot_bypass_missing_edge_metric(tmp_path: Path):
     )
     evidence = {item.metric_name: item.to_metric_evidence() for item in edge}
     evidence.pop("edge_exported")
-    evidence["edge_evidence_complete"] = MetricEvidence(
-        "edge_evidence_complete", "v1", "edge-complete", 1.0, True, "edge-runtime", "fake-edge-v1"
-    )
     profile = TargetDeviceProfile(
         id="fake-edge-v1",
         runtime_backend="fake-runtime",
