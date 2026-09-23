@@ -237,6 +237,7 @@ class StructuredLLMReviewAgent:
 
     @staticmethod
     def _content(raw: Mapping[str, Any]) -> Any:
+        message: Mapping[str, Any] = {}
         try:
             message = raw["choices"][0]["message"]
             content = message["content"]
@@ -245,10 +246,23 @@ class StructuredLLMReviewAgent:
                 content = raw["message"]["content"]
             except (KeyError, TypeError) as nested:
                 raise ReviewLLMError("review response has no structured message content") from nested
+        if content is None and isinstance(message, Mapping):
+            content = message.get("reasoning_content") or message.get("reasoning")
         if isinstance(content, list):
-            content = "".join(
-                item.get("text", "") for item in content if isinstance(item, Mapping)
-            )
+            parts = []
+            for item in content:
+                if not isinstance(item, Mapping):
+                    continue
+                value = item.get("text")
+                if value is None:
+                    value = item.get("content")
+                if value is None:
+                    value = item.get("json")
+                if isinstance(value, Mapping):
+                    value = json.dumps(dict(value), ensure_ascii=False)
+                if value is not None:
+                    parts.append(str(value))
+            content = "".join(parts)
         if isinstance(content, str):
             try:
                 return json.loads(content)
