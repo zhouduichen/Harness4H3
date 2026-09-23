@@ -1514,9 +1514,8 @@ class StudentCampaign:
                                     "cumulative_train_steps": spec.cumulative_train_steps,
                                     "evaluation_cases": spec.evaluation_cases,
                                     "seed_count": spec.seed_count,
-                                "verifier_strength": spec.verifier_strength,
-                                "timeout_s": spec.timeout_s,
-                                "gpu_budget": spec.gpu_budget,
+                                    "verifier_strength": spec.verifier_strength,
+                                    "timeout_s": spec.timeout_s,
                                 },
                                 "validation": dict(validation),
                             },
@@ -1548,9 +1547,8 @@ class StudentCampaign:
                                     "cumulative_train_steps": spec.cumulative_train_steps,
                                     "evaluation_cases": spec.evaluation_cases,
                                     "seed_count": spec.seed_count,
-                            "verifier_strength": spec.verifier_strength,
-                            "timeout_s": spec.timeout_s,
-                            "gpu_budget": spec.gpu_budget,
+                                    "verifier_strength": spec.verifier_strength,
+                                    "timeout_s": spec.timeout_s,
                                 },
                                 "parent_checkpoint": fidelity_parent_checkpoint,
                                 "parent_candidate_id": fidelity_parent_candidate_id,
@@ -1649,7 +1647,7 @@ class StudentCampaign:
                             for key in (
                                 "train_steps", "cumulative_train_steps", "optimizer_steps",
                                 "optimizer_steps_by_role", "initial_loss", "final_loss",
-                                "gradient_norm", "peak_memory_gb", "gpu_budget",
+                                "gradient_norm", "peak_memory_gb",
                             )
                             if training_payload.get(key) is not None
                         },

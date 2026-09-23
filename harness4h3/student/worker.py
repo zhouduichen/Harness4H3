@@ -103,7 +103,6 @@ class TrainingResult:
     seed_count: int = 0
     verifier_strength: str = ""
     timeout_s: float = 0.0
-    gpu_budget: int = 0
     total_parameter_count: int = 0
     inheritance_ratio: float = 0.0
     initialization_mode: str = "fresh_init"
@@ -379,7 +378,6 @@ class FidelitySpec:
     seed_count: int
     verifier_strength: str
     timeout_s: float
-    gpu_budget: int = 1
 
 
 def fidelity_spec(max_steps: int, fidelity: str) -> FidelitySpec:
@@ -396,7 +394,6 @@ def fidelity_spec(max_steps: int, fidelity: str) -> FidelitySpec:
         seed_count={"F1": 1, "F2": 2, "F3": 4}[name],
         verifier_strength={"F1": "cheap", "F2": "semantic", "F3": "full"}[name],
         timeout_s={"F1": 900.0, "F2": 1800.0, "F3": 3600.0}[name],
-        gpu_budget={"F1": 1, "F2": 1, "F3": 2}[name],
     )
 
 
@@ -854,7 +851,6 @@ class StudentTrainWorker:
                 seed_count=spec.seed_count,
                 verifier_strength=spec.verifier_strength,
                 timeout_s=spec.timeout_s,
-                gpu_budget=spec.gpu_budget,
                 total_parameter_count=total_parameter_count,
                 inheritance_ratio=(float(inherited_parameter_count) / float(total_parameter_count)) if total_parameter_count else 0.0,
                 initialization_mode=("full_resume" if inherited_parameter_count == total_parameter_count and total_parameter_count else "partial_transfer" if inherited_parameter_count else "fresh_init"),
