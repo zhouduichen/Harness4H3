@@ -320,6 +320,9 @@ def _student_architect_prompt(context: Mapping[str, Any]) -> str:
         "temporal_layers must be unique layer indices within depth. "
         "Use method progressive_distillation or dmd2; keep source_steps<=256, target_steps<=64, "
         "and for progressive_distillation use only binary-halving-reachable step pairs. "
+        "Safe progressive pairs include (16,8), (16,4), (32,16), (32,8), (32,4), "
+        "(64,32), (64,16), (64,8), (64,4), (128,64), (128,32), (128,16), "
+        "and (256,64); never use (50,10). "
         "The trusted campaign config controls the optimizer budget; do not emit max_steps or batch_size. "
         "Keep learning rates<=0.01. "
         "For mlp_ratio=4.0 on this registered graph, hidden=1536/depth=24 "
@@ -339,7 +342,11 @@ def _student_architect_batch_prompt(context: Mapping[str, Any]) -> str:
         "Do not emit code, shell commands, markdown, or explanations outside JSON. "
         "Candidates must be materially different and must use only the registered graph, "
         "training, and deployment fields. The Harness will reject invalid shapes, memory, "
-        "or 1B-2B parameter counts. Keep every candidate legal before returning. CONTEXT="
+        "or 1B-2B parameter counts. Keep every candidate legal before returning. For "
+        "progressive_distillation, use only pairs from this safe set: (16,8), (16,4), "
+        "(32,16), (32,8), (32,4), (64,32), (64,16), (64,8), (64,4), (128,64), "
+        "(128,32), (128,16), or (256,64); never use source_steps=50 or target_steps=10. "
+        "CONTEXT="
         + json.dumps(dict(context), ensure_ascii=False, sort_keys=True)
     )
 
