@@ -403,6 +403,13 @@ def _parse_student_batch_response(raw: Mapping[str, Any], *, source: str) -> Seq
                     decoded_layers = None
                 if isinstance(decoded_layers, list):
                     parsed_layers = decoded_layers
+                elif isinstance(decoded_layers, int) and not isinstance(decoded_layers, bool):
+                    parsed_layers = [decoded_layers]
+                elif decoded_layers is None:
+                    try:
+                        parsed_layers = [int(item.strip()) for item in layers.split(",") if item.strip()]
+                    except (TypeError, ValueError):
+                        parsed_layers = None
             elif isinstance(layers, int) and not isinstance(layers, bool):
                 parsed_layers = [layers]
             if parsed_layers is not None:
