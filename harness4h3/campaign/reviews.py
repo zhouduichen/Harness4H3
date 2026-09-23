@@ -285,12 +285,18 @@ class StructuredLLMReviewAgent:
         last_error: Optional[ReviewLLMError] = None
         required = set(review_json_schema(self.role).get("required", ()))
         for attempt in range(2):
-            attempt_request = dict(request)
             if attempt:
+                attempt_request = {
+                    key: request[key]
+                    for key in ("phase", "review_round", "base_digest", "candidate")
+                    if key in request
+                }
                 attempt_request["_retry_instruction"] = (
-                    "The previous review response was unusable. Repeat exactly the required keys "
-                    "and return one JSON object with no prose or extra fields."
+                    "The previous review response was unusable. Use only the candidate core below. "
+                    "Repeat exactly the required keys and return one JSON object with no prose or extra fields."
                 )
+            else:
+                attempt_request = dict(request)
             endpoint, payload = self._endpoint_and_payload(attempt_request)
             http_request = urllib.request.Request(
                 endpoint,
