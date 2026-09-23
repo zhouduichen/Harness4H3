@@ -1102,7 +1102,15 @@ class StudentCampaign:
             # describe lineage in its proposal, but it cannot redirect the
             # executable checkpoint inheritance edge.
             proposal_parent = parent_id
-            candidate_id = proposal.proposal_id
+            # Controllers commonly reuse proposal ids (student_0001, ...)
+            # across generations. Keep round one backward-compatible, then
+            # namespace later candidates so durable archive/parent decisions
+            # cannot collide across autonomous rounds.
+            candidate_id = (
+                proposal.proposal_id
+                if round_index == 1
+                else "%s_r%04d" % (proposal.proposal_id, round_index)
+            )
             candidates.append(
                 CandidateEnvelope(
                     candidate_id=candidate_id,
@@ -1939,11 +1947,7 @@ class StudentCampaign:
                 )
 
             best = self._control_best(
-                [
-                    item for item in candidate_decisions
-                    if item.get("candidate_id") in {value.candidate_id for value in batch.candidates}
-                    and item.get("promotable")
-                ],
+                [item for item in candidate_decisions[decision_start:] if item.get("promotable")],
                 objectives,
             )
             if best is not None:

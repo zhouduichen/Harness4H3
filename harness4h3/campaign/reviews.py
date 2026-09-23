@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
@@ -308,8 +309,14 @@ class StructuredLLMReviewAgent:
     def review(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         last_error: Optional[ReviewLLMError] = None
         required = set(review_json_schema(self.role).get("required", ()))
-        for attempt in range(2):
+        for attempt in range(6):
             if attempt:
+                # The server-local controller is intentionally stopped during
+                # training/evaluation handoff. Give its launcher time to
+                # cold-start before turning a transient connection refusal
+                # into a candidate failure.
+                if last_error is not None and "request failed" in str(last_error):
+                    time.sleep(min(20.0, 5.0 * attempt))
                 attempt_request = {
                     key: request[key]
                     for key in ("phase", "review_round", "base_digest", "candidate")
@@ -339,18 +346,18 @@ class StructuredLLMReviewAgent:
                 # narrative "advocacy_case" in addition to the typed field.
                 if self.role == "advocate":
                     normalized.pop("advocacy_case", None)
-                if attempt == 0 and (not required.issubset(normalized) or set(normalized) - required):
+                if not required.issubset(normalized) or set(normalized) - required:
                     last_error = ReviewLLMError("%s review response did not match its required keys" % self.role)
                     continue
                 return normalized
             except ReviewLLMError as exc:
                 last_error = exc
-                if attempt == 0:
+                if attempt < 5:
                     continue
                 raise
             except (OSError, urllib.error.URLError, urllib.error.HTTPError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 last_error = ReviewLLMError("%s review request failed: %s" % (self.role, exc))
-                if attempt == 0:
+                if attempt < 5:
                     continue
                 raise last_error from exc
         if last_error is not None:
