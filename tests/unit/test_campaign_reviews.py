@@ -197,3 +197,4 @@ def test_critical_prompt_treats_measurements_as_pretraining_evidence_gaps():
     prompt = _review_prompt("critical", {"candidate": valid_candidate().to_dict()})
     assert "missing measurements" in prompt
     assert "Keep required_revisions empty for measurement-only gaps" in prompt
+    assert "Do not require target_steps >= 16" in prompt
