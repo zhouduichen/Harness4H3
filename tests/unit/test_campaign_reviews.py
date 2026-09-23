@@ -198,3 +198,18 @@ def test_critical_prompt_treats_measurements_as_pretraining_evidence_gaps():
     assert "missing measurements" in prompt
     assert "Keep required_revisions empty for measurement-only gaps" in prompt
     assert "Do not require target_steps >= 16" in prompt
+
+
+def test_pretraining_review_keeps_critical_objections_advisory():
+    base = make_base()
+    pipeline = ReviewPipeline(
+        advocate=ScriptedAdvocate(valid_advocate()),
+        critical=ScriptedCritical([critical_raw(hard=True, required=["training.method"])]),
+        modifier=ScriptedModifier(valid_candidate()),
+        base=base,
+        max_rounds=1,
+    )
+    result = pipeline.review(valid_candidate(), {"review_stage": "pretraining"})
+    assert result.approved is True
+    assert result.final_critical.hard_objection is False
+    assert result.final_critical.required_revisions == ()

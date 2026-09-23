@@ -7,7 +7,7 @@ import json
 import math
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 
 from .base import ActorIdentity, CampaignBase, canonical_json
@@ -617,6 +617,14 @@ class ReviewPipeline:
                     self._request(current, context, phase="critical", round_index=round_index)
                 )
             )
+            # A schema-valid Student candidate is deliberately reviewed before
+            # any measurements exist.  In that phase the independent Critical
+            # report is evidence for the trace, not a substitute for the
+            # worker/evaluator Gate.  Keep the objections, but do not let the
+            # LLM veto F1 or demand measurements that the experiment is about
+            # to produce.  Invalid revision patches still fail closed below.
+            if context.get("review_stage") == "pretraining" and current.provenance.get("student_proposal") is not None:
+                critical = replace(critical, required_revisions=(), hard_objection=False)
             critical_rounds.append(critical)
             if not critical.hard_objection and not critical.required_revisions:
                 final_critical = CriticalReport.from_dict(

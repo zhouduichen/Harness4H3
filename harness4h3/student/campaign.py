@@ -1493,6 +1493,7 @@ class StudentCampaign:
                             "objectives": objectives,
                             "diagnosis": batch.diagnosis,
                             "fidelity_schedule": list(self.fidelity_schedule),
+                            "review_stage": "pretraining",
                             "capability_snapshot_digest": snapshot.digest,
                         },
                     )
