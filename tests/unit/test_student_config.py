@@ -42,6 +42,7 @@ def test_student_campaign_config_requires_fixed_worker_and_real_evaluator(tmp_pa
     assert config.worker_gpu_wait_s == 1800
     assert config.worker_min_free_memory_gb == 44.3
     assert config.worker_student_min_free_memory_gb == 20.0
+    assert config.worker_student_memory_safety_margin_gb == 2.0
     assert config.target.min_params == 1_000_000_000
     with pytest.raises(StudentConfigError, match="worker_entrypoint"):
         load_student_campaign_config(_write_config(tmp_path, worker_entrypoint="relative.py"))
@@ -92,6 +93,32 @@ def test_target_device_and_review_models_are_explicitly_configurable(tmp_path):
         "critical-v1",
         "revision-v1",
     )
+
+
+def test_target_device_profile_is_the_primary_identity_with_command(tmp_path):
+    config = load_student_campaign_config(
+        _write_config(
+            tmp_path,
+            target_device_command=["/opt/edge/run"],
+            target_device={
+                "id": "phone-a",
+                "runtime_backend": "fake-runtime",
+                "max_latency_s": 1.0,
+                "max_memory_gb": 1.0,
+                "max_energy_j": 1.0,
+                "max_thermal_c": 70.0,
+                "max_model_size_gb": 1.0,
+                "supported_precision": ["bf16"],
+                "supported_quantization": ["none"],
+                "resolution": [512, 512],
+                "frames": 5,
+                "sampling_steps": 1,
+            },
+        )
+    )
+    assert config.target_device is not None
+    assert config.target_device.id == "phone-a"
+    assert config.target_device_id == "phone-a"
 
 
 def test_target_device_command_requires_device_identity(tmp_path):

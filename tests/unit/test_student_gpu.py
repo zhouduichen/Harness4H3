@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from harness4h3.student.gpu import GPUResourceUnavailable, select_free_cuda_devices, select_role_gpu_allocation
+from harness4h3.student.gpu import GPUResourceUnavailable, RuntimeResourceGate, select_free_cuda_devices, select_role_gpu_allocation
 
 
 def test_gpu_lease_assigns_distinct_devices_by_memory(monkeypatch):
@@ -49,3 +49,17 @@ def test_role_allocation_enforces_aggregate_worker_floor(monkeypatch):
     )
     with pytest.raises(GPUResourceUnavailable, match="aggregate minimum"):
         select_role_gpu_allocation(2, 20.0, 20.0, wait_s=0, worker_min_free_memory_gb=100.0)
+
+
+def test_runtime_resource_gate_uses_post_lease_free_memory_and_margin():
+    RuntimeResourceGate(2.0).check(
+        estimated_training_peak_memory_gb=10.0,
+        actual_free_memory_gb=12.0,
+        device="cuda:3",
+    )
+    with pytest.raises(GPUResourceUnavailable, match="safety margin"):
+        RuntimeResourceGate(2.0).check(
+            estimated_training_peak_memory_gb=10.1,
+            actual_free_memory_gb=12.0,
+            device="cuda:3",
+        )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 import subprocess
@@ -81,6 +82,49 @@ def acquire_controller_handoff(
         )
 
 
+@dataclass(frozen=True)
+class RuntimeResourceGate:
+    """Fail-closed admission check against the GPU's post-lease free memory."""
+
+    safety_margin_gb: float = 2.0
+
+    def __post_init__(self) -> None:
+        value = float(self.safety_margin_gb)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("GPU runtime safety margin must be finite and non-negative")
+        object.__setattr__(self, "safety_margin_gb", value)
+
+    def check(
+        self,
+        *,
+        estimated_training_peak_memory_gb: float,
+        actual_free_memory_gb: float,
+        device: str,
+    ) -> None:
+        estimated = float(estimated_training_peak_memory_gb)
+        actual = float(actual_free_memory_gb)
+        if not math.isfinite(estimated) or estimated <= 0:
+            raise GPUResourceUnavailable("compile manifest has no valid estimated training peak memory")
+        if not math.isfinite(actual) or actual < 0:
+            raise GPUResourceUnavailable("unable to establish actual free memory for %s" % device)
+        available = actual - self.safety_margin_gb
+        if estimated > available:
+            raise GPUResourceUnavailable(
+                "Student GPU %s has %.3f GiB available after %.3f GiB safety margin, "
+                "but estimated training peak is %.3f GiB"
+                % (device, available, self.safety_margin_gb, estimated)
+            )
+
+
+def current_free_memory_gb(device: str) -> float:
+    """Read one device's free memory after the role lease has been published."""
+
+    values = dict(_query_free_memory())
+    if str(device) not in values:
+        raise GPUResourceUnavailable("nvidia-smi did not report %s after GPU allocation" % device)
+    return float(values[str(device)])
+
+
 def publish_worker_gpu_lease(worker_lease_file: str | None, devices: Sequence[str]) -> None:
     if not worker_lease_file:
         return
@@ -114,6 +158,16 @@ def release_controller_handoff(
                 Path(value).unlink()
             except FileNotFoundError:
                 pass
+
+
+def release_worker_gpu_lease(worker_lease_file: str | None) -> None:
+    """Release only the worker lease while an outer controller hold remains."""
+
+    if worker_lease_file:
+        try:
+            Path(worker_lease_file).unlink()
+        except FileNotFoundError:
+            pass
 
 
 def select_free_cuda_device(min_free_memory_gb: float, wait_s: int) -> str:
@@ -300,11 +354,14 @@ def select_free_cuda_devices(min_free_memory_gb: Sequence[float], wait_s: int) -
 __all__ = [
     "GPUAllocation",
     "GPUResourceUnavailable",
+    "RuntimeResourceGate",
     "acquire_controller_handoff",
     "publish_worker_gpu_lease",
     "release_controller_handoff",
+    "release_worker_gpu_lease",
     "select_free_cuda_device",
     "select_free_cuda_devices",
     "select_teacher_gpu_devices",
     "select_role_gpu_allocation",
+    "current_free_memory_gb",
 ]

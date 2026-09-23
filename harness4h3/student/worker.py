@@ -10,7 +10,7 @@ import tempfile
 import time
 import copy
 import inspect
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 
@@ -102,7 +102,6 @@ class TrainingResult:
     seed_count: int = 0
     verifier_strength: str = ""
     timeout_s: float = 0.0
-    gpu_budget: int = 0
     total_parameter_count: int = 0
     inheritance_ratio: float = 0.0
     initialization_mode: str = "fresh_init"
@@ -116,6 +115,12 @@ class TrainingResult:
     teacher_peak_memory_gb: float = 0.0
     teacher_rank_forward_counts: tuple[tuple[int, int], ...] = ()
     stage_lineage: tuple[Mapping[str, Any], ...] = ()
+    optimizer_steps_by_role: Mapping[str, int] = field(default_factory=dict)
+    runtime_resource_gate_passed: bool = False
+    estimated_training_peak_memory_gb: float = 0.0
+    student_free_memory_gb: float = 0.0
+    student_memory_safety_margin_gb: float = 0.0
+    gpu_allocation: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -340,7 +345,7 @@ class StudentAlgorithmAdapter(DenoisingModelAdapter):
 
 
 def fidelity_step_budget(max_steps: int, fidelity: str) -> int:
-    """Return the cumulative optimizer budget for one fidelity tier."""
+    """Return the cumulative candidate training budget for one fidelity tier."""
 
     value = int(max_steps)
     if value <= 0:
@@ -352,6 +357,17 @@ def fidelity_step_budget(max_steps: int, fidelity: str) -> int:
     return max(1, value // divisor)
 
 
+def progressive_stage_budgets(total_steps: int, stage_count: int) -> tuple[int, ...]:
+    """Split one candidate fidelity budget across progressive stages."""
+
+    total = int(total_steps)
+    count = int(stage_count)
+    if total <= 0 or count <= 0 or total < count:
+        raise ValueError("progressive fidelity budget must cover every stage")
+    base, remainder = divmod(total, count)
+    return tuple(base + (1 if index < remainder else 0) for index in range(count))
+
+
 @dataclass(frozen=True)
 class FidelitySpec:
     name: str
@@ -361,7 +377,6 @@ class FidelitySpec:
     seed_count: int
     verifier_strength: str
     timeout_s: float
-    gpu_budget: int
 
 
 def fidelity_spec(max_steps: int, fidelity: str) -> FidelitySpec:
@@ -378,7 +393,6 @@ def fidelity_spec(max_steps: int, fidelity: str) -> FidelitySpec:
         seed_count={"F1": 1, "F2": 2, "F3": 4}[name],
         verifier_strength={"F1": "cheap", "F2": "semantic", "F3": "full"}[name],
         timeout_s={"F1": 900.0, "F2": 1800.0, "F3": 3600.0}[name],
-        gpu_budget={"F1": 1, "F2": 1, "F3": 2}[name],
     )
 
 
@@ -588,16 +602,18 @@ class StudentTrainWorker:
             else:
                 parent_sha256 = teacher_sha256
                 total_parameter_count = sum(int(parameter.numel()) for parameter in student.parameters())
+            spec = fidelity_spec(int(max_steps if max_steps is not None else 256), fidelity)
             configured_steps = int(train_steps if train_steps is not None else (max_steps if max_steps is not None else 256))
             if configured_steps <= 0:
                 raise StudentTrainingError("invalid_training_config", "train_steps must be positive")
-            spec = fidelity_spec(int(max_steps if max_steps is not None else 256), fidelity)
-            steps = configured_steps if train_steps is not None else spec.train_steps
+            steps = configured_steps
+            uses_declared_fidelity_budget = train_steps is not None and steps == spec.train_steps
+            cumulative_train_steps = spec.cumulative_train_steps if uses_declared_fidelity_budget else steps
             # DMD2 alternates critic and Student updates; one optimizer
             # iteration would exercise only the critic and cannot publish a
             # changed Student checkpoint.
-            if proposal.training.method == "dmd2":
-                steps = max(2, steps)
+            if proposal.training.method == "dmd2" and steps < 2:
+                raise StudentTrainingError("invalid_training_config", "DMD2 requires at least two training iterations")
             adapter = StudentAlgorithmAdapter(
                 teacher_adapter=getattr(self.backend, "adapter", None),
                 teacher_role=teacher,
@@ -614,16 +630,20 @@ class StudentTrainWorker:
             final_loss = None
             maximum_gradient_norm = 0.0
             stage_lineage: list[Mapping[str, Any]] = []
+            optimizer_steps_by_role: dict[str, int] = {}
             output_dir.mkdir(parents=True, exist_ok=True)
             if selected_student_device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(selected_student_device)
             if proposal.training.method == "progressive_distillation":
                 algorithm_path = "h3_training.algorithms.progressive_distillation.ProgressiveDistillation"
                 stages = plan_binary_stages(proposal.training.source_steps, proposal.training.target_steps)
+                stage_budgets = progressive_stage_budgets(steps, len(stages))
                 active_teacher = teacher
                 active_adapter = adapter
                 active_teacher_checkpoint = teacher_checkpoint
+                consumed_stage_steps = 0
                 for stage_index, stage in enumerate(stages):
+                    stage_budget = stage_budgets[stage_index]
                     stage_method = ProgressiveDistillation(
                         student,
                         getattr(active_teacher, "model", active_teacher),
@@ -642,11 +662,14 @@ class StudentTrainWorker:
                         )
                     ).run(
                         stage_method,
-                        self.backend.batches(active_teacher, proposal, self.target, steps, selected_student_device),
-                        max_steps=steps,
+                        self.backend.batches(active_teacher, proposal, self.target, stage_budget, selected_student_device),
+                        max_steps=stage_budget,
                     )
                     dispatch = "executed"
-                    total_steps += sum(int(value) for value in result.optimizer_steps.values())
+                    stage_optimizer_steps = sum(int(value) for value in result.optimizer_steps.values())
+                    total_steps += stage_optimizer_steps
+                    for role, count in result.optimizer_steps.items():
+                        optimizer_steps_by_role[str(role)] = optimizer_steps_by_role.get(str(role), 0) + int(count)
                     initial_loss = result.initial_loss if initial_loss is None else initial_loss
                     final_loss = result.final_loss
                     maximum_gradient_norm = max(maximum_gradient_norm, result.max_gradient_norm)
@@ -678,9 +701,19 @@ class StudentTrainWorker:
                             "stage_child_sha256": stage_sha256,
                             "student_sha256": stage_sha256,
                             "student_nfe": stage.student_nfe,
+                            "stage_train_steps": stage_budget,
+                            "stage_optimizer_steps": stage_optimizer_steps,
+                            "stage_optimizer_steps_by_role": {
+                                str(role): int(count) for role, count in result.optimizer_steps.items()
+                            },
+                            "cumulative_train_steps": (
+                                (cumulative_train_steps - steps)
+                                + consumed_stage_steps + stage_budget
+                            ),
                             "promoted_as_next_teacher": stage_index < len(stages) - 1,
                         }
                     )
+                    consumed_stage_steps += stage_budget
                     if stage_index < len(stages) - 1:
                         promoted_teacher = copy.deepcopy(student).eval()
                         for parameter in promoted_teacher.parameters():
@@ -704,9 +737,22 @@ class StudentTrainWorker:
                     )
                     dispatch = "executed"
                     total_steps += sum(int(value) for value in result.optimizer_steps.values())
+                    for role, count in result.optimizer_steps.items():
+                        optimizer_steps_by_role[str(role)] = optimizer_steps_by_role.get(str(role), 0) + int(count)
                     initial_loss = result.initial_loss if initial_loss is None else initial_loss
                     final_loss = result.final_loss
                     maximum_gradient_norm = max(maximum_gradient_norm, result.max_gradient_norm)
+                    stage_lineage.append(
+                        {
+                            "stage_index": 0,
+                            "stage_train_steps": steps,
+                            "stage_optimizer_steps": sum(int(value) for value in result.optimizer_steps.values()),
+                            "stage_optimizer_steps_by_role": {
+                                str(role): int(count) for role, count in result.optimizer_steps.items()
+                            },
+                            "cumulative_train_steps": cumulative_train_steps,
+                        }
+                    )
             changed = sum(
                 1
                 for name, value in student.state_dict().items()
@@ -791,12 +837,11 @@ class StudentTrainWorker:
                 algorithm_name=algorithm_name, algorithm_dispatch=dispatch, fidelity=str(fidelity),
                 algorithm_path=algorithm_path,
                 train_steps=steps,
-                cumulative_train_steps=spec.cumulative_train_steps,
+                cumulative_train_steps=cumulative_train_steps,
                 evaluation_cases=spec.evaluation_cases,
                 seed_count=spec.seed_count,
                 verifier_strength=spec.verifier_strength,
                 timeout_s=spec.timeout_s,
-                gpu_budget=spec.gpu_budget,
                 total_parameter_count=total_parameter_count,
                 inheritance_ratio=(float(inherited_parameter_count) / float(total_parameter_count)) if total_parameter_count else 0.0,
                 initialization_mode=("full_resume" if inherited_parameter_count == total_parameter_count and total_parameter_count else "partial_transfer" if inherited_parameter_count else "fresh_init"),
@@ -810,6 +855,7 @@ class StudentTrainWorker:
                 teacher_peak_memory_gb=teacher_peak_memory,
                 teacher_rank_forward_counts=teacher_rank_forward_counts,
                 stage_lineage=tuple(stage_lineage),
+                optimizer_steps_by_role=dict(optimizer_steps_by_role),
             )
         except StudentTrainingError as exc:
             if teacher_service is not None:

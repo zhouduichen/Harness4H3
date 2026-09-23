@@ -337,10 +337,6 @@ class StudentCampaignAdapter:
                     1.0 if evaluation.get("promotable") else 0.0,
                     bool(evaluation.get("promotable")), "student-evaluator", "server", False,
                 ),
-                MetricEvidence(
-                    "edge_evidence_complete", "student-adapter-v1", str(round_dir),
-                    0.0, False, "student-evaluator", "server", False,
-                ),
             )
         )
         for metric_name in ("latency_s", "energy_j", "model_size_gb"):

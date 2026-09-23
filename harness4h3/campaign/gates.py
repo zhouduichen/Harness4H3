@@ -64,15 +64,37 @@ class GateDecision:
 _ALIASES = {
     "quality_score": "quality",
     "quality": "quality",
-    "latency": "latency_s",
-    "latency_s": "latency_s",
-    "memory": "peak_memory_gb",
-    "peak_memory_gb": "peak_memory_gb",
-    "training_peak_memory_gb": "peak_memory_gb",
-    "size": "model_size_gb",
-    "model_size_gb": "model_size_gb",
-    "energy": "energy_j",
-    "energy_j": "energy_j",
+    "latency": "latency",
+    "latency_s": "latency",
+    "server_latency": "latency",
+    "edge_latency": "latency",
+    "memory": "memory",
+    "peak_memory_gb": "memory",
+    "training_peak_memory_gb": "memory",
+    "server_memory": "memory",
+    "edge_memory": "memory",
+    "size": "model_size",
+    "model_size_gb": "model_size",
+    "edge_model_size": "model_size",
+    "energy": "energy",
+    "energy_j": "energy",
+    "edge_energy": "energy",
+}
+
+_SERVER_METRICS = {
+    "quality": ("quality",),
+    "latency": ("server_latency", "latency_s"),
+    "memory": ("server_memory", "peak_memory_gb", "training_peak_memory_gb"),
+    "energy": ("energy_j",),
+    "model_size": ("model_size_gb",),
+}
+
+_EDGE_METRICS = {
+    "quality": ("quality",),
+    "latency": ("edge_latency",),
+    "memory": ("edge_memory",),
+    "energy": ("edge_energy",),
+    "model_size": ("edge_model_size",),
 }
 
 _EDGE_REQUIRED_EVIDENCE = (
@@ -94,10 +116,22 @@ def _metric_name(value: str) -> str:
 
 def _find_evidence(evidence: Mapping[str, MetricEvidence], name: str) -> Optional[MetricEvidence]:
     target = _metric_name(name)
+    # Prefer an exact metric before alias fallback. In particular, an edge
+    # metric must never resolve to an earlier server proxy merely because both
+    # share the same canonical optimization name.
     for key, item in evidence.items():
-        if key == name or _metric_name(str(key)) == target or _metric_name(item.metric_name) == target:
+        if key == name or item.metric_name == name:
+            return item
+    for key, item in evidence.items():
+        if _metric_name(str(key)) == target or _metric_name(item.metric_name) == target:
             return item
     return None
+
+
+def canonical_metric_name(name: str) -> str:
+    """Return the stable optimization name for server or edge aliases."""
+
+    return _ALIASES.get(str(name), str(name))
 
 
 def _constraint_metric(name: str) -> Tuple[str, Optional[str]]:
@@ -128,6 +162,26 @@ def _edge_evidence_complete(evidence: Mapping[str, MetricEvidence]) -> bool:
     )
 
 
+def effective_metric_set(evidence: Mapping[str, MetricEvidence]) -> Mapping[str, MetricEvidence]:
+    """Resolve one metric set for every optimization consumer.
+
+    Server measurements remain proxies until the complete target-device tuple
+    is present. Once it is present, every non-quality optimization metric is
+    sourced from the target device, so a server-only latency can never decide a
+    target-device parent.
+    """
+
+    candidates = _EDGE_METRICS if _edge_evidence_complete(evidence) else _SERVER_METRICS
+    result: Dict[str, MetricEvidence] = {}
+    for canonical, names in candidates.items():
+        for name in names:
+            item = _find_evidence(evidence, name)
+            if item is not None and item.value is not None and item.valid:
+                result[canonical] = item
+                break
+    return result
+
+
 class AcceptanceGate:
     def evaluate(
         self,
@@ -142,19 +196,14 @@ class AcceptanceGate:
         violations = []
         evidence_ids = []
         edge_complete = _edge_evidence_complete(evidence)
-        edge_metric_for = {
-            "latency_s": "edge_latency",
-            "energy_j": "edge_energy",
-        }
         for item in evidence.values():
             evidence_ids.append(item.input_reference)
         for constraint, threshold in hard_constraints.items():
             metric, direction = _constraint_metric(str(constraint))
             item = _find_evidence(evidence, metric)
-            if edge_complete and metric in edge_metric_for:
-                edge_item = _find_evidence(evidence, edge_metric_for[metric])
-                if edge_item is not None:
-                    item = edge_item
+            if edge_complete:
+                effective = effective_metric_set(evidence)
+                item = effective.get(canonical_metric_name(metric), item)
             if item is None or item.value is None or not item.valid:
                 violations.append("%s:missing_or_invalid" % constraint)
                 continue
@@ -259,10 +308,12 @@ class AcceptanceGate:
                     profile_passed = False
         objective_values: Dict[str, float] = {}
         if not violations:
+            effective = effective_metric_set(evidence)
             for objective in objectives:
-                item = _find_evidence(evidence, str(objective))
+                canonical = canonical_metric_name(str(objective))
+                item = effective.get(canonical)
                 if item is not None and item.value is not None and item.valid:
-                    objective_values[str(objective)] = float(item.value)
+                    objective_values[canonical] = float(item.value)
         feasible = not violations
         promotable = feasible
         target_satisfied = feasible and promotable and bool(min_rounds_met) and edge_complete and profile_passed
@@ -290,9 +341,12 @@ def pareto_dominates(
     objectives: Mapping[str, str],
 ) -> bool:
     strictly_better = False
+    left_effective = effective_metric_set(left)
+    right_effective = effective_metric_set(right)
     for name, direction in objectives.items():
-        left_item = _find_evidence(left, str(name))
-        right_item = _find_evidence(right, str(name))
+        canonical = canonical_metric_name(str(name))
+        left_item = left_effective.get(canonical)
+        right_item = right_effective.get(canonical)
         if left_item is None or right_item is None or left_item.value is None or right_item.value is None:
             return False
         left_value = float(left_item.value)
@@ -310,4 +364,11 @@ def pareto_dominates(
     return strictly_better
 
 
-__all__ = ["AcceptanceGate", "GateDecision", "MetricEvidence", "pareto_dominates"]
+__all__ = [
+    "AcceptanceGate",
+    "GateDecision",
+    "MetricEvidence",
+    "canonical_metric_name",
+    "effective_metric_set",
+    "pareto_dominates",
+]

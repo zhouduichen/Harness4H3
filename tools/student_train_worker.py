@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import os
 import shutil
@@ -16,7 +17,9 @@ try:
     from harness4h3.student.compiler import CompileManifest
     from harness4h3.student.gpu import (
         GPUResourceUnavailable,
+        RuntimeResourceGate,
         acquire_controller_handoff,
+        current_free_memory_gb,
         publish_worker_gpu_lease,
         release_controller_handoff,
         select_role_gpu_allocation,
@@ -28,7 +31,9 @@ except ModuleNotFoundError:  # direct invocation from the repository root
     from harness4h3.student.compiler import CompileManifest
     from harness4h3.student.gpu import (
         GPUResourceUnavailable,
+        RuntimeResourceGate,
         acquire_controller_handoff,
+        current_free_memory_gb,
         publish_worker_gpu_lease,
         release_controller_handoff,
         select_role_gpu_allocation,
@@ -136,6 +141,7 @@ def main(argv=None) -> int:
     parser.add_argument("--wait-for-gpu-s", type=int, default=1800)
     parser.add_argument("--min-free-memory-gb", type=float, default=44.3, help="minimum free memory for the H3 teacher GPU")
     parser.add_argument("--student-min-free-memory-gb", type=float, default=20.0, help="minimum free memory for the Student GPU")
+    parser.add_argument("--student-memory-safety-margin-gb", type=float, default=2.0, help="post-lease free-memory safety margin for Student training")
     parser.add_argument("--teacher-world-size", type=int, default=3)
     parser.add_argument("--teacher-rank-min-free-memory-gb", type=float, default=20.0)
     parser.add_argument(
@@ -181,6 +187,12 @@ def main(argv=None) -> int:
                 args.controller_worker_lease_file or None,
                 allocation.all_devices,
             )
+            actual_student_free_memory_gb = current_free_memory_gb(selected_student_device)
+            RuntimeResourceGate(args.student_memory_safety_margin_gb).check(
+                estimated_training_peak_memory_gb=manifest.estimated_peak_memory_gb,
+                actual_free_memory_gb=actual_student_free_memory_gb,
+                device=selected_student_device,
+            )
             # The Student algorithm receives the loaded H3 teacher role and
             # invokes its forward pass for the current noisy sample/timestep.
             # Do not materialize fixed teacher targets: that path is only a
@@ -209,6 +221,15 @@ def main(argv=None) -> int:
             parent_candidate_id=args.parent_candidate_id or None,
             fidelity=args.fidelity,
         )
+        if result.status == "success":
+            result = replace(
+                result,
+                runtime_resource_gate_passed=True,
+                estimated_training_peak_memory_gb=float(manifest.estimated_peak_memory_gb),
+                student_free_memory_gb=float(actual_student_free_memory_gb),
+                student_memory_safety_margin_gb=float(args.student_memory_safety_margin_gb),
+                gpu_allocation=tuple(allocation.all_devices),
+            )
         if result.status == "success" and handoff_acquired:
             # Keep the Controller stopped until the independent evaluator
             # releases the exact handoff marker.

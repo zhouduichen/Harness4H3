@@ -18,6 +18,7 @@ from harness4h3.student.gpu import (
     acquire_controller_handoff,
     publish_worker_gpu_lease,
     release_controller_handoff,
+    release_worker_gpu_lease,
     select_free_cuda_device,
     select_teacher_gpu_devices,
 )
@@ -128,10 +129,13 @@ def main(argv=None) -> int:
             latent_width=args.latent_width,
             condition_dim=args.condition_dim,
         )
+        sampled_cases = []
         cases = []
         latencies = []
         peak_memory_gb = 0.0
         model_load_time_s = 0.0
+        latent_dir = output_dir / "teacher-baseline-latents"
+        latent_dir.mkdir(parents=True, exist_ok=True)
         if args.baseline_kind == "h3_teacher_generation_baseline":
             model_load_started = time.perf_counter()
             teacher_service = TeacherService(
@@ -144,7 +148,7 @@ def main(argv=None) -> int:
         for case in manifest.cases:
             cache_key = str(Path(case.cache_path).resolve())
             for seed in case.seeds:
-                video_path = output_dir / "teacher-baseline" / ("%s-%d.mp4" % (case.case_id, seed))
+                latent_path = latent_dir / ("%s-%d.pt" % (case.case_id, seed))
                 cache_item = load_h3_cache_item(Path(args.cache_dir), target, device, torch.bfloat16, cache_path=Path(case.cache_path))
                 if args.baseline_kind == "h3_teacher_generation_baseline" and cache_item.get("audio_latent") is None:
                     raise ValueError("H3 teacher baseline requires audio latent in cache item %s" % cache_key)
@@ -165,41 +169,20 @@ def main(argv=None) -> int:
                     # executable H3 generation baseline.
                     latent = cache_item["latent"].to(device=device, dtype=torch.bfloat16)
                     sampling_latency = 0.0
-                decode_started = time.perf_counter()
-                frames = decode_video_latent(Path(args.comfyui_root), args.vae_name, latent)
-                write_video(frames, video_path)
-                decode_latency = time.perf_counter() - decode_started
-                latency = float(sampling_latency + decode_latency)
-                if device.type == "cuda":
-                    peak_memory_gb = max(peak_memory_gb, float(torch.cuda.max_memory_allocated(device)) / float(1024 ** 3))
-                quality_started = time.perf_counter()
-                evidence = quality_backend.evaluate(video_path, case.caption).to_dict()
-                quality_latency = time.perf_counter() - quality_started
-                latencies.append(latency)
-                cases.append(
+                torch.save({"latent": latent.detach().to(device="cpu").contiguous()}, latent_path)
+                sampled_cases.append(
                     {
                         "case_id": case.case_id,
+                        "caption": case.caption,
                         "seed": int(seed),
-                        "video_path": str(video_path),
-                        "quality": evidence,
-                        "latency_s": latency,
+                        "latent_path": str(latent_path),
                         "sampling_latency_s": float(sampling_latency),
-                        "sampling_latency": float(sampling_latency),
-                        "decode_latency_s": float(decode_latency),
-                        "decode_latency": float(decode_latency),
-                        "quality_latency_s": float(quality_latency),
-                        "quality_latency": float(quality_latency),
-                        "model_load_time_s": float(model_load_time_s),
-                        "model_load_time": float(model_load_time_s),
-                        "peak_memory": float(peak_memory_gb),
-                        "generation_latency_s": latency,
-                        "frame_count": int(frames.shape[0]),
-                        "resolution": [int(frames.shape[2]), int(frames.shape[1])],
                     }
                 )
-                del frames, latent
+                del cache_item, latent
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
+
         teacher_forward_count = int(teacher_service.forward_count) if teacher_service is not None else 0
         teacher_peak_memory_gb = float(teacher_service.teacher_peak_memory_gb) if teacher_service is not None else 0.0
         teacher_ranks_used = sorted(teacher_service.ranks_used) if teacher_service is not None else []
@@ -207,6 +190,52 @@ def main(argv=None) -> int:
         peak_memory_gb = max(peak_memory_gb, teacher_peak_memory_gb)
         if teacher_service is not None:
             teacher_service.close()
+            teacher_service = None
+        if handoff_acquired:
+            # Keep the outer controller hold during decode/CLIP, but release
+            # the Teacher's lease and all FSDP ranks before loading the VAE.
+            release_worker_gpu_lease(args.controller_worker_lease_file or None)
+
+        for sampled in sampled_cases:
+            video_path = output_dir / "teacher-baseline" / ("%s-%d.mp4" % (sampled["case_id"], sampled["seed"]))
+            payload = torch.load(Path(sampled["latent_path"]), map_location="cpu", weights_only=False)
+            latent = payload["latent"].to(device=device, dtype=torch.bfloat16)
+            decode_started = time.perf_counter()
+            frames = decode_video_latent(Path(args.comfyui_root), args.vae_name, latent)
+            write_video(frames, video_path)
+            decode_latency = time.perf_counter() - decode_started
+            sampling_latency = float(sampled["sampling_latency_s"])
+            latency = float(sampling_latency + decode_latency)
+            if device.type == "cuda":
+                peak_memory_gb = max(peak_memory_gb, float(torch.cuda.max_memory_allocated(device)) / float(1024 ** 3))
+            quality_started = time.perf_counter()
+            evidence = quality_backend.evaluate(video_path, sampled["caption"]).to_dict()
+            quality_latency = time.perf_counter() - quality_started
+            latencies.append(latency)
+            cases.append(
+                {
+                    "case_id": sampled["case_id"],
+                    "seed": int(sampled["seed"]),
+                    "video_path": str(video_path),
+                    "quality": evidence,
+                    "latency_s": latency,
+                    "sampling_latency_s": float(sampling_latency),
+                    "sampling_latency": float(sampling_latency),
+                    "decode_latency_s": float(decode_latency),
+                    "decode_latency": float(decode_latency),
+                    "quality_latency_s": float(quality_latency),
+                    "quality_latency": float(quality_latency),
+                    "model_load_time_s": float(model_load_time_s),
+                    "model_load_time": float(model_load_time_s),
+                    "peak_memory": float(peak_memory_gb),
+                    "generation_latency_s": latency,
+                    "frame_count": int(frames.shape[0]),
+                    "resolution": [int(frames.shape[2]), int(frames.shape[1])],
+                }
+            )
+            del frames, latent, payload
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
         if handoff_acquired:
             release_controller_handoff(
                 args.controller_hold_file or None,

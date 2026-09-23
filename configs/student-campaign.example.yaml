@@ -11,6 +11,7 @@ student:
   # H3 teacher is FSDP-sharded across three cards; this is the per-rank lease.
   worker_min_free_memory_gb: 20.0
   worker_student_min_free_memory_gb: 20.0
+  worker_student_memory_safety_margin_gb: 2.0
   teacher_world_size: 3
   teacher_rank_min_free_memory_gb: 20.0
   controller_handoff:

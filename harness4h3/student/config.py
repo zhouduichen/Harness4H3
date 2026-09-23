@@ -73,6 +73,7 @@ class StudentCampaignConfig:
     worker_gpu_wait_s: int
     worker_min_free_memory_gb: float
     worker_student_min_free_memory_gb: float
+    worker_student_memory_safety_margin_gb: float
     remote_campaign_root: str
     remote_config_path: str
     vae_name: str
@@ -220,9 +221,15 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         worker_gpu_wait_s = int(student.get("worker_gpu_wait_s", 1800))
         worker_min_free_memory_gb = float(student.get("worker_min_free_memory_gb", 44.3))
         worker_student_min_free_memory_gb = float(student.get("worker_student_min_free_memory_gb", 20.0))
+        worker_student_memory_safety_margin_gb = float(student.get("worker_student_memory_safety_margin_gb", 2.0))
     except (TypeError, ValueError) as exc:
         raise StudentConfigError("student GPU scheduling limits are invalid") from exc
-    if worker_gpu_wait_s < 0 or worker_min_free_memory_gb <= 0 or worker_student_min_free_memory_gb <= 0:
+    if (
+        worker_gpu_wait_s < 0
+        or worker_min_free_memory_gb <= 0
+        or worker_student_min_free_memory_gb <= 0
+        or worker_student_memory_safety_margin_gb < 0
+    ):
         raise StudentConfigError("student GPU scheduling limits are invalid")
     controller_raw = _mapping(student.get("controller", {}), "student.controller")
     controller = StudentControllerConfig(
@@ -308,16 +315,21 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
     )
     target_device_raw = student.get("target_device_command")
     target_device_command = _command(target_device_raw, "student.target_device_command") if target_device_raw is not None else ()
-    target_device_id = str(student.get("target_device_id", "")).strip()
-    if bool(target_device_command) != bool(target_device_id):
-        raise StudentConfigError(
-            "student.target_device_command and student.target_device_id must be configured together"
-        )
+    legacy_target_device_id = str(student.get("target_device_id", "")).strip()
     if target_device is not None:
-        if target_device_id and target_device_id != target_device.id:
+        if legacy_target_device_id and legacy_target_device_id != target_device.id:
             raise StudentConfigError("student.target_device_id must match student.target_device.id")
-        if target_device_command and not target_device_id:
-            target_device_id = target_device.id
+        target_device_id = target_device.id
+    else:
+        target_device_id = legacy_target_device_id
+    if target_device_command and not target_device_id:
+        raise StudentConfigError(
+            "student.target_device_command and target_device.id (or legacy target_device_id) must be configured together"
+        )
+    if target_device is None and bool(target_device_command) != bool(target_device_id):
+        raise StudentConfigError(
+            "student.target_device_command and target_device.id (or legacy target_device_id) must be configured together"
+        )
     review_models = _mapping(student.get("review_models", {}), "student.review_models")
     unknown_review_models = sorted(set(review_models) - {"advocate", "critic", "critical", "revision"})
     if unknown_review_models:
@@ -371,6 +383,7 @@ def load_student_campaign_config(path: Path) -> StudentCampaignConfig:
         worker_gpu_wait_s=worker_gpu_wait_s,
         worker_min_free_memory_gb=worker_min_free_memory_gb,
         worker_student_min_free_memory_gb=worker_student_min_free_memory_gb,
+        worker_student_memory_safety_margin_gb=worker_student_memory_safety_margin_gb,
         remote_campaign_root=remote_campaign_root,
         remote_config_path=remote_config_path,
         vae_name=vae_name,

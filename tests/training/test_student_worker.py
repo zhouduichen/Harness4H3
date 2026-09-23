@@ -115,7 +115,7 @@ def test_progressive_worker_publishes_each_child_as_next_teacher(tmp_path):
     save_file({"teacher": torch.ones(1)}, str(teacher))
 
     result = StudentTrainWorker(FakeBackend()).run(
-        manifest, teacher, tmp_path / "progressive-child", max_steps=1, device="cpu"
+        manifest, teacher, tmp_path / "progressive-child", max_steps=2, device="cpu"
     )
 
     assert result.status == "success"
@@ -125,3 +125,41 @@ def test_progressive_worker_publishes_each_child_as_next_teacher(tmp_path):
     assert result.stage_lineage[0]["promoted_as_next_teacher"] is True
     assert result.stage_lineage[1]["promoted_as_next_teacher"] is False
     assert all(Path(item["student_checkpoint"]).is_file() for item in result.stage_lineage)
+
+
+def test_progressive_stages_share_the_candidate_fidelity_budget(tmp_path):
+    payload = valid_payload()
+    payload["training"].update({"method": "progressive_distillation", "source_steps": 8, "target_steps": 2})
+    proposal = StudentProposal.from_dict(payload)
+    manifest = StudentCompiler(StudentTarget()).compile(proposal, tmp_path / "progressive-budget-compile")
+    teacher = tmp_path / "teacher.safetensors"
+    save_file({"teacher": torch.ones(1)}, str(teacher))
+
+    result = StudentTrainWorker(FakeBackend()).run(
+        manifest, teacher, tmp_path / "progressive-budget-child", train_steps=6, max_steps=6, device="cpu"
+    )
+
+    assert result.status == "success"
+    assert result.train_steps == 6
+    assert result.cumulative_train_steps == 6
+    assert sum(int(item["stage_train_steps"]) for item in result.stage_lineage) == result.train_steps
+    assert result.optimizer_steps == sum(result.optimizer_steps_by_role.values())
+    assert [item["cumulative_train_steps"] for item in result.stage_lineage] == [3, 6]
+
+
+def test_dmd2_reports_one_candidate_budget_and_real_role_optimizer_steps(tmp_path):
+    proposal = StudentProposal.from_dict(valid_payload())
+    manifest = StudentCompiler(StudentTarget()).compile(proposal, tmp_path / "dmd2-budget-compile")
+    teacher = tmp_path / "teacher.safetensors"
+    save_file({"teacher": torch.ones(1)}, str(teacher))
+
+    result = StudentTrainWorker(FakeBackend()).run(
+        manifest, teacher, tmp_path / "dmd2-budget-child", train_steps=4, max_steps=4, device="cpu"
+    )
+
+    assert result.status == "success"
+    assert result.train_steps == 4
+    assert result.cumulative_train_steps == 4
+    assert result.optimizer_steps_by_role == {"critic": 4, "student": 2}
+    assert result.optimizer_steps == 6
+    assert result.stage_lineage[0]["stage_train_steps"] == result.train_steps

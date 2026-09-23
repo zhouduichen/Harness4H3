@@ -958,8 +958,17 @@ class StudentCampaign:
         return constraints
 
     def _control_objectives(self) -> Dict[str, str]:
+        def normalize(raw: Mapping[str, Any]) -> Dict[str, str]:
+            from ..campaign.gates import canonical_metric_name
+
+            result: Dict[str, str] = {}
+            for name, direction in raw.items():
+                if direction in {"maximize", "minimize"}:
+                    result[canonical_metric_name(str(name))] = str(direction)
+            return result
+
         if self.objectives:
-            return dict(self.objectives)
+            return normalize(self.objectives)
         raw = self.campaign_base.target_profile.get("objectives")
         result: Dict[str, str] = {}
         if isinstance(raw, Mapping):
@@ -974,7 +983,13 @@ class StudentCampaign:
             for item in raw:
                 if isinstance(item, Mapping) and item.get("name") and item.get("direction") in {"maximize", "minimize"}:
                     result[str(item["name"])] = str(item["direction"])
-        return result or {"quality": "maximize", "latency_s": "minimize", "peak_memory_gb": "minimize"}
+        normalized = normalize(result)
+        return normalized or {
+            "quality": "maximize",
+            "latency": "minimize",
+            "memory": "minimize",
+            "model_size": "minimize",
+        }
 
     def _control_batch(self, context: Mapping[str, Any], *, round_index: int, parent_id: str, parent_generation: int) -> Any:
         from ..campaign.proposals import CandidateEnvelope, ProposalBatch
@@ -1051,17 +1066,31 @@ class StudentCampaign:
         return {str(key): value for key, value in execution.items() if not str(key).startswith("_")}
 
     @staticmethod
-    def _control_best(items: Sequence[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+    def _control_best(
+        items: Sequence[Mapping[str, Any]],
+        objectives: Mapping[str, str],
+    ) -> Optional[Mapping[str, Any]]:
         if not items:
             return None
+
+        def score(item: Mapping[str, Any]) -> tuple[Any, ...]:
+            values = item.get("objective_values") or {}
+            scores: list[float] = [
+                1.0 if item.get("target_satisfied") else 0.0,
+                1.0 if item.get("promotable") else 0.0,
+            ]
+            for name, direction in objectives.items():
+                value = values.get(name)
+                if not isinstance(value, (int, float)):
+                    scores.append(float("-inf"))
+                else:
+                    number = float(value)
+                    scores.append(number if direction == "maximize" else -number)
+            return tuple(scores)
+
         return max(
             items,
-            key=lambda item: (
-                bool(item.get("target_satisfied")),
-                bool(item.get("promotable")),
-                float((item.get("objective_values") or {}).get("quality", (item.get("objective_values") or {}).get("quality_score", 0.0)) or 0.0),
-                -float((item.get("objective_values") or {}).get("latency_s", float("inf")) or float("inf")),
-            ),
+            key=score,
         )
 
     def _append_control_experience(
@@ -1074,12 +1103,16 @@ class StudentCampaign:
         training: Optional[Mapping[str, Any]] = None,
         baseline_metrics: Optional[Mapping[str, Any]] = None,
     ) -> None:
+        from ..campaign.gates import canonical_metric_name, effective_metric_set
+
+        effective = effective_metric_set(evidence)
         actual = {
-            name: item.value
-            for name, item in evidence.items()
-            if item.value is not None and item.metric_name not in {"video_decodable", "evaluation_promotable"}
+            name: item.value for name, item in effective.items() if item.value is not None
         }
-        predicted = dict(candidate.predicted_metric_delta)
+        predicted = {
+            canonical_metric_name(str(name)): value
+            for name, value in dict(candidate.predicted_metric_delta).items()
+        }
         baseline = dict(baseline_metrics or {})
         actual_delta = {
             name: float(value) - float(baseline.get(name, 0.0))
@@ -1100,6 +1133,14 @@ class StudentCampaign:
             "actual_metrics": actual,
             "actual_delta": actual_delta,
             "prediction_error": prediction_error,
+            "effective_metric_sources": {
+                name: {
+                    "metric_name": item.metric_name,
+                    "device_profile_id": item.device_profile_id,
+                    "input_reference": item.input_reference,
+                }
+                for name, item in effective.items()
+            },
             "gate": decision.to_dict(),
             "execution_evidence": {
                 "algorithm_name": (training or {}).get("algorithm_name"),
@@ -1463,7 +1504,6 @@ class StudentCampaign:
                                     "seed_count": spec.seed_count,
                                     "verifier_strength": spec.verifier_strength,
                                     "timeout_s": spec.timeout_s,
-                                    "gpu_budget": spec.gpu_budget,
                                 },
                                 "validation": dict(validation),
                             },
@@ -1496,7 +1536,6 @@ class StudentCampaign:
                                     "seed_count": spec.seed_count,
                                     "verifier_strength": spec.verifier_strength,
                                     "timeout_s": spec.timeout_s,
-                                    "gpu_budget": spec.gpu_budget,
                                 },
                                 "parent_checkpoint": fidelity_parent_checkpoint,
                                 "parent_candidate_id": fidelity_parent_candidate_id,
@@ -1591,7 +1630,11 @@ class StudentCampaign:
                         actor=self.campaign_base.evaluator_identity,
                         payload={
                             key: training_payload.get(key)
-                            for key in ("optimizer_steps", "initial_loss", "final_loss", "gradient_norm", "peak_memory_gb")
+                            for key in (
+                                "train_steps", "cumulative_train_steps", "optimizer_steps",
+                                "optimizer_steps_by_role", "initial_loss", "final_loss",
+                                "gradient_norm", "peak_memory_gb",
+                            )
                             if training_payload.get(key) is not None
                         },
                         evidence_ids=(str(public_execution.get("training", {}).get("compiler_digest") or "training")),
@@ -1804,7 +1847,14 @@ class StudentCampaign:
                     evidence_ids=(),
                 )
 
-            best = self._control_best([item for item in candidate_decisions if item.get("candidate_id") in {value.candidate_id for value in batch.candidates} and item.get("promotable")])
+            best = self._control_best(
+                [
+                    item for item in candidate_decisions
+                    if item.get("candidate_id") in {value.candidate_id for value in batch.candidates}
+                    and item.get("promotable")
+                ],
+                objectives,
+            )
             if best is not None:
                 last_promotable = True
                 selected = next(item for item in round_results if item[0].candidate_id == best["candidate_id"])

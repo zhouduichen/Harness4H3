@@ -65,6 +65,8 @@ class RemoteStudentWorker:
             str(self.config.worker_min_free_memory_gb),
             "--student-min-free-memory-gb",
             str(self.config.worker_student_min_free_memory_gb),
+            "--student-memory-safety-margin-gb",
+            str(self.config.worker_student_memory_safety_margin_gb),
             "--teacher-world-size",
             str(self.config.teacher_world_size),
             "--teacher-rank-min-free-memory-gb",
@@ -249,8 +251,8 @@ class RemoteTargetDeviceEvaluator:
     def __init__(self, config: StudentCampaignConfig, client: SSHClient):
         self.config = config
         self.client = client
-        if not config.target_device_command or not config.target_device_id or config.target_device is None:
-            raise ValueError("target-device command, device id, and TargetDeviceProfile are required")
+        if not config.target_device_command or config.target_device is None:
+            raise ValueError("target-device command and TargetDeviceProfile are required")
 
     def evaluate(self, checkpoint: Path, proposal: Any, round_dir: Path) -> tuple[EdgeEvidence, ...]:
         remote_dir = str(PurePosixPath(self.config.remote_campaign_root) / round_dir.name)
@@ -269,7 +271,7 @@ class RemoteTargetDeviceEvaluator:
             "--result",
             result_path,
             "--target-device-id",
-            self.config.target_device_id,
+            self.config.target_device.id,
         )
         self.client.run(command, timeout_s=max(3600.0, self.config.controller.timeout_s * 20), check=False)
         raw = self.client.read_json(result_path)

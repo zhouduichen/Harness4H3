@@ -590,7 +590,7 @@ def cmd_student_run(args: argparse.Namespace) -> int:
         retention_handler=RemoteStudentRetention(config, client).retain,
         target_device_evaluator=(
             RemoteTargetDeviceEvaluator(config, client)
-            if config.target_device_command and config.target_device_id and config.target_device is not None
+            if config.target_device_command and config.target_device is not None
             else None
         ),
         target_device_profile=config.target_device,
