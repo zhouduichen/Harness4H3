@@ -392,6 +392,23 @@ def _parse_student_batch_response(raw: Mapping[str, Any], *, source: str) -> Seq
         # schema, so discard it before authoritative validation as well.
         for legacy_key in ("memory", "graph", "id", "progressive_distillation"):
             candidate.pop(legacy_key, None)
+        architecture = candidate.get("architecture")
+        if isinstance(architecture, Mapping):
+            layers = architecture.get("temporal_layers")
+            parsed_layers = None
+            if isinstance(layers, str):
+                try:
+                    decoded_layers = json.loads(layers)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    decoded_layers = None
+                if isinstance(decoded_layers, list):
+                    parsed_layers = decoded_layers
+            elif isinstance(layers, int) and not isinstance(layers, bool):
+                parsed_layers = [layers]
+            if parsed_layers is not None:
+                architecture = dict(architecture)
+                architecture["temporal_layers"] = parsed_layers
+                candidate["architecture"] = architecture
         deployment = candidate.get("deployment")
         # Some controller checkpoints append an advisory memory estimate to
         # deployment. It is not a trusted StudentProposal field and must never
