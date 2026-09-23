@@ -136,7 +136,10 @@ def _review_prompt(role: str, request: Mapping[str, Any]) -> str:
         instruction = (
             "Act as the Advocate for this candidate. Build the strongest evidence-grounded case "
             "for the proposed design, identify its actual bottleneck, and predict numeric metric "
-            "deltas. Do not invent evidence or alter the target profile/verifier bank."
+            "deltas. Do not invent evidence or alter the target profile/verifier bank. "
+            "Return exactly these keys: bottleneck (string), changed_fields (string array), "
+            "expected_metric_delta (numeric object), supporting_evidence_ids (string array), "
+            "falsification_experiment (string), resource_assumptions (object)."
         )
     elif role == "critical":
         instruction = (
@@ -144,14 +147,24 @@ def _review_prompt(role: str, request: Mapping[str, Any]) -> str:
             "until evidence proves otherwise. Actively search for unsupported assumption, proxy "
             "gaming, goal drift, repeated failed design, resource mismatch, evaluator blind spot, "
             "architecture/algorithm incompatibility, and target-device mismatch. You have no right "
-            "to modify TargetProfile, VerifierBank, or the final Gate; report objections only."
+            "to modify TargetProfile, VerifierBank, or the final Gate; report objections only. "
+            "Return exactly these keys: objections (string array), objection_categories (string "
+            "array using only unsupported_assumption, proxy_gaming, goal_drift, "
+            "credit_assignment_error, repeated_failed_design, evaluator_blind_spot, "
+            "resource_mismatch, architecture_algorithm_incompatibility, target_device_mismatch), "
+            "missing_evidence_ids (string array), proxy_gaming_risks (string array), "
+            "target_device_risks (string array), required_revisions (string array), "
+            "hard_objection (boolean)."
         )
     else:
         instruction = (
             "Act as an independent Revision agent. Return only a RevisionPatch with JSON-Pointer "
             "operations over architecture, training, or deployment fields. Preserve candidate_id "
             "and immutable campaign base digest. Never return a complete CandidateEnvelope, edit "
-            "parent/generation/Teacher identity, TargetProfile, VerifierBank, or any final gate."
+            "parent/generation/Teacher identity, TargetProfile, VerifierBank, or any final gate. "
+            "Return exactly these keys: candidate_id (string), base_digest (string), operations "
+            "(array of objects with op/path/value), changed_fields (string array), "
+            "resolved_objection_ids (string array), reason (string)."
         )
     return (
         instruction
