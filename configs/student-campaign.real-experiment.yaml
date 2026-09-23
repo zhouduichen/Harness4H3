@@ -17,7 +17,7 @@ student:
     hold_file: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full/.controller-handoff-hold.json
     release_file: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full/.controller-release.json
     worker_lease_file: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full/.h3-worker-gpu-lease.json
-  remote_campaign_root: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full-v15
+  remote_campaign_root: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full-v16
   remote_config_path: /home/intern/huangjiahao/Harness4H3-codex-20260923/configs/student-campaign.real-experiment.yaml
   vae_name: minimax_h3_video_vae_fp16.safetensors
   local_output_root: var/student-campaign-real-experiment
@@ -89,5 +89,5 @@ remote:
   comfyui_port: 8188
   python: /home/intern/miniconda3/envs/comfy/bin/python
   training_python: /home/intern/miniconda3/envs/comfy/bin/python
-  results_root: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full-v15
-  campaign_root: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full-v15
+  results_root: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full-v16
+  campaign_root: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full-v16
