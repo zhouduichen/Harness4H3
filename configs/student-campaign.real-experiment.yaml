@@ -1,0 +1,93 @@
+schema_version: 1
+
+student:
+  goal: "Based on the real MiniMax H3 teacher, autonomously design, distill, quantize, and iterate a runnable 1B-2B edge video generator."
+  teacher_checkpoint: /data/models/MiniMax-H3/harness4h3/student-teacher-staged.safetensors
+  h3_cache_dir: /data/models/MiniMax-H3/harness4h3/cache
+  worker_entrypoint: /home/intern/huangjiahao/Harness4H3-codex-20260923/tools/student_train_worker.py
+  worker_python: /home/intern/miniconda3/envs/comfy/bin/python
+  worker_device: auto
+  worker_gpu_wait_s: 1800
+  worker_min_free_memory_gb: 20.0
+  worker_student_min_free_memory_gb: 20.0
+  worker_student_memory_safety_margin_gb: 2.0
+  teacher_world_size: 3
+  teacher_rank_min_free_memory_gb: 20.0
+  controller_handoff:
+    hold_file: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full/.controller-handoff-hold.json
+    release_file: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full/.controller-release.json
+    worker_lease_file: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full/.h3-worker-gpu-lease.json
+  remote_campaign_root: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full
+  remote_config_path: /home/intern/huangjiahao/Harness4H3-codex-20260923/configs/student-campaign.real-experiment.yaml
+  vae_name: minimax_h3_video_vae_fp16.safetensors
+  local_output_root: var/student-campaign-real-experiment
+  experience_path: var/student-campaign-real-experiment/experience.jsonl
+  max_rounds: 3
+  min_rounds_before_success: 1
+  max_failures: 3
+  max_steps: 4
+  fidelity_schedule: [F1, F2, F3]
+  evaluation_manifest: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full/evaluation-manifest.json
+  clip_model_path: /data/models/clip-vit-large-patch14-336
+  quality_backend: clip_temporal
+  quality_floor_ratio: 0.90
+  min_reward_delta: 0.02
+  material_efficiency_gain: 0.05
+  max_metric_regression: 0.02
+  no_improvement_patience: 3
+  baseline_command:
+    - /home/intern/miniconda3/envs/comfy/bin/python
+    - /home/intern/huangjiahao/Harness4H3-codex-20260923/tools/student_teacher_baseline_worker.py
+    - --teacher-devices
+    - cuda:0,cuda:1,cuda:2
+    - --decode-device
+    - cuda:3
+    - --teacher-service-batch-size
+    - "2"
+    - --sampling-steps
+    - "1"
+  controller:
+    provider: vllm
+    model: qwen3.5-controller
+    base_url: http://127.0.0.1:8000/v1
+    timeout_s: 600
+  advocate_model: qwen3.5-controller
+  critical_model: qwen3.5-controller
+  revision_model: qwen3.5-controller
+  evaluation_command:
+    - /home/intern/miniconda3/envs/comfy/bin/python
+    - /home/intern/huangjiahao/Harness4H3-codex-20260923/tools/student_evaluate_worker.py
+  target_device:
+    id: edge-device-v1
+    runtime_backend: trusted-runtime-v1
+    max_latency_s: 1.0
+    max_memory_gb: 6.0
+    max_energy_j: 20.0
+    max_thermal_c: 75.0
+    max_model_size_gb: 2.0
+    supported_precision: [bf16, fp16]
+    supported_quantization: [none, int8]
+    resolution: [256, 256]
+    frames: 5
+    sampling_steps: 4
+  target:
+    min_params: 1000000000
+    max_params: 2000000000
+    max_peak_memory_gb: 72.0
+    latent_channels: 24
+    latent_frames: 5
+    latent_height: 16
+    latent_width: 16
+    condition_dim: 5120
+
+remote:
+  host: Jiayu-intern
+  ssh_port: 30902
+  harness_root: /home/intern/huangjiahao/Harness4H3-codex-20260923
+  model_root: /data/models
+  comfyui_root: /home/intern/huangjiahao/ComfyUI
+  comfyui_port: 8188
+  python: /home/intern/miniconda3/envs/comfy/bin/python
+  training_python: /home/intern/miniconda3/envs/comfy/bin/python
+  results_root: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full
+  campaign_root: /home/intern/huangjiahao/Harness4H3-codex-20260923/evidence/student-campaign-full

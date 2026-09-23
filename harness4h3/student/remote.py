@@ -11,6 +11,7 @@ from ..remote.ssh import SSHClient
 from .compiler import CompileManifest
 from .config import StudentCampaignConfig
 from .edge import EdgeEvidence, validate_edge_evidence
+from .evaluation_manifest import EvaluationManifest
 from .evaluator import StudentEvaluation
 from .worker import TrainingResult
 
@@ -199,6 +200,20 @@ class RemoteStudentBaseline:
         root = PurePosixPath(self.config.remote_campaign_root)
         output = str(root / "teacher-baseline")
         result_path = str(root / "teacher-baseline-result.json")
+        # A successful immutable baseline is reusable across a detached
+        # supervisor restart.  Validate its manifest digest before accepting
+        # it so a stale result cannot silently calibrate a different corpus.
+        try:
+            cached = self.client.read_json(result_path)
+        except Exception:
+            cached = None
+        if isinstance(cached, Mapping) and cached.get("status") == "success":
+            try:
+                expected_digest = EvaluationManifest.from_path(Path(self.config.evaluation_manifest)).digest
+            except (OSError, TypeError, ValueError):
+                expected_digest = None
+            if expected_digest and cached.get("manifest_digest") == expected_digest:
+                return dict(cached)
         command = tuple(self.config.baseline_command) + (
             "--teacher",
             self.config.teacher_checkpoint,

@@ -26,7 +26,7 @@ class StudentGenerationError(RuntimeError):
         self.message = str(message)
 
 
-_VAE_CACHE: dict[tuple[str, str], Any] = {}
+_VAE_CACHE: dict[tuple[str, str, str], Any] = {}
 _COMFY_INITIALIZED: set[str] = set()
 
 
@@ -274,6 +274,10 @@ def sample_h3_latent_with_predictor(
 
 def decode_video_latent(comfyui_root: Path, vae_name: str, latent: torch.Tensor) -> torch.Tensor:
     root = str(Path(comfyui_root).resolve())
+    previous_cuda_device = None
+    if latent.device.type == "cuda":
+        previous_cuda_device = torch.cuda.current_device()
+        torch.cuda.set_device(latent.device)
     if root not in sys.path:
         sys.path.insert(0, root)
     try:
@@ -286,7 +290,7 @@ def decode_video_latent(comfyui_root: Path, vae_name: str, latent: torch.Tensor)
             _COMFY_INITIALIZED.add(root)
         mapping = nodes.NODE_CLASS_MAPPINGS
         loader = mapping["VAELoader"]()
-        cache_key = (root, str(vae_name))
+        cache_key = (root, str(vae_name), str(latent.device))
         vae = _VAE_CACHE.get(cache_key)
         if vae is None:
             vae = loader.load_vae(str(vae_name))[0]
@@ -294,16 +298,20 @@ def decode_video_latent(comfyui_root: Path, vae_name: str, latent: torch.Tensor)
         # Full-frame H3 VAE decoding can approach the capacity of a 48 GB
         # card even for the small fixed manifest. Tiled spatial+temporal
         # decoding keeps evaluation reproducible without changing the VAE.
-        decoded = mapping["VAEDecodeTiled"]().decode(
-            vae,
-            {"samples": latent},
-            tile_size=128,
-            overlap=32,
-            temporal_size=8,
-            temporal_overlap=2,
-        )[0]
+        with torch.inference_mode():
+            decoded = mapping["VAEDecodeTiled"]().decode(
+                vae,
+                {"samples": latent},
+                tile_size=128,
+                overlap=32,
+                temporal_size=8,
+                temporal_overlap=2,
+            )[0]
     except (AttributeError, ImportError, KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
         raise StudentGenerationError("student_vae_decode_failed", str(exc)) from exc
+    finally:
+        if previous_cuda_device is not None:
+            torch.cuda.set_device(previous_cuda_device)
     if not isinstance(decoded, torch.Tensor) or decoded.ndim not in (4, 5):
         raise StudentGenerationError("student_vae_decode_failed", "VAE output must be a 4D/5D tensor")
     value = decoded.detach()

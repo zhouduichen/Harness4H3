@@ -468,9 +468,14 @@ class OpenAICompatibleStudentProposalProvider:
         schema = student_proposal_json_schema(self.target)
         payload = {
             "model": self.model_name,
-            "messages": [{"role": "user", "content": _student_architect_prompt(context)}],
+            "messages": [
+                {"role": "system", "content": "Return JSON only. Do not call tools or output executable code."},
+                {"role": "user", "content": _student_architect_prompt(context)},
+            ],
             "temperature": 0.2,
+            "max_tokens": 2048,
             "stream": False,
+            "chat_template_kwargs": {"enable_thinking": False},
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {"name": "student_proposal", "strict": True, "schema": schema},
@@ -498,9 +503,14 @@ class OpenAICompatibleStudentProposalProvider:
         schema = student_proposal_batch_json_schema(self.target)
         payload = {
             "model": self.model_name,
-            "messages": [{"role": "user", "content": _student_architect_batch_prompt(context)}],
+            "messages": [
+                {"role": "system", "content": "Return JSON only. Do not call tools or output executable code."},
+                {"role": "user", "content": _student_architect_batch_prompt(context)},
+            ],
             "temperature": 0.4,
+            "max_tokens": 2048,
             "stream": False,
+            "chat_template_kwargs": {"enable_thinking": False},
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {"name": "student_proposal_batch", "strict": True, "schema": schema},

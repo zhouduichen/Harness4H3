@@ -290,6 +290,12 @@ def _fsdp_rank_main(
                             "message": error_message or "a Teacher rank failed during collective forward",
                         }
                     )
+                # Release request tensors before the next broadcast even on
+                # the error path; otherwise the next request can overlap the
+                # previous collective's allocations on a nearly-full card.
+                del noisy_video, noisy_audio, timestep_video
+                del conditioning_text, local_error, peak
+                torch.cuda.empty_cache()
                 dist.barrier()
                 continue
             if prediction is None:
@@ -310,6 +316,10 @@ def _fsdp_rank_main(
                 )
             # Keep all ranks at the same request boundary before rank 0 can
             # dequeue the next request.
+            del raw_video, raw_audio, prediction
+            del noisy_video, noisy_audio, timestep_video
+            del conditioning_text, local_error, peak
+            torch.cuda.empty_cache()
             dist.barrier()
             torch.cuda.reset_peak_memory_stats(device)
     except Exception as exc:
@@ -386,8 +396,8 @@ class TeacherService:
         devices: Sequence[str],
         *,
         dtype: torch.dtype = torch.bfloat16,
-        start_timeout_s: float = 180.0,
-        distributed_timeout_s: float = 180.0,
+        start_timeout_s: float = 600.0,
+        distributed_timeout_s: float = 600.0,
         load_checkpoint_all_ranks: bool = True,
     ) -> None:
         self.checkpoint = Path(checkpoint).resolve()

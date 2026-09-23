@@ -61,6 +61,7 @@ def main(argv=None) -> int:
     parser.add_argument("--latent-width", type=int, default=16)
     parser.add_argument("--condition-dim", type=int, default=5120)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--decode-device", default="", help="explicit CUDA device for VAE/quality decoding after Teacher teardown")
     parser.add_argument("--wait-for-gpu-s", type=int, default=600)
     parser.add_argument("--teacher-world-size", type=int, default=3)
     parser.add_argument("--teacher-rank-min-free-memory-gb", type=float, default=20.0)
@@ -69,6 +70,12 @@ def main(argv=None) -> int:
     parser.add_argument("--controller-release-file", default="")
     parser.add_argument("--controller-worker-lease-file", default="")
     parser.add_argument("--sampling-steps", type=int, default=4)
+    parser.add_argument(
+        "--teacher-service-batch-size",
+        type=int,
+        default=2,
+        help="close/restart the FSDP Teacher after this many manifest samples to bound allocator growth",
+    )
     parser.add_argument("--seed", type=int, default=20260920)
     parser.add_argument(
         "--baseline-kind",
@@ -98,16 +105,16 @@ def main(argv=None) -> int:
                 args.controller_worker_lease_file or None,
             )
             handoff_acquired = True
-            if args.device == "auto":
+            if args.teacher_devices:
+                teacher_devices = tuple(item.strip() for item in args.teacher_devices.split(",") if item.strip())
+            elif args.device == "auto":
                 teacher_devices = select_teacher_gpu_devices(
                     args.teacher_world_size,
                     args.teacher_rank_min_free_memory_gb,
                     args.wait_for_gpu_s,
                 )
             else:
-                teacher_devices = tuple(item.strip() for item in args.teacher_devices.split(",") if item.strip())
-                if not teacher_devices:
-                    raise ValueError("explicit H3 baseline device requires --teacher-devices with three cuda:N values")
+                raise ValueError("explicit H3 baseline device requires --teacher-devices with three cuda:N values")
         else:
             if args.teacher_devices:
                 teacher_devices = tuple(item.strip() for item in args.teacher_devices.split(",") if item.strip())
@@ -134,17 +141,45 @@ def main(argv=None) -> int:
         latencies = []
         peak_memory_gb = 0.0
         model_load_time_s = 0.0
-        latent_dir = output_dir / "teacher-baseline-latents"
-        latent_dir.mkdir(parents=True, exist_ok=True)
-        if args.baseline_kind == "h3_teacher_generation_baseline":
-            model_load_started = time.perf_counter()
+        teacher_forward_count = 0
+        teacher_peak_memory_gb = 0.0
+        teacher_ranks_used: set[int] = set()
+        teacher_sharded = False
+        teacher_service_restarts = 0
+
+        def close_teacher_service() -> None:
+            nonlocal teacher_forward_count, teacher_peak_memory_gb
+            nonlocal teacher_sharded, teacher_service, teacher_service_restarts
+            if teacher_service is None:
+                return
+            teacher_forward_count += int(teacher_service.forward_count)
+            teacher_peak_memory_gb = max(teacher_peak_memory_gb, float(teacher_service.teacher_peak_memory_gb))
+            teacher_ranks_used.update(int(rank) for rank in teacher_service.ranks_used)
+            teacher_sharded = teacher_sharded or bool(teacher_service.sharded)
+            teacher_service.close()
+            teacher_service = None
+            teacher_service_restarts += 1
+            torch.cuda.empty_cache()
+
+        def start_teacher_service() -> None:
+            nonlocal model_load_time_s, teacher_service
+            started = time.perf_counter()
             teacher_service = TeacherService(
                 Path(args.teacher),
                 Path(args.comfyui_root),
                 teacher_devices,
                 dtype=torch.bfloat16,
             ).start()
-            model_load_time_s = time.perf_counter() - model_load_started
+            model_load_time_s += time.perf_counter() - started
+
+        latent_dir = output_dir / "teacher-baseline-latents"
+        latent_dir.mkdir(parents=True, exist_ok=True)
+        if args.baseline_kind == "h3_teacher_generation_baseline":
+            start_teacher_service()
+        total_samples = sum(len(case.seeds) for case in manifest.cases)
+        if args.teacher_service_batch_size <= 0:
+            raise ValueError("teacher-service-batch-size must be positive")
+        sample_index = 0
         for case in manifest.cases:
             cache_key = str(Path(case.cache_path).resolve())
             for seed in case.seeds:
@@ -182,32 +217,48 @@ def main(argv=None) -> int:
                 del cache_item, latent
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
+                sample_index += 1
+                if (
+                    args.baseline_kind == "h3_teacher_generation_baseline"
+                    and sample_index < total_samples
+                    and sample_index % args.teacher_service_batch_size == 0
+                ):
+                    close_teacher_service()
+                    start_teacher_service()
 
-        teacher_forward_count = int(teacher_service.forward_count) if teacher_service is not None else 0
-        teacher_peak_memory_gb = float(teacher_service.teacher_peak_memory_gb) if teacher_service is not None else 0.0
-        teacher_ranks_used = sorted(teacher_service.ranks_used) if teacher_service is not None else []
-        teacher_sharded = bool(teacher_service.sharded) if teacher_service is not None else False
+        close_teacher_service()
+        teacher_ranks_used = sorted(teacher_ranks_used)
         peak_memory_gb = max(peak_memory_gb, teacher_peak_memory_gb)
-        if teacher_service is not None:
-            teacher_service.close()
-            teacher_service = None
         if handoff_acquired:
             # Keep the outer controller hold during decode/CLIP, but release
             # the Teacher's lease and all FSDP ranks before loading the VAE.
             release_worker_gpu_lease(args.controller_worker_lease_file or None)
 
+        # Do not decode on teacher_devices[0].  FSDP teardown and VAE loading
+        # can otherwise race on the same allocator even after close() returns.
+        # Re-select only after the Teacher lease is released so the decode has
+        # an independently measured GPU-capacity boundary.
+        if args.decode_device:
+            decode_device = torch.device(args.decode_device)
+            if decode_device.type != "cuda":
+                raise ValueError("decode-device must be an explicit cuda:N device")
+        else:
+            decode_device = device
+        if not args.decode_device and args.device == "auto":
+            decode_device = torch.device(select_free_cuda_device(8.0, args.wait_for_gpu_s))
+
         for sampled in sampled_cases:
             video_path = output_dir / "teacher-baseline" / ("%s-%d.mp4" % (sampled["case_id"], sampled["seed"]))
             payload = torch.load(Path(sampled["latent_path"]), map_location="cpu", weights_only=False)
-            latent = payload["latent"].to(device=device, dtype=torch.bfloat16)
+            latent = payload["latent"].to(device=decode_device, dtype=torch.bfloat16)
             decode_started = time.perf_counter()
             frames = decode_video_latent(Path(args.comfyui_root), args.vae_name, latent)
             write_video(frames, video_path)
             decode_latency = time.perf_counter() - decode_started
             sampling_latency = float(sampled["sampling_latency_s"])
             latency = float(sampling_latency + decode_latency)
-            if device.type == "cuda":
-                peak_memory_gb = max(peak_memory_gb, float(torch.cuda.max_memory_allocated(device)) / float(1024 ** 3))
+            if decode_device.type == "cuda":
+                peak_memory_gb = max(peak_memory_gb, float(torch.cuda.max_memory_allocated(decode_device)) / float(1024 ** 3))
             quality_started = time.perf_counter()
             evidence = quality_backend.evaluate(video_path, sampled["caption"]).to_dict()
             quality_latency = time.perf_counter() - quality_started
@@ -234,7 +285,7 @@ def main(argv=None) -> int:
                 }
             )
             del frames, latent, payload
-            if device.type == "cuda":
+            if decode_device.type == "cuda":
                 torch.cuda.empty_cache()
         if handoff_acquired:
             release_controller_handoff(
@@ -263,7 +314,7 @@ def main(argv=None) -> int:
                 else None
             ),
             "case_count": len(cases),
-            "device": device_name,
+            "device": str(decode_device),
             "evaluation_manifest_digest": manifest.digest,
         }
         payload = {
@@ -296,6 +347,8 @@ def main(argv=None) -> int:
                 "ranks_used": teacher_ranks_used,
                 "forward_count": teacher_forward_count,
                 "peak_memory_gb": teacher_peak_memory_gb,
+                "service_restarts": teacher_service_restarts,
+                "service_batch_size": int(args.teacher_service_batch_size),
             },
             "optimization_metrics": {
                 "quality": quality,
