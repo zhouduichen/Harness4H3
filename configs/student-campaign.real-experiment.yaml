@@ -57,6 +57,17 @@ student:
   evaluation_command:
     - /home/intern/miniconda3/envs/comfy/bin/python
     - /home/intern/huangjiahao/Harness4H3-codex-20260923/tools/student_evaluate_worker.py
+  target_device_command:
+    - /home/intern/miniconda3/envs/comfy/bin/python
+    - /home/intern/huangjiahao/Harness4H3-codex-20260923/tools/student_target_device_worker.py
+    - --comfyui-root
+    - /home/intern/huangjiahao/ComfyUI
+    - --cache-dir
+    - /data/models/MiniMax-H3/harness4h3/cache
+    - --vae-name
+    - minimax_h3_video_vae_fp16.safetensors
+    - --device
+    - cuda:3
   target_device:
     id: edge-device-v1
     runtime_backend: trusted-runtime-v1
