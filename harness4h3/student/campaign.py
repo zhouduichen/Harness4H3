@@ -338,7 +338,7 @@ def _student_architect_prompt(context: Mapping[str, Any]) -> str:
 def _student_architect_batch_prompt(context: Mapping[str, Any]) -> str:
     return (
         "You are the autonomous Student architect. Return one JSON object with exactly a "
-        "proposals array containing 3 to 5 independent StudentProposal objects. "
+        "proposals array containing exactly 3 independent StudentProposal objects. "
         "Do not emit code, shell commands, markdown, or explanations outside JSON. "
         "Candidates must be materially different and must use only the registered graph, "
         "training, and deployment fields. The Harness will reject invalid shapes, memory, "
@@ -346,7 +346,7 @@ def _student_architect_batch_prompt(context: Mapping[str, Any]) -> str:
         "progressive_distillation, use only pairs from this safe set: (16,8), (16,4), "
         "(32,16), (32,8), (32,4), (64,32), (64,16), (64,8), (64,4), (128,64), "
         "(128,32), (128,16), or (256,64); never use source_steps=50 or target_steps=10. "
-        "CONTEXT="
+        "Keep JSON compact: no extra fields, explanations, or whitespace. CONTEXT="
         + json.dumps(dict(context), ensure_ascii=False, sort_keys=True)
     )
 
@@ -515,8 +515,8 @@ class OpenAICompatibleStudentProposalProvider:
                 {"role": "system", "content": "Return JSON only. Do not call tools or output executable code."},
                 {"role": "user", "content": _student_architect_batch_prompt(context)},
             ],
-            "temperature": 0.4,
-            "max_tokens": 2048,
+            "temperature": 0.2,
+            "max_tokens": 1024,
             "stream": False,
             "chat_template_kwargs": {"enable_thinking": False},
             "response_format": {"type": "json_object"},
