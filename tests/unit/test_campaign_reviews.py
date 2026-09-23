@@ -189,3 +189,11 @@ def test_revision_prompt_names_executable_proposal_roots():
     assert "/architecture, /training, or /deployment" in prompt
     assert "never use *_recipe roots" in prompt
     assert "Never invent fp8, int4" in prompt
+
+
+def test_critical_prompt_treats_measurements_as_pretraining_evidence_gaps():
+    from harness4h3.campaign.reviews import _review_prompt
+
+    prompt = _review_prompt("critical", {"candidate": valid_candidate().to_dict()})
+    assert "missing measurements" in prompt
+    assert "Keep required_revisions empty for measurement-only gaps" in prompt
