@@ -346,7 +346,17 @@ def _student_architect_batch_prompt(context: Mapping[str, Any]) -> str:
         "progressive_distillation, use only pairs from this safe set: (16,8), (16,4), "
         "(32,16), (32,8), (32,4), (64,32), (64,16), (64,8), (64,4), (128,64), "
         "(128,32), (128,16), or (256,64); never use source_steps=50 or target_steps=10. "
-        "Keep JSON compact: no extra fields, explanations, or whitespace. CONTEXT="
+        "Use the full field names, never abbreviations such as id, graph, or memory. "
+        "Every candidate must have schema_version=1, proposal_id like student_0001, "
+        "parent_proposal_id=null, teacher={checkpoint:\"/data/models/MiniMax-H3/harness4h3/"
+        "student-teacher-staged.safetensors\",adapter:\"minimax_h3\"}, architecture with "
+        "family=video_latent_dit, latent_channels=24, conditioning=ada_norm_zero, "
+        "norm=rmsnorm, activation=silu, and deployment={precision:\"bf16\",quantization:\"int8\"}. "
+        "Use these legal architecture reference variants across the three candidates: "
+        "hidden_size/depth/num_heads=(1920,24,24), (1536,36,24), and (2048,24,32); "
+        "use mlp_ratio=4.0, spatial_patch=2, temporal_patch=1, and unique temporal_layers. "
+        "Use training={method:\"dmd2\",source_steps:16,target_steps:4,learning_rate:0.0001,"
+        "critic_learning_rate:0.0001}. Keep JSON compact: no extra fields, explanations, or whitespace. CONTEXT="
         + json.dumps(dict(context), ensure_ascii=False, sort_keys=True)
     )
 
