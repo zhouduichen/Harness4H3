@@ -257,7 +257,13 @@ class StructuredLLMReviewAgent:
         parsed = self._content(raw if isinstance(raw, Mapping) else {})
         if not isinstance(parsed, Mapping):
             raise ReviewLLMError("%s review response must be a JSON object" % self.role)
-        return dict(parsed)
+        normalized = dict(parsed)
+        # Older controller prompts called the advocate's bottleneck narrative
+        # "advocacy_case" in addition to the typed bottleneck field. It is
+        # non-authoritative metadata; the typed report remains strict.
+        if self.role == "advocate":
+            normalized.pop("advocacy_case", None)
+        return normalized
 
 
 def _required_string(value: Any, name: str) -> str:
