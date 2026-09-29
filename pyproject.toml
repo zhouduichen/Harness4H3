@@ -19,6 +19,13 @@ training = [
   "torch>=2.2,<3",
   "safetensors>=0.4,<1",
 ]
+wan = [
+  "torch>=2.2,<3",
+  "safetensors>=0.4,<1",
+  "diffusers>=0.31,<1",
+  "transformers>=4.45,<5",
+  "accelerate>=0.34,<2",
+]
 
 [project.scripts]
 harness4h3 = "harness4h3.cli:main"

@@ -1,0 +1,11 @@
+wan_student:
+  model_id: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+  lineage_root: W0000
+  width: 256
+  height: 256
+  num_frames: 81
+  native_fps: 16.0
+  output_fps: 24.0
+  num_inference_steps: 30
+  guidance_scale: 5.0
+  dtype: bf16
