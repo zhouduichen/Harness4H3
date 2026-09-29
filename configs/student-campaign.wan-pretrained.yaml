@@ -1,0 +1,26 @@
+schema_version: 1
+
+wan_experiment:
+  wan_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-1.3b.remote.yaml
+  evaluation_manifest: /home/intern/huangjiahao/Harness4H3-long-video-30s/work/student-campaign-30s-fixed-v13/evaluation-manifest.json
+  worker_entrypoint: /home/intern/huangjiahao/Harness4H3-long-video-30s/tools/wan_student_real_worker.py
+  worker_python: /home/intern/miniconda3/envs/comfy/bin/python
+  remote_output_root: /home/intern/huangjiahao/Harness4H3-long-video-30s/work/student-campaign-wan-pretrained-w0
+  remote_result: /home/intern/huangjiahao/Harness4H3-long-video-30s/work/student-campaign-wan-pretrained-w0/wan-baseline-result.json
+  device: auto
+  local_files_only: true
+  max_cases: 4
+  seed_count: 2
+  quality_backend: clip_temporal
+  clip_model_path: /data/models/clip-vit-large-patch14-336
+
+remote:
+  host: ai4mbse-remote
+  ssh_port: 30902
+  harness_root: /home/intern/huangjiahao/Harness4H3-long-video-30s
+  model_root: /data/models
+  comfyui_root: /home/intern/huangjiahao/ComfyUI
+  comfyui_port: 8188
+  python: /home/intern/miniconda3/envs/comfy/bin/python
+  results_root: /home/intern/huangjiahao/Harness4H3-long-video-30s/work/student-campaign-wan-pretrained-w0
+  campaign_root: /home/intern/huangjiahao/Harness4H3-long-video-30s/work/student-campaign-wan-pretrained-w0

@@ -1,5 +1,6 @@
 wan_student:
   model_id: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+  pretrained_path: null
   lineage_root: W0000
   width: 256
   height: 256

@@ -65,6 +65,7 @@ from .student.remote import (
     RemoteStudentWorker,
     RemoteTargetDeviceEvaluator,
 )
+from .student.wan_experiment import RemoteWanExperiment, WanRealExperimentConfig
 
 
 def _emit(value: Any, json_mode: bool) -> None:
@@ -603,6 +604,7 @@ def cmd_student_run(args: argparse.Namespace) -> int:
         teacher_baseline=teacher_baseline,
         quality_policy={
             "quality_floor_ratio": config.quality_floor_ratio,
+            "semantic_floor_ratio": config.semantic_floor_ratio,
             "min_reward_delta": config.min_reward_delta,
             "material_efficiency_gain": config.material_efficiency_gain,
             "max_metric_regression": config.max_metric_regression,
@@ -619,6 +621,32 @@ def cmd_student_status(args: argparse.Namespace) -> int:
     client = LocalCommandClient(config.remote) if args.local_resources else SSHClient(config.remote)
     _emit(RemoteStudentSupervisor(config, client).status(), args.json)
     return 0
+
+
+def cmd_wan_student_validate(args: argparse.Namespace) -> int:
+    config = WanRealExperimentConfig.from_path(Path(args.wan_config).resolve())
+    _emit(
+        {
+            "valid": True,
+            "model_backend": "wan_pretrained",
+            "lineage_root": "W0000",
+            "pretrained": True,
+            "model_config": config.wan_config,
+            "remote_host": config.remote.host,
+            "worker_entrypoint": config.worker_entrypoint,
+            "evaluation_manifest": config.evaluation_manifest,
+        },
+        args.json,
+    )
+    return 0
+
+
+def cmd_wan_student_run(args: argparse.Namespace) -> int:
+    config = WanRealExperimentConfig.from_path(Path(args.wan_config).resolve())
+    client = LocalCommandClient(config.remote) if args.local_resources else SSHClient(config.remote)
+    result = RemoteWanExperiment(config, client).run()
+    _emit(result, args.json)
+    return 0 if result.get("status") == "success" else 1
 
 
 def cmd_controller_status(args: argparse.Namespace) -> int:
@@ -908,6 +936,21 @@ def build_parser() -> argparse.ArgumentParser:
     student_status.add_argument("--local-resources", action="store_true")
     _json_flag(student_status)
     student_status.set_defaults(handler=cmd_student_status)
+
+    wan_student = subparsers.add_parser(
+        "wan-student",
+        help="run the real pretrained Wan2.1 Student baseline through the remote experiment worker",
+    )
+    wan_student_subparsers = wan_student.add_subparsers(dest="wan_student_command", required=True)
+    wan_validate = wan_student_subparsers.add_parser("validate", help="validate the Wan real-experiment boundary")
+    wan_validate.add_argument("--wan-config", default="configs/student-campaign.wan-pretrained.yaml")
+    _json_flag(wan_validate)
+    wan_validate.set_defaults(handler=cmd_wan_student_validate)
+    wan_run = wan_student_subparsers.add_parser("run", help="run Wan W0 on the configured real experiment host")
+    wan_run.add_argument("--wan-config", default="configs/student-campaign.wan-pretrained.yaml")
+    wan_run.add_argument("--local-resources", action="store_true", help="execute the trusted worker on this host")
+    _json_flag(wan_run)
+    wan_run.set_defaults(handler=cmd_wan_student_run)
 
     controller_status = subparsers.add_parser("controller-status", help="show or follow the Controller event stream")
     controller_status.add_argument("--output-root", default="var/remote-h3")

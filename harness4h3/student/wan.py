@@ -35,6 +35,7 @@ class WanStudentSpec:
     """Reproducible inference contract for the pretrained Wan Student."""
 
     model_id: str = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+    pretrained_path: Optional[str] = None
     lineage_root: str = "W0000"
     width: int = 256
     height: int = 256
@@ -146,15 +147,16 @@ def load_pretrained_wan(
             "install the optional 'wan' dependency; no random-init fallback is permitted",
         ) from exc
     selected = _resolve_device(torch, device)
+    source = str(spec.pretrained_path or spec.model_id)
     try:
         pipeline = pipeline_class.from_pretrained(
-            spec.model_id,
+            source,
             torch_dtype=_torch_dtype(torch, spec),
             local_files_only=bool(local_files_only),
         )
         pipeline = pipeline.to(selected)
     except Exception as exc:  # Diffusers raises several model/cache-specific exception types.
-        raise WanStudentError("pretrained_load_failed", "%s: %s" % (spec.model_id, exc)) from exc
+        raise WanStudentError("pretrained_load_failed", "%s: %s" % (source, exc)) from exc
     if hasattr(getattr(pipeline, "vae", None), "enable_tiling"):
         pipeline.vae.enable_tiling()
     if hasattr(pipeline, "set_progress_bar_config"):
@@ -245,6 +247,7 @@ def generate_wan_clip(
         "lineage_root": spec.lineage_root,
         "pretrained": True,
         "model_id": spec.model_id,
+        "pretrained_path": spec.pretrained_path,
         "seed": int(seed),
         "native_fps": float(spec.native_fps),
         "target_output_fps": float(spec.output_fps),
