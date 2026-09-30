@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 from safetensors.torch import save_file
 
+from h3_training.data.schema import ModalLatents, ModalPrediction, ModalTimesteps
 from harness4h3.student.compiler import StudentCompiler
 from harness4h3.student.model import build_smoke_student
 from harness4h3.student.proposal import StudentProposal, StudentTarget
 from harness4h3.student.teacher_service import TeacherService
-from harness4h3.student.worker import StudentBatch, StudentTrainWorker
+from harness4h3.student.worker import (
+    StudentAlgorithmAdapter,
+    StudentBatch,
+    StudentTrainWorker,
+    progressive_rollout_policy,
+)
 from tests.unit.test_student_proposal import valid_payload
 
 
@@ -57,6 +64,40 @@ class NonShardedProductionBackend(FakeBackend):
 def compile_manifest(tmp_path):
     proposal = StudentProposal.from_dict(valid_payload())
     return StudentCompiler(StudentTarget()).compile(proposal, tmp_path / "compile")
+
+
+def test_student_adapter_matches_h3_sigma_and_velocity_convention():
+    adapter = StudentAlgorithmAdapter()
+    clean = torch.full((1, 1, 2, 2, 2), 3.0)
+    noise = torch.zeros_like(clean)
+
+    at_noise = adapter.add_noise(
+        ModalLatents(video=clean),
+        ModalLatents(video=noise),
+        ModalTimesteps(video=torch.ones(1)),
+    )
+    at_clean = adapter.add_noise(
+        ModalLatents(video=clean),
+        ModalLatents(video=noise),
+        ModalTimesteps(video=torch.zeros(1)),
+    )
+    assert torch.equal(at_noise.video, noise)
+    assert torch.equal(at_clean.video, clean)
+
+    reconstructed = adapter.prediction_to_clean(
+        ModalLatents(video=torch.full_like(clean, 2.0)),
+        ModalPrediction(video=torch.full_like(clean, 4.0)),
+        ModalTimesteps(video=torch.full((1,), 0.25)),
+    )
+    assert torch.equal(reconstructed.video, torch.full_like(clean, 3.0))
+
+
+def test_student_adapter_uses_shifted_h3_schedule():
+    values = StudentAlgorithmAdapter().schedule(8).video_sigmas
+    assert values is not None
+    assert values[0] == 1.0
+    assert values[-1] == 0.0
+    assert values[1] > 0.875
 
 
 def test_worker_writes_changed_child_and_training_evidence(tmp_path):
@@ -168,6 +209,127 @@ def test_progressive_stages_share_the_candidate_fidelity_budget(tmp_path):
     assert sum(int(item["stage_train_steps"]) for item in result.stage_lineage) == result.train_steps
     assert result.optimizer_steps == sum(result.optimizer_steps_by_role.values())
     assert [item["cumulative_train_steps"] for item in result.stage_lineage] == [3, 6]
+
+
+def test_progressive_rollout_policy_is_fidelity_specific():
+    assert progressive_rollout_policy("F1")["rollout_steps"] == 2
+    assert progressive_rollout_policy("F2")["rollout_steps"] == 2
+    assert progressive_rollout_policy("F3")["rollout_steps"] == 4
+    assert progressive_rollout_policy("F3")["rollout_every"] == 2
+
+
+def test_semantic_calibration_scope_includes_prompt_projector_and_cross_adapter_only():
+    proposal = StudentProposal.from_dict(valid_payload())
+    student = build_smoke_student(proposal, scale=0.125)
+    role = SimpleNamespace(model=student)
+    scope = "condition.projection,condition_tokens,cross_query,cross_output"
+
+    selected = set(StudentAlgorithmAdapter().resolve_trainable_parameters(role, scope))
+    expected = {
+        name
+        for name, _ in student.named_parameters()
+        if name.startswith(("condition.projection", "condition_tokens", "cross_query", "cross_output"))
+    }
+
+    assert selected == expected
+    assert "condition.projection.weight" in selected
+    assert "condition.projection.bias" in selected
+    assert not any(name.startswith("blocks.") for name in selected)
+    assert not any(name.startswith("unpatchify.") for name in selected)
+
+
+def test_generation_head_reset_zeros_registered_output_projection():
+    proposal = StudentProposal.from_dict(valid_payload())
+    student = build_smoke_student(proposal, scale=0.125)
+    with torch.no_grad():
+        student.unpatchify.projection.weight.fill_(1.0)
+        student.unpatchify.projection.bias.fill_(1.0)
+    StudentTrainWorker._reset_generation_head(student)
+    assert torch.count_nonzero(student.unpatchify.projection.weight) == 0
+    assert torch.count_nonzero(student.unpatchify.projection.bias) == 0
+
+
+def test_dit_zero_reset_zeros_output_and_modulation_projections():
+    proposal = StudentProposal.from_dict(valid_payload())
+    student = build_smoke_student(proposal, scale=0.125)
+    with torch.no_grad():
+        for module in (student.unpatchify.projection, student.condition.projection, student.timestep.projection):
+            module.weight.fill_(1.0)
+            module.bias.fill_(1.0)
+    StudentTrainWorker._reset_dit_zero(student)
+    for module in (student.unpatchify.projection, student.condition.projection, student.timestep.projection):
+        assert torch.count_nonzero(module.weight) == 0
+        assert torch.count_nonzero(module.bias) == 0
+
+
+def test_generation_head_reset_warms_without_rollout(tmp_path):
+    payload = valid_payload()
+    payload["training"].update({"method": "progressive_distillation", "source_steps": 4, "target_steps": 1})
+    proposal = StudentProposal.from_dict(payload)
+    manifest = StudentCompiler(StudentTarget()).compile(proposal, tmp_path / "head-reset-compile")
+    teacher = tmp_path / "teacher.safetensors"
+    save_file({"teacher": torch.ones(1)}, str(teacher))
+    result = StudentTrainWorker(FakeBackend()).run(
+        manifest,
+        teacher,
+        tmp_path / "head-reset-child",
+        train_steps=2,
+        max_steps=2,
+        device="cpu",
+        fidelity="F3",
+        reinitialize_generation_head=True,
+    )
+    assert result.status == "success"
+    assert result.initialization_mode == "parent_with_generation_head_reset" or result.initialization_mode == "fresh_with_generation_head_reset"
+    assert all(item["rollout_steps"] == 0 for item in result.stage_lineage)
+    assert all(item["generation_head_reset"] is True for item in result.stage_lineage)
+    assert all(item["learning_rate"] == proposal.training.learning_rate for item in result.stage_lineage)
+
+
+def test_dit_zero_reset_warms_without_rollout(tmp_path):
+    payload = valid_payload()
+    payload["training"].update({"method": "progressive_distillation", "source_steps": 4, "target_steps": 1})
+    proposal = StudentProposal.from_dict(payload)
+    manifest = StudentCompiler(StudentTarget()).compile(proposal, tmp_path / "dit-zero-compile")
+    teacher = tmp_path / "teacher.safetensors"
+    save_file({"teacher": torch.ones(1)}, str(teacher))
+    result = StudentTrainWorker(FakeBackend()).run(
+        manifest,
+        teacher,
+        tmp_path / "dit-zero-child",
+        train_steps=2,
+        max_steps=2,
+        device="cpu",
+        fidelity="F3",
+        reinitialize_dit_zero=True,
+    )
+    assert result.status == "success"
+    assert result.initialization_mode == "parent_with_dit_zero_reset" or result.initialization_mode == "fresh_with_dit_zero_reset"
+    assert all(item["rollout_steps"] == 0 for item in result.stage_lineage)
+    assert all(item["dit_zero_reset"] is True for item in result.stage_lineage)
+
+
+def test_progressive_worker_records_rollout_policy_in_lineage(tmp_path):
+    payload = valid_payload()
+    payload["training"].update({"method": "progressive_distillation", "source_steps": 4, "target_steps": 1})
+    proposal = StudentProposal.from_dict(payload)
+    manifest = StudentCompiler(StudentTarget()).compile(proposal, tmp_path / "rollout-compile")
+    teacher = tmp_path / "teacher.safetensors"
+    save_file({"teacher": torch.ones(1)}, str(teacher))
+    result = StudentTrainWorker(FakeBackend()).run(
+        manifest,
+        teacher,
+        tmp_path / "rollout-child",
+        train_steps=2,
+        max_steps=2,
+        device="cpu",
+        fidelity="F3",
+    )
+    assert result.status == "success"
+    assert all(item["rollout_steps"] == 4 for item in result.stage_lineage)
+    assert all(item["rollout_every"] == 2 for item in result.stage_lineage)
+    assert all(item["rollout_endpoint_weight"] == 1.0 for item in result.stage_lineage)
+    assert all(item["rollout_clean_weight"] == 0.5 for item in result.stage_lineage)
 
 
 def test_dmd2_reports_one_candidate_budget_and_real_role_optimizer_steps(tmp_path):
