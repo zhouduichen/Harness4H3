@@ -317,6 +317,13 @@ def estimate_parameter_count(architecture: ArchitectureSpec, condition_dim: int 
     patch = patch_volume * hidden + hidden
     output = hidden * patch_volume + patch_volume
     condition = condition_dim * (6 * hidden) + 6 * hidden
+    semantic_bridge_dim = max(architecture.num_heads, 256)
+    semantic_bridge = (
+        condition_dim * semantic_bridge_dim
+        + semantic_bridge_dim
+        + semantic_bridge_dim * hidden
+        + hidden
+    )
     cross_attention_dim = max(architecture.num_heads, 256)
     cross_num_heads = max(1, architecture.num_heads // 7)
     while cross_attention_dim % cross_num_heads:
@@ -338,6 +345,7 @@ def estimate_parameter_count(architecture: ArchitectureSpec, condition_dim: int 
         patch
         + output
         + condition
+        + semantic_bridge
         + condition_tokens
         + cross_attention
         + cross_output_deltas

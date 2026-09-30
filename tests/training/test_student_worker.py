@@ -222,18 +222,20 @@ def test_semantic_calibration_scope_includes_prompt_projector_and_cross_adapter_
     proposal = StudentProposal.from_dict(valid_payload())
     student = build_smoke_student(proposal, scale=0.125)
     role = SimpleNamespace(model=student)
-    scope = "condition.projection,condition_tokens,cross_query,cross_output"
+    scope = "condition.projection,semantic_bridge,condition_tokens,cross_query,cross_output"
 
     selected = set(StudentAlgorithmAdapter().resolve_trainable_parameters(role, scope))
     expected = {
         name
         for name, _ in student.named_parameters()
-        if name.startswith(("condition.projection", "condition_tokens", "cross_query", "cross_output"))
+        if name.startswith(("condition.projection", "semantic_bridge", "condition_tokens", "cross_query", "cross_output"))
     }
 
     assert selected == expected
     assert "condition.projection.weight" in selected
     assert "condition.projection.bias" in selected
+    assert "semantic_bridge.bottleneck.weight" in selected
+    assert "semantic_bridge.output.weight" in selected
     assert not any(name.startswith("blocks.") for name in selected)
     assert not any(name.startswith("unpatchify.") for name in selected)
 

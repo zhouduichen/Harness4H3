@@ -86,6 +86,33 @@ class ConditionProjector(nn.Module):
         return self.projection(pooled)
 
 
+class SemanticResidualBridge(nn.Module):
+    """Project pooled H3 text directly into the video-token hidden space.
+
+    The final projection is zero initialized so an inherited checkpoint keeps
+    its exact function until this semantic calibration path is trained.
+    """
+
+    def __init__(
+        self,
+        condition_dim: int,
+        hidden_size: int,
+        bottleneck: int = 256,
+        *,
+        device: Optional[torch.device] = None,
+    ):
+        super().__init__()
+        self.bottleneck = nn.Linear(condition_dim, bottleneck, device=device)
+        self.output = nn.Linear(bottleneck, hidden_size, device=device)
+        nn.init.zeros_(self.output.weight)
+        nn.init.zeros_(self.output.bias)
+
+    def forward(self, value: Tensor) -> Tensor:
+        text_tokens = value[:, 1:]
+        pooled = text_tokens.mean(dim=1)
+        return self.output(F.silu(self.bottleneck(pooled)))
+
+
 class TimestepProjector(nn.Module):
     def __init__(self, hidden_size: int, *, device: Optional[torch.device] = None):
         super().__init__()
@@ -246,6 +273,12 @@ class VideoLatentDiT(nn.Module):
         self.architecture = architecture
         self.patch_embed = VideoPatchEmbed(architecture, device=device)
         self.condition = ConditionProjector(target.condition_dim, architecture.hidden_size, device=device)
+        self.semantic_bridge = SemanticResidualBridge(
+            target.condition_dim,
+            architecture.hidden_size,
+            bottleneck=max(architecture.num_heads, 256),
+            device=device,
+        )
         # The original 128-wide text bottleneck was sufficient to make the
         # inherited Student prompt-aware, but it remains the semantic
         # bottleneck against the real H3 Teacher.  Keep the cross-attention
@@ -334,6 +367,7 @@ class VideoLatentDiT(nn.Module):
             value.dtype,
         )
         value = value + position
+        value = value + self.semantic_bridge(conditioning).unsqueeze(1)
         modulation = self.condition(conditioning) + self.timestep(timestep)
         condition_tokens = self.condition_tokens(conditioning[:, 1:])
         for index, block in enumerate(self.blocks):
@@ -405,6 +439,7 @@ def build_smoke_student(
 __all__ = [
     "AdaNormZero",
     "ConditionProjector",
+    "SemanticResidualBridge",
     "RMSNorm",
     "SpatialDiTBlock",
     "TemporalDiTBlock",

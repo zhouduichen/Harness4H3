@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from harness4h3.student.model import ConditionProjector, SpatialDiTBlock, build_smoke_student
+from harness4h3.student.model import ConditionProjector, SemanticResidualBridge, SpatialDiTBlock, build_smoke_student
 from harness4h3.student.proposal import ArchitectureSpec, StudentProposal
 from harness4h3.student.inference import student_video_sigmas
 from tests.unit.test_student_proposal import valid_payload
@@ -18,6 +18,15 @@ def test_condition_projector_ignores_h3_bos_token():
     value = torch.tensor([[[100.0, 100.0], [1.0, 2.0], [3.0, 4.0]]])
     output = projector(value)
     assert torch.equal(output[0, 0], torch.tensor(2.0))
+
+
+def test_semantic_residual_bridge_is_zero_initialized():
+    bridge = SemanticResidualBridge(4, 8, bottleneck=4)
+    value = torch.randn(2, 5, 4)
+    output = bridge(value)
+    assert torch.count_nonzero(bridge.output.weight) == 0
+    assert torch.count_nonzero(bridge.output.bias) == 0
+    assert torch.count_nonzero(output) == 0
 
 
 def test_cross_attention_is_disabled_for_inherited_checkpoint():
@@ -63,6 +72,7 @@ def test_cross_attention_keeps_256_channels_for_semantic_capacity():
     student = build_smoke_student(proposal, scale=0.125)
 
     assert student.cross_attention_dim == 256
+    assert student.semantic_bridge.bottleneck.out_features == 256
 
 
 def test_student_inference_uses_h3_shifted_video_schedule():
