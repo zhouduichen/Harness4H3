@@ -47,18 +47,31 @@ def main(argv=None) -> int:
     parser.add_argument("--evaluation-manifest", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--result", required=True)
-    parser.add_argument("--device", default="auto")
+    parser.add_argument("--phase", default="W0_pretrained_baseline")
+    parser.add_argument("--device", default="cuda:3")
     parser.add_argument("--max-cases", type=int, default=4)
     parser.add_argument("--seed-count", type=int, default=2)
     parser.add_argument("--quality-backend", choices=("clip_temporal", "none"), default="clip_temporal")
     parser.add_argument("--clip-model-path", default="")
     parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument("--target-fps", type=float, default=24.0)
+    parser.add_argument("--target-frames", type=int, default=720)
+    parser.add_argument("--target-duration-s", type=float, default=30.0)
+    parser.add_argument("--target-window-count", type=int, default=7)
+    parser.add_argument("--target-overlap-latent-frames", type=int, default=6)
+    parser.add_argument("--target-window-stride-latent-frames", type=int, default=30)
     args = parser.parse_args(argv)
     result_path = Path(args.result).resolve()
     output_root = Path(args.output).resolve()
     try:
         if args.max_cases <= 0 or args.seed_count <= 0:
             raise ValueError("max-cases and seed-count must be positive")
+        if args.phase != "W0_pretrained_baseline":
+            raise ValueError("only W0_pretrained_baseline is implemented")
+        if args.device == "auto":
+            raise ValueError("device must be fixed for the real remote experiment")
+        if args.target_fps <= 0 or args.target_frames <= 0 or args.target_duration_s <= 0:
+            raise ValueError("target video contract values must be positive")
         spec = load_wan_spec(Path(args.wan_config))
         manifest = EvaluationManifest.from_path(Path(args.evaluation_manifest))
         pipeline, device = load_pretrained_wan(
@@ -136,6 +149,16 @@ def main(argv=None) -> int:
             "evaluation_manifest_digest": manifest.digest,
             "native_fps": spec.native_fps,
             "target_output_fps": spec.output_fps,
+            "phase": args.phase,
+            "target_contract": {
+                "fps": args.target_fps,
+                "frames": args.target_frames,
+                "duration_s": args.target_duration_s,
+                "window_count": args.target_window_count,
+                "overlap_latent_frames": args.target_overlap_latent_frames,
+                "window_stride_latent_frames": args.target_window_stride_latent_frames,
+                "continuation_verified": False,
+            },
             "case_count": len(cases),
             "latency_s_median": statistics.median(latencies) if latencies else None,
             "quality_score": statistics.mean(scores) if scores else None,

@@ -7,12 +7,19 @@ wan_experiment:
   worker_python: /home/intern/miniconda3/envs/comfy/bin/python
   remote_output_root: /home/intern/huangjiahao/Harness4H3-long-video-30s/work/student-campaign-wan-pretrained-w0
   remote_result: /home/intern/huangjiahao/Harness4H3-long-video-30s/work/student-campaign-wan-pretrained-w0/wan-baseline-result.json
-  device: auto
+  phase: W0_pretrained_baseline
+  device: cuda:3
   local_files_only: true
   max_cases: 4
   seed_count: 2
   quality_backend: clip_temporal
   clip_model_path: /data/models/clip-vit-large-patch14-336
+  target_fps: 24.0
+  target_frames: 720
+  target_duration_s: 30.0
+  target_window_count: 7
+  target_overlap_latent_frames: 6
+  target_window_stride_latent_frames: 30
 
 remote:
   host: ai4mbse-remote

@@ -50,16 +50,31 @@ class WanRealExperimentConfig:
     remote_output_root: str
     remote_result: str
     remote: RemoteConfig
-    device: str = "auto"
+    phase: str = "W0_pretrained_baseline"
+    device: str = "cuda:3"
     local_files_only: bool = True
     max_cases: int = 4
     seed_count: int = 2
     clip_model_path: Optional[str] = None
     quality_backend: str = "clip_temporal"
+    target_fps: float = 24.0
+    target_frames: int = 720
+    target_duration_s: float = 30.0
+    target_window_count: int = 7
+    target_overlap_latent_frames: int = 6
+    target_window_stride_latent_frames: int = 30
 
     def __post_init__(self) -> None:
         if self.max_cases <= 0 or self.seed_count <= 0:
             raise WanExperimentConfigError("max_cases and seed_count must be positive")
+        if self.phase != "W0_pretrained_baseline":
+            raise WanExperimentConfigError("only W0_pretrained_baseline is implemented")
+        if self.device == "auto":
+            raise WanExperimentConfigError("device must be fixed for the real remote experiment")
+        if self.target_fps <= 0 or self.target_frames <= 0 or self.target_duration_s <= 0:
+            raise WanExperimentConfigError("target video contract values must be positive")
+        if self.target_window_count <= 0 or self.target_overlap_latent_frames < 0 or self.target_window_stride_latent_frames <= 0:
+            raise WanExperimentConfigError("target window contract is invalid")
         if self.quality_backend not in {"clip_temporal", "none"}:
             raise WanExperimentConfigError("quality_backend must be clip_temporal or none")
         for path_name in (
@@ -112,12 +127,19 @@ class WanRealExperimentConfig:
             "worker_python",
             "remote_output_root",
             "remote_result",
+            "phase",
             "device",
             "local_files_only",
             "max_cases",
             "seed_count",
             "clip_model_path",
             "quality_backend",
+            "target_fps",
+            "target_frames",
+            "target_duration_s",
+            "target_window_count",
+            "target_overlap_latent_frames",
+            "target_window_stride_latent_frames",
         }
         unknown = sorted(set(experiment) - allowed)
         if unknown:
@@ -149,6 +171,8 @@ class RemoteWanExperiment:
             self.config.remote_output_root,
             "--result",
             result_path,
+            "--phase",
+            self.config.phase,
             "--device",
             self.config.device,
             "--max-cases",
@@ -157,6 +181,18 @@ class RemoteWanExperiment:
             str(self.config.seed_count),
             "--quality-backend",
             self.config.quality_backend,
+            "--target-fps",
+            str(self.config.target_fps),
+            "--target-frames",
+            str(self.config.target_frames),
+            "--target-duration-s",
+            str(self.config.target_duration_s),
+            "--target-window-count",
+            str(self.config.target_window_count),
+            "--target-overlap-latent-frames",
+            str(self.config.target_overlap_latent_frames),
+            "--target-window-stride-latent-frames",
+            str(self.config.target_window_stride_latent_frames),
         )
         if self.config.local_files_only:
             command += ("--local-files-only",)
