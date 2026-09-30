@@ -332,6 +332,31 @@ def test_progressive_worker_records_rollout_policy_in_lineage(tmp_path):
     assert all(item["rollout_clean_weight"] == 0.5 for item in result.stage_lineage)
 
 
+def test_progressive_worker_records_semantic_loss_weights_in_lineage(tmp_path):
+    payload = valid_payload()
+    payload["training"].update({"method": "progressive_distillation", "source_steps": 4, "target_steps": 1})
+    proposal = StudentProposal.from_dict(payload)
+    manifest = StudentCompiler(StudentTarget()).compile(proposal, tmp_path / "semantic-loss-weights-compile")
+    teacher = tmp_path / "teacher.safetensors"
+    save_file({"teacher": torch.ones(1)}, str(teacher))
+
+    result = StudentTrainWorker(FakeBackend()).run(
+        manifest,
+        teacher,
+        tmp_path / "semantic-loss-weights-child",
+        train_steps=2,
+        max_steps=2,
+        device="cpu",
+        fidelity="F3",
+        velocity_weight=0.5,
+        clean_anchor_weight=2.0,
+    )
+
+    assert result.status == "success"
+    assert all(item["velocity_weight"] == 0.5 for item in result.stage_lineage)
+    assert all(item["clean_anchor_weight"] == 2.0 for item in result.stage_lineage)
+
+
 def test_dmd2_reports_one_candidate_budget_and_real_role_optimizer_steps(tmp_path):
     proposal = StudentProposal.from_dict(valid_payload())
     manifest = StudentCompiler(StudentTarget()).compile(proposal, tmp_path / "dmd2-budget-compile")

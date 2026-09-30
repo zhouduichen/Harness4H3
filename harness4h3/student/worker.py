@@ -41,6 +41,7 @@ from h3_training.engine.trainer import TrainerConfig, TrainerEngine
 from .compiler import CompileManifest
 from .model import build_smoke_student, build_student
 from .proposal import StudentProposal, StudentTarget
+from .schedule import h3_video_sigmas
 from .quantization import quantize_checkpoint
 from .teacher_service import TeacherService, TeacherServiceHandle
 
@@ -215,6 +216,10 @@ class StudentAlgorithmAdapter(DenoisingModelAdapter):
         self._teacher_audio_noise: Optional[torch.Tensor] = None
         self._teacher_audio_timestep: Optional[torch.Tensor] = None
 
+    # DMD2 asks the adapter for the endpoint used to initialize generation.
+    # H3 starts at sigma=1 (pure noise) and integrates toward sigma=0.
+    generation_start_timestep = 1.0
+
     def prepare_batch(self, raw: Any, generator: torch.Generator) -> PreparedBatch:
         if isinstance(raw, PreparedBatch):
             return raw
@@ -247,12 +252,15 @@ class StudentAlgorithmAdapter(DenoisingModelAdapter):
             if noise.video is None or timestep.video is None:
                 raise TrainingFailure("invalid_training_config", "Student video noise inputs are incomplete")
             value = self._broadcast(timestep.video, clean.video)
-            video = value * clean.video + (1.0 - value) * noise.video
+            # MiniMax-H3 uses sigma=1 for pure noise and sigma=0 for clean.
+            # Keep the Student's velocity convention aligned with the real
+            # Teacher and with the production sampler.
+            video = (1.0 - value) * clean.video + value * noise.video
         if clean.audio is not None:
             if noise.audio is None or timestep.audio is None:
                 raise TrainingFailure("invalid_training_config", "Student audio noise inputs are incomplete")
             value = self._broadcast(timestep.audio, clean.audio)
-            audio = value * clean.audio + (1.0 - value) * noise.audio
+            audio = (1.0 - value) * clean.audio + value * noise.audio
         if video is None and audio is None:
             raise TrainingFailure("invalid_training_config", "Student algorithms require a latent")
         return ModalLatents(video=video, audio=audio)
@@ -325,11 +333,9 @@ class StudentAlgorithmAdapter(DenoisingModelAdapter):
     def prediction_to_clean(self, noisy: ModalLatents, prediction: ModalPrediction, timestep: ModalTimesteps) -> ModalLatents:
         if noisy.video is None or prediction.video is None or timestep.video is None:
             raise TrainingFailure("invalid_training_config", "Student prediction cannot be reconstructed")
-        # DMD2's reference implementation samples t=0 for its generator
-        # update. Keep the endpoint differentiable at that boundary while
-        # retaining the usual t-dependent interpolation for other steps.
+        # H3's velocity is clean-minus-noise, so x_0 = x_sigma + sigma*v.
         return ModalLatents(
-            video=noisy.video + (1.0 - self._broadcast(timestep.video, noisy.video)) * prediction.video
+            video=noisy.video + self._broadcast(timestep.video, noisy.video) * prediction.video
         )
 
     def scheduler_step(self, role: Any, latent: ModalLatents, prediction: ModalPrediction, interval: ModalInterval) -> ModalLatents:
@@ -341,7 +347,7 @@ class StudentAlgorithmAdapter(DenoisingModelAdapter):
     def schedule(self, num_model_evaluations: int) -> ModalSchedule:
         if int(num_model_evaluations) <= 0:
             raise TrainingFailure("invalid_training_config", "Student NFE must be positive")
-        values = tuple(1.0 - index / float(num_model_evaluations) for index in range(num_model_evaluations + 1))
+        values = h3_video_sigmas(int(num_model_evaluations))
         return ModalSchedule(video_sigmas=values)
 
     def save_role(self, role: Any, path: Path) -> Mapping[str, Any]:
@@ -380,6 +386,20 @@ def progressive_stage_budgets(total_steps: int, stage_count: int) -> tuple[int, 
         raise ValueError("progressive fidelity budget must cover every stage")
     base, remainder = divmod(total, count)
     return tuple(base + (1 if index < remainder else 0) for index in range(count))
+
+
+def progressive_rollout_policy(fidelity: str) -> dict[str, float | int]:
+    """Return the trusted rollout calibration policy for one fidelity tier."""
+
+    name = str(fidelity).strip().upper()
+    if name not in {"F1", "F2", "F3"}:
+        raise ValueError("unsupported fidelity: %s" % fidelity)
+    return {
+        "rollout_steps": 4 if name == "F3" else 2,
+        "rollout_every": 2,
+        "rollout_endpoint_weight": 1.0,
+        "rollout_clean_weight": 0.5,
+    }
 
 
 @dataclass(frozen=True)
@@ -473,11 +493,76 @@ class StudentTrainWorker:
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             raise StudentTrainingError("parent_checkpoint_corrupt", str(exc)) from exc
         current = student.state_dict()
-        matched = {
-            name: value.to(dtype=current[name].dtype)
-            for name, value in state.items()
-            if name in current and tuple(value.shape) == tuple(current[name].shape)
-        }
+
+        def migrate_cross_tensor(name: str, value: torch.Tensor, target: torch.Tensor) -> Optional[torch.Tensor]:
+            """Embed the previous 128-wide cross path into the 256-wide path.
+
+            The cross attention head width changes from 32 to 64 while the
+            number of heads stays fixed.  A plain prefix copy would mix the
+            old heads, so copy each old head into the corresponding prefix of
+            its new head and leave the added channels zero.
+            """
+
+            old_dim = 128
+            new_dim = 256
+            heads = 4
+            old_head = old_dim // heads
+            new_head = new_dim // heads
+            if name == "condition_tokens.bias":
+                if tuple(value.shape) != (2 * old_dim,) or tuple(target.shape) != (2 * new_dim,):
+                    return None
+                migrated = torch.zeros_like(target)
+                for section in range(2):
+                    for head in range(heads):
+                        old_slice = slice(section * old_dim + head * old_head, section * old_dim + (head + 1) * old_head)
+                        new_slice = slice(section * new_dim + head * new_head, section * new_dim + head * new_head + old_head)
+                        migrated[new_slice] = value[old_slice].to(dtype=target.dtype)
+                return migrated
+            if name == "cross_query.bias":
+                if tuple(value.shape) != (old_dim,) or tuple(target.shape) != (new_dim,):
+                    return None
+                migrated = torch.zeros_like(target)
+                for head in range(heads):
+                    migrated[head * new_head : head * new_head + old_head] = value[head * old_head : (head + 1) * old_head].to(dtype=target.dtype)
+                return migrated
+            if value.ndim != 2 or target.ndim != 2:
+                return None
+            if name == "condition_tokens.weight":
+                if tuple(value.shape) != (2 * old_dim, target.shape[1]) or tuple(target.shape) != (2 * new_dim, target.shape[1]):
+                    return None
+                migrated = torch.zeros_like(target)
+                for section in range(2):
+                    for head in range(heads):
+                        old_slice = slice(section * old_dim + head * old_head, section * old_dim + (head + 1) * old_head)
+                        new_slice = slice(section * new_dim + head * new_head, section * new_dim + head * new_head + old_head)
+                        migrated[new_slice] = value[old_slice].to(dtype=target.dtype)
+                return migrated
+            if name == "cross_query.weight":
+                if tuple(value.shape) != (old_dim, target.shape[1]) or tuple(target.shape) != (new_dim, target.shape[1]):
+                    return None
+                migrated = torch.zeros_like(target)
+                for head in range(heads):
+                    migrated[head * new_head : head * new_head + old_head] = value[head * old_head : (head + 1) * old_head].to(dtype=target.dtype)
+                return migrated
+            if (name == "cross_output.weight" or name.startswith("cross_output_deltas.")):
+                if tuple(value.shape) != (target.shape[0], old_dim) or tuple(target.shape) != (target.shape[0], new_dim):
+                    return None
+                migrated = torch.zeros_like(target)
+                for head in range(heads):
+                    migrated[:, head * new_head : head * new_head + old_head] = value[:, head * old_head : (head + 1) * old_head].to(dtype=target.dtype)
+                return migrated
+            return None
+
+        matched = {}
+        for name, value in state.items():
+            if name not in current:
+                continue
+            if tuple(value.shape) == tuple(current[name].shape):
+                matched[name] = value.to(dtype=current[name].dtype)
+                continue
+            migrated = migrate_cross_tensor(name, value, current[name])
+            if migrated is not None:
+                matched[name] = migrated
         parameter_names = {name for name, _ in student.named_parameters()}
         total = sum(int(parameter.numel()) for _, parameter in student.named_parameters())
         if not matched:
@@ -487,6 +572,42 @@ class StudentTrainWorker:
                 current[name].copy_(value.to(device=current[name].device))
         inherited = sum(int(value.numel()) for name, value in matched.items() if name in parameter_names)
         return sha256_file(parent_checkpoint), inherited, total
+
+    @staticmethod
+    def _reset_generation_head(student: nn.Module) -> None:
+        """Zero the latent output head for an auditable semantic calibration run."""
+
+        head = getattr(getattr(student, "unpatchify", None), "projection", None)
+        weight = getattr(head, "weight", None)
+        bias = getattr(head, "bias", None)
+        if not isinstance(weight, torch.Tensor) or not isinstance(bias, torch.Tensor):
+            raise StudentTrainingError(
+                "generation_head_reset_unsupported",
+                "Student graph has no resettable unpatchify projection",
+            )
+        with torch.no_grad():
+            weight.zero_()
+            bias.zero_()
+
+    @staticmethod
+    def _reset_dit_zero(student: nn.Module) -> None:
+        """Reset output and AdaLN modulation projections to DiT-Zero state."""
+
+        StudentTrainWorker._reset_generation_head(student)
+        for path in ("condition.projection", "timestep.projection"):
+            module: Any = student
+            for piece in path.split("."):
+                module = getattr(module, piece, None)
+            weight = getattr(module, "weight", None)
+            bias = getattr(module, "bias", None)
+            if not isinstance(weight, torch.Tensor) or not isinstance(bias, torch.Tensor):
+                raise StudentTrainingError(
+                    "dit_zero_reset_unsupported",
+                    "Student graph has no resettable %s projection" % path,
+                )
+            with torch.no_grad():
+                weight.zero_()
+                bias.zero_()
 
     @staticmethod
     def _algorithm_runs(
@@ -524,7 +645,12 @@ class StudentTrainWorker:
                         student_learning_rate=proposal.training.learning_rate,
                         critic_learning_rate=proposal.training.critic_learning_rate,
                         data_mode="real_latent",
-                        regression_weight=0.1,
+                        # Keep the real H3 latent anchor strong enough to
+                        # preserve prompt-specific content while DMD2 learns
+                        # the few-step distribution.  The previous 0.1
+                        # weight produced stable 30s videos but semantic
+                        # CLIP stayed near 0.568 versus the Teacher 0.635.
+                        regression_weight=1.0,
                     ),
                 )
             ], "h3_training.algorithms.dmd2.DMD2"
@@ -547,6 +673,13 @@ class StudentTrainWorker:
         parent_candidate_id: Optional[str] = None,
         parent_checkpoint_sha256: Optional[str] = None,
         fidelity: str = "F1",
+        reinitialize_generation_head: bool = False,
+        reinitialize_dit_zero: bool = False,
+        fp32_optimizer_state: bool = False,
+        training_learning_rate: Optional[float] = None,
+        trainable_scope: str = "all",
+        velocity_weight: float = 1.0,
+        clean_anchor_weight: float = 1.0,
     ) -> TrainingResult:
         started = time.perf_counter()
         teacher_checkpoint = Path(teacher_checkpoint).resolve()
@@ -622,6 +755,28 @@ class StudentTrainWorker:
                     "parent_checkpoint_integrity",
                     "parent checkpoint SHA256 does not match the selected parent evidence",
                 )
+            initialization_mode = (
+                "full_resume"
+                if inherited_parameter_count == total_parameter_count and total_parameter_count
+                else "partial_transfer"
+                if inherited_parameter_count
+                else "fresh_init"
+            )
+            if reinitialize_dit_zero:
+                self._reset_dit_zero(student)
+                initialization_mode = (
+                    "parent_with_dit_zero_reset" if inherit_parent else "fresh_with_dit_zero_reset"
+                )
+            elif reinitialize_generation_head:
+                self._reset_generation_head(student)
+                initialization_mode = (
+                    "parent_with_generation_head_reset" if inherit_parent else "fresh_with_generation_head_reset"
+                )
+            effective_learning_rate = float(
+                training_learning_rate if training_learning_rate is not None else proposal.training.learning_rate
+            )
+            if not math.isfinite(effective_learning_rate) or effective_learning_rate <= 0:
+                raise StudentTrainingError("invalid_training_config", "training learning rate must be positive and finite")
             spec = fidelity_spec(int(max_steps if max_steps is not None else 256), fidelity)
             configured_steps = int(train_steps if train_steps is not None else (max_steps if max_steps is not None else 256))
             if configured_steps <= 0:
@@ -658,6 +813,17 @@ class StudentTrainWorker:
                 algorithm_path = "h3_training.algorithms.progressive_distillation.ProgressiveDistillation"
                 stages = plan_binary_stages(proposal.training.source_steps, proposal.training.target_steps)
                 stage_budgets = progressive_stage_budgets(steps, len(stages))
+                rollout_policy = progressive_rollout_policy(fidelity)
+                if reinitialize_generation_head or reinitialize_dit_zero:
+                    # Warm the reset head against the direct Teacher endpoint
+                    # first.  A multi-step rollout is re-enabled only after
+                    # the Student has a non-random output field.
+                    rollout_policy = {
+                        **rollout_policy,
+                        "rollout_steps": 0,
+                        "rollout_endpoint_weight": 0.0,
+                        "rollout_clean_weight": 0.0,
+                    }
                 active_teacher = teacher
                 active_adapter = adapter
                 active_teacher_checkpoint = teacher_checkpoint
@@ -669,9 +835,14 @@ class StudentTrainWorker:
                         getattr(active_teacher, "model", active_teacher),
                         active_adapter,
                         ProgressiveDistillationConfig(
-                            stage=stage,
-                            learning_rate=proposal.training.learning_rate,
-                            audio_weight=0.0,
+                        stage=stage,
+                        learning_rate=effective_learning_rate,
+                        audio_weight=0.0,
+                        clean_anchor_weight=float(clean_anchor_weight),
+                        velocity_weight=float(velocity_weight),
+                        trainable_scope=str(trainable_scope),
+                            **rollout_policy,
+                            fp32_optimizer_state=bool(fp32_optimizer_state),
                         ),
                     )
                     result = TrainerEngine(
@@ -731,6 +902,14 @@ class StudentTrainWorker:
                                 + consumed_stage_steps + stage_budget
                             ),
                             "promoted_as_next_teacher": stage_index < len(stages) - 1,
+                            "generation_head_reset": bool(reinitialize_generation_head or reinitialize_dit_zero),
+                            "dit_zero_reset": bool(reinitialize_dit_zero),
+                            "fp32_optimizer_state": bool(fp32_optimizer_state),
+                            "learning_rate": effective_learning_rate,
+                            "trainable_scope": str(trainable_scope),
+                            "velocity_weight": float(velocity_weight),
+                            "clean_anchor_weight": float(clean_anchor_weight),
+                            **rollout_policy,
                         }
                     )
                     consumed_stage_steps += stage_budget
@@ -866,7 +1045,7 @@ class StudentTrainWorker:
                 timeout_s=spec.timeout_s,
                 total_parameter_count=total_parameter_count,
                 inheritance_ratio=(float(inherited_parameter_count) / float(total_parameter_count)) if total_parameter_count else 0.0,
-                initialization_mode=("full_resume" if inherited_parameter_count == total_parameter_count and total_parameter_count else "partial_transfer" if inherited_parameter_count else "fresh_init"),
+                initialization_mode=initialization_mode,
                 teacher_world_size=teacher_world,
                 teacher_devices=teacher_device_names,
                 student_device=str(selected_student_device),
@@ -1011,5 +1190,6 @@ __all__ = [
     "TrainingResult",
     "fidelity_spec",
     "fidelity_step_budget",
+    "progressive_rollout_policy",
     "sha256_file",
 ]

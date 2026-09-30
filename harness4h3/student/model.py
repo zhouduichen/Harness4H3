@@ -73,7 +73,17 @@ class ConditionProjector(nn.Module):
         self.projection = nn.Linear(condition_dim, 6 * hidden_size, device=device)
 
     def forward(self, value: Tensor) -> Tensor:
-        return self.projection(value.mean(dim=1))
+        # MiniMax-H3's cached Qwen condition places a fixed BOS embedding at
+        # token 0.  Its norm is an order of magnitude larger than the actual
+        # prompt tokens, so including it in a plain mean overwhelms the
+        # Student's semantic signal.  Keep the graph and parameter count
+        # unchanged while pooling the text-bearing tokens only.
+        # The registered H3 graph always supplies at least one text token
+        # after BOS; slicing rather than branching also keeps the compiler's
+        # symbolic tracing path valid.
+        text_tokens = value[:, 1:]
+        pooled = text_tokens.mean(dim=1)
+        return self.projection(pooled)
 
 
 class TimestepProjector(nn.Module):
@@ -89,7 +99,13 @@ class TimestepProjector(nn.Module):
 
 
 class _DiTBlock(nn.Module):
-    def __init__(self, architecture: ArchitectureSpec, *, device: Optional[torch.device] = None):
+    def __init__(
+        self,
+        architecture: ArchitectureSpec,
+        *,
+        condition_dim: int,
+        device: Optional[torch.device] = None,
+    ):
         super().__init__()
         hidden = architecture.hidden_size
         expansion = int(round(hidden * architecture.mlp_ratio))
@@ -118,9 +134,50 @@ class _DiTBlock(nn.Module):
         attended = attended.transpose(1, 2).reshape(batch, tokens, hidden)
         return self.attention_output(attended)
 
-    def forward(self, value: Tensor, conditioning: Tensor) -> Tensor:
+    def _cross_attention(
+        self,
+        value: Tensor,
+        condition_tokens: Tensor,
+        cross_query: nn.Linear,
+        cross_output: nn.Linear,
+        cross_num_heads: int,
+        cross_output_delta: Optional[nn.Linear] = None,
+    ) -> Tensor:
+        batch, tokens, hidden = value.shape
+        text_tokens = condition_tokens.shape[1]
+        cross_hidden = cross_query.out_features
+        head_dim = cross_hidden // cross_num_heads
+        query = cross_query(value).reshape(batch, tokens, cross_num_heads, head_dim)
+        query = query.permute(0, 2, 1, 3)
+        key_value = condition_tokens.reshape(batch, text_tokens, 2, cross_num_heads, head_dim)
+        key_value = key_value.permute(2, 0, 3, 1, 4)
+        attended = F.scaled_dot_product_attention(query, key_value[0], key_value[1])
+        attended = attended.transpose(1, 2).reshape(batch, tokens, cross_hidden)
+        projected = cross_output(attended)
+        if cross_output_delta is not None:
+            projected = projected + cross_output_delta(attended)
+        return projected
+
+    def forward(
+        self,
+        value: Tensor,
+        conditioning: Tensor,
+        condition_tokens: Tensor,
+        cross_query: nn.Linear,
+        cross_output: nn.Linear,
+        cross_num_heads: int,
+        cross_output_delta: Optional[nn.Linear] = None,
+    ) -> Tensor:
         normalized, gate = self.modulation1(self.norm1(value), conditioning)
         value = value + gate * self._attention(normalized)
+        value = value + self._cross_attention(
+            self.norm1(value),
+            condition_tokens,
+            cross_query,
+            cross_output,
+            cross_num_heads,
+            cross_output_delta,
+        )
         normalized, gate = self.modulation2(self.norm2(value), conditioning)
         feed_forward = self.mlp_out(_activation(self.activation_name, self.mlp_in(normalized)))
         return value + gate * feed_forward
@@ -143,13 +200,12 @@ class VideoUnpatchify(nn.Module):
         self.patch_volume = architecture.latent_channels * architecture.temporal_patch * patch * patch
         self.projection = nn.Conv3d(architecture.hidden_size, self.patch_volume, kernel_size=1, device=device)
 
-    def forward(self, tokens: Tensor) -> Tensor:
+    def forward(self, tokens: Tensor, *, frames: int, height: int, width: int) -> Tensor:
         architecture = self.architecture
-        target = self.target
         batch = tokens.shape[0]
-        reduced_frames = target.latent_frames // architecture.temporal_patch
-        reduced_height = target.latent_height // architecture.spatial_patch
-        reduced_width = target.latent_width // architecture.spatial_patch
+        reduced_frames = frames // architecture.temporal_patch
+        reduced_height = height // architecture.spatial_patch
+        reduced_width = width // architecture.spatial_patch
         hidden = architecture.hidden_size
         features = tokens.transpose(1, 2).reshape(batch, hidden, reduced_frames, reduced_height, reduced_width)
         patches = self.projection(features)
@@ -167,9 +223,9 @@ class VideoUnpatchify(nn.Module):
         return patches.reshape(
             batch,
             architecture.latent_channels,
-            target.latent_frames,
-            target.latent_height,
-            target.latent_width,
+            frames,
+            height,
+            width,
         )
 
 
@@ -190,23 +246,108 @@ class VideoLatentDiT(nn.Module):
         self.architecture = architecture
         self.patch_embed = VideoPatchEmbed(architecture, device=device)
         self.condition = ConditionProjector(target.condition_dim, architecture.hidden_size, device=device)
+        # The original 128-wide text bottleneck was sufficient to make the
+        # inherited Student prompt-aware, but it remains the semantic
+        # bottleneck against the real H3 Teacher.  Keep the cross-attention
+        # path compact while doubling its token capacity for the 1-2B target.
+        self.cross_attention_dim = max(architecture.num_heads, 256)
+        self.cross_num_heads = max(1, architecture.num_heads // 7)
+        while self.cross_attention_dim % self.cross_num_heads:
+            self.cross_attention_dim += 1
+        self.condition_tokens = nn.Linear(
+            target.condition_dim, 2 * self.cross_attention_dim, device=device
+        )
+        # Shared across blocks to keep the inherited 1.12B Student trainable
+        # within the existing single-GPU memory envelope.  The zero output
+        # projection makes the old checkpoint's initial function unchanged.
+        self.cross_query = nn.Linear(architecture.hidden_size, self.cross_attention_dim, device=device)
+        self.cross_output = nn.Linear(self.cross_attention_dim, architecture.hidden_size, device=device)
+        nn.init.zeros_(self.cross_output.weight)
+        nn.init.zeros_(self.cross_output.bias)
+        self.cross_output_deltas = nn.ModuleList(
+            nn.Linear(self.cross_attention_dim, architecture.hidden_size, device=device)
+            for _ in range(architecture.depth)
+        )
+        for delta in self.cross_output_deltas:
+            nn.init.zeros_(delta.weight)
+            nn.init.zeros_(delta.bias)
         self.timestep = TimestepProjector(architecture.hidden_size, device=device)
         temporal = set(architecture.temporal_layers)
         blocks = []
         for index in range(architecture.depth):
             block_type = TemporalDiTBlock if index in temporal else SpatialDiTBlock
-            blocks.append(block_type(architecture, device=device))
+            blocks.append(block_type(architecture, condition_dim=target.condition_dim, device=device))
         self.blocks = nn.ModuleList(blocks)
         self.final_norm = RMSNorm(architecture.hidden_size, device=device)
         self.unpatchify = VideoUnpatchify(architecture, target, device=device)
 
+    @staticmethod
+    def _sinusoidal_positions(
+        frames: int,
+        height: int,
+        width: int,
+        hidden_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        """Return a fixed 3D position signal without adding checkpoint parameters."""
+
+        coordinates = torch.stack(
+            torch.meshgrid(
+                torch.arange(frames, device=device, dtype=torch.float32),
+                torch.arange(height, device=device, dtype=torch.float32),
+                torch.arange(width, device=device, dtype=torch.float32),
+                indexing="ij",
+            ),
+            dim=-1,
+        ).reshape(-1, 3)
+        widths = (hidden_size // 3, hidden_size // 3, hidden_size - 2 * (hidden_size // 3))
+        pieces = []
+        coordinate_parts = (coordinates[:, 0], coordinates[:, 1], coordinates[:, 2])
+        for coordinate, size in zip(coordinate_parts, widths):
+            half = size // 2
+            denominator = max(1, half - 1)
+            frequency = torch.exp(
+                -torch.log(torch.tensor(10000.0, device=device))
+                * torch.arange(half, device=device, dtype=torch.float32)
+                / float(denominator)
+            )
+            piece = torch.cat(
+                (torch.sin(coordinate.unsqueeze(-1) * frequency),
+                 torch.cos(coordinate.unsqueeze(-1) * frequency)),
+                dim=-1,
+            )
+            piece = F.pad(piece, (0, size - 2 * half))
+            pieces.append(piece)
+        return torch.cat(pieces, dim=-1).unsqueeze(0).to(dtype=dtype)
+
     def forward(self, video_latents: Tensor, conditioning: Tensor, timestep: Tensor) -> Tensor:
         value = self.patch_embed(video_latents)
+        architecture = self.architecture
+        _, _, frames, height, width = video_latents.shape
+        position = self._sinusoidal_positions(
+            frames // architecture.temporal_patch,
+            height // architecture.spatial_patch,
+            width // architecture.spatial_patch,
+            architecture.hidden_size,
+            value.device,
+            value.dtype,
+        )
+        value = value + position
         modulation = self.condition(conditioning) + self.timestep(timestep)
-        for block in self.blocks:
-            value = block(value, modulation)
+        condition_tokens = self.condition_tokens(conditioning[:, 1:])
+        for index, block in enumerate(self.blocks):
+            value = block(
+                value,
+                modulation,
+                condition_tokens,
+                self.cross_query,
+                self.cross_output,
+                self.cross_num_heads,
+                self.cross_output_deltas[index],
+            )
         value = self.final_norm(value)
-        return self.unpatchify(value)
+        return self.unpatchify(value, frames=frames, height=height, width=width)
 
 
 def build_student(

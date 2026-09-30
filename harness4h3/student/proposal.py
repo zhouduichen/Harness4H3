@@ -317,11 +317,34 @@ def estimate_parameter_count(architecture: ArchitectureSpec, condition_dim: int 
     patch = patch_volume * hidden + hidden
     output = hidden * patch_volume + patch_volume
     condition = condition_dim * (6 * hidden) + 6 * hidden
+    cross_attention_dim = max(architecture.num_heads, 256)
+    cross_num_heads = max(1, architecture.num_heads // 7)
+    while cross_attention_dim % cross_num_heads:
+        cross_attention_dim += 1
+    condition_tokens = condition_dim * (2 * cross_attention_dim) + 2 * cross_attention_dim
+    cross_attention = 2 * hidden * cross_attention_dim + hidden + cross_attention_dim
+    cross_output_deltas = architecture.depth * (cross_attention_dim * hidden + hidden)
     timestep = 1 * (6 * hidden) + 6 * hidden
     # Keep the count integer-valued so persisted evidence never depends on
     # floating-point rounding.
-    block = 4 * hidden * hidden + 4 * hidden + 2 * expansion * hidden + expansion + hidden + 2 * hidden
-    return int(patch + output + condition + timestep + architecture.depth * block + hidden)
+    block = (
+        4 * hidden * hidden
+        + 6 * hidden
+        + 2 * expansion * hidden
+        + expansion
+        + hidden
+    )
+    return int(
+        patch
+        + output
+        + condition
+        + condition_tokens
+        + cross_attention
+        + cross_output_deltas
+        + timestep
+        + architecture.depth * block
+        + hidden
+    )
 
 
 def estimate_training_memory(
