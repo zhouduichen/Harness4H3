@@ -83,7 +83,10 @@ def main(argv=None) -> int:
         if args.quality_backend == "clip_temporal":
             if not args.clip_model_path:
                 raise ValueError("--clip-model-path is required for clip_temporal")
-            quality_backend = ClipTemporalQualityBackend(args.clip_model_path, device="auto", sample_frames=4)
+            # The real host may run the H3 Teacher/Student on GPUs 0-3. Keep
+            # quality evaluation on CPU so W0 cannot silently steal another
+            # rank's GPU after Wan generation completes.
+            quality_backend = ClipTemporalQualityBackend(args.clip_model_path, device="cpu", sample_frames=4)
         evaluator = StudentEvaluator(max_frames=max(4096, int(spec.num_frames)))
         cases = []
         latencies = []
