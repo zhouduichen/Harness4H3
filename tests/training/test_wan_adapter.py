@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from h3_training.adapters.wan import WanTrainingAdapter
+from h3_training.adapters.wan import WanEndpointTeacher, WanTrainingAdapter
 from h3_training.algorithms.base import ModelRole
 from h3_training.data.schema import ModalLatents, ModalPrediction, ModalTimesteps
 from h3_training.engine.state import TrainingFailure
@@ -79,6 +79,22 @@ def test_wan_adapter_forward_uses_native_transformer_role():
         batch.conditioning,
     )
     assert prediction.video.shape == batch.latents.video.shape
+
+
+def test_wan_adapter_endpoint_teacher_is_role_type_not_role_name():
+    adapter = make_adapter()
+    batch = adapter.prepare_batch(
+        {"sample_id": "s0", "prompt": "red train", "frames": torch.zeros(2, 2, 2, 3)},
+        torch.Generator().manual_seed(7),
+    )
+    endpoint = ModelRole("critic", WanEndpointTeacher(), adapter, False)
+    prediction = adapter.predict(
+        endpoint,
+        batch.latents,
+        ModalTimesteps(video=torch.tensor([0.5])),
+        batch.conditioning,
+    )
+    assert torch.allclose(prediction.video, batch.latents.video / 0.5)
 
 
 def test_wan_adapter_scope_rejects_empty_selection():

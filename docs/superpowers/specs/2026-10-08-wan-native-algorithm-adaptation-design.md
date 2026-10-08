@@ -127,8 +127,10 @@ On startup, the supervisor loads complete round artifacts and state, marks an in
 
 - Proposal schema v2, bounded capability validation, campaign fingerprinting, append-only state, and restart recovery are implemented.
 - The existing Progressive Distillation path is executable through `WanTrainingAdapter`, including binary stages, velocity/clean-anchor losses, rollout policy, initialization mode, trainable scope, and lineage metadata.
-- DMD2 remains fail-closed for Wan until both a Wan critic adapter evidence flag and explicit critic-memory admission are present; no fallback to the legacy direct-loss loop is allowed for v2 proposals.
-- The local contract suite passes with `53 passed, 1 skipped`; the skipped DMD2 test requires CUDA. A real four-GPU H3/ Wan smoke and semantic 30-second evidence remain deployment checks, not claims made by this implementation.
+- DMD2 is now dispatched through the shared Wan adapter only when both a Wan critic adapter evidence flag and explicit critic-memory admission are present; otherwise it remains fail-closed with no fallback to the legacy direct-loss loop.
+- TrainerEngine now writes optimizer-boundary checkpoints and the Wan worker resumes the existing full-state format, including per-stage Progressive checkpoints and the shared DMD2 Student/Critic state.
+- Wan rounds now use the shared canonical experiment fingerprint and append one normalized ExperienceStore record; campaign state and events remain operational scheduler state.
+- The local contract suite passes with `31 passed, 1 skipped` for the focused extension suites; the skipped DMD2 test requires CUDA. A real four-GPU H3/Wan smoke and semantic 30-second evidence remain deployment checks, not claims made by this implementation.
 
 ## DMD2 and step-level training memory extension
 

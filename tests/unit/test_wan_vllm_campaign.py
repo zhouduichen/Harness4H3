@@ -53,6 +53,8 @@ def test_training_command_contains_only_trusted_paths_and_validated_knobs(tmp_pa
     assert "--steps" in command and "8" in command
     assert "--learning-rate" in command and "5e-07" in command
     assert "--parent-checkpoint" in command
+    assert "--training-checkpoint" in command
+    assert "--checkpoint-every-steps" in command
 
 
 def test_loop_config_requires_absolute_trusted_paths(tmp_path: Path):

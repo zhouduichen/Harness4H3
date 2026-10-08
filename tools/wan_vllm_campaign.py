@@ -13,6 +13,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -33,6 +34,8 @@ from harness4h3.student.wan_campaign import (
     write_campaign_state,
 )
 from harness4h3.student.gpu import acquire_controller_handoff, release_controller_handoff
+from harness4h3.memory.experience import ExperienceRecord, ExperienceStore
+from harness4h3.memory.fingerprint import experiment_fingerprint
 
 
 def proposal_json_schema() -> dict[str, Any]:
@@ -222,6 +225,8 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         ("continuation_contract", "30s"),
         ("state_path", ""),
         ("fingerprint_path", ""),
+        ("experience_path", ""),
+        ("checkpoint_every_steps", 8),
         ("offline_simulation", False),
     ):
         loop.setdefault(name, default)
@@ -240,6 +245,8 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         loop["state_path"] = str(root / "campaign-state.json")
     if not loop["fingerprint_path"]:
         loop["fingerprint_path"] = str(root / "fingerprints.jsonl")
+    if not loop["experience_path"]:
+        loop["experience_path"] = str(root / "experiences.jsonl")
     for name in (
         "controller_launcher",
         "controller_launcher_pid_file",
@@ -247,6 +254,7 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         "controller_hold_file",
         "controller_release_file",
         "controller_worker_lease_file",
+        "experience_path",
     ):
         if loop[name] and not Path(str(loop[name])).is_absolute():
             raise ValueError("%s must be absolute" % name)
@@ -265,6 +273,8 @@ def load_loop_config(path: Path) -> dict[str, Any]:
     capabilities = loop["algorithm_capabilities"]
     if not isinstance(capabilities, list) or not capabilities or any(str(item) not in {"progressive_distillation", "dmd2"} for item in capabilities):
         raise ValueError("algorithm_capabilities must list progressive_distillation and/or dmd2")
+    if int(loop["checkpoint_every_steps"]) < 0:
+        raise ValueError("checkpoint_every_steps must not be negative")
     if not isinstance(loop["fidelity_schedule"], list) or not loop["fidelity_schedule"]:
         raise ValueError("fidelity_schedule must be a non-empty list")
     if any(str(item) not in {"F1", "F2", "F3"} for item in loop["fidelity_schedule"]):
@@ -429,6 +439,12 @@ def build_training_command(
         str(proposal.initialization.mode),
         "--parent-checkpoint",
         str(parent_checkpoint),
+        "--training-checkpoint",
+        str(output_dir / "training-checkpoint.pt"),
+        "--checkpoint-every-steps",
+        str(int(config.get("checkpoint_every_steps", 8))),
+        "--dmd2-memory-admitted" if bool(config.get("dmd2_memory_admitted", False)) else "--no-dmd2-memory-admitted",
+        "--wan-dmd2-adapter-ready" if bool(config.get("wan_dmd2_adapter_ready", False)) else "--no-wan-dmd2-adapter-ready",
     )
 
 
@@ -641,6 +657,13 @@ def run_training(config: Mapping[str, Any], proposal: WanTrainingProposal, paren
         return _write_failure(result_path, "parent_digest_mismatch", "training result is not bound to the trusted parent")
     if result.get("offline_simulation") is not False:
         return _write_failure(result_path, "offline_simulation", "real Wan training must report offline_simulation=false")
+    checkpoint_evidence = Path(str(result.get("training_checkpoint_evidence", "")))
+    if not checkpoint_evidence.is_file():
+        return _write_failure(result_path, "training_checkpoint_missing", "training result points to no step checkpoint")
+    if sha256_file(checkpoint_evidence) != result.get("training_checkpoint_sha256"):
+        return _write_failure(result_path, "training_checkpoint_digest_mismatch", "step checkpoint digest does not match training result")
+    if not str(result.get("resume_config_digest", "")):
+        return _write_failure(result_path, "training_checkpoint_config_missing", "training result lacks resume config digest")
     return result
 
 
@@ -654,6 +677,85 @@ def _teacher_semantic(config: Mapping[str, Any]) -> float:
 
 def _canonical_digest(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps(dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _wan_experiment_fingerprint(
+    config: Mapping[str, Any],
+    identity: Mapping[str, Any],
+    proposal: WanTrainingProposal,
+    *,
+    parent_digest: str,
+    capability_digest: str,
+    evaluator_digest: str,
+) -> str:
+    """Build the canonical identity used by the shared experiment memory."""
+
+    return experiment_fingerprint(
+        parent_model_id=parent_digest,
+        parent_system_id=str(identity["base_digest"]),
+        operator=proposal.training.method,
+        operator_args=proposal.to_dict(),
+        target_id="wan-30s-overlap-window-v1",
+        device_id=str(config.get("device")),
+        benchmark_recipe={
+            "manifest_digest": str(identity["path_digests"]["evaluation_manifest_digest"]),
+            "capability_digest": capability_digest,
+            "evaluator_digest": evaluator_digest,
+            "continuation_contract": str(config.get("continuation_contract", "30s")),
+        },
+    )
+
+
+def _append_experience(
+    config: Mapping[str, Any],
+    round_dir: Path,
+    round_index: int,
+    fingerprint: str,
+    proposal: WanTrainingProposal,
+    training: Mapping[str, Any],
+    evaluation: Mapping[str, Any] | None,
+    decision: Mapping[str, Any],
+    parent_digest: str,
+    identity: Mapping[str, Any],
+    capability_digest: str,
+    evaluator_digest: str,
+) -> bool:
+    """Persist one completed campaign round in the existing append-only memory."""
+
+    source = round_dir / "decision.json"
+    if not source.is_file():
+        raise ValueError("cannot persist experience before decision artifact exists")
+    accepted = bool(decision.get("accepted"))
+    training_status = str(training.get("status", ""))
+    status = "failed" if training_status == "failed" else ("accepted" if accepted else "rejected")
+    semantic = decision.get("semantic")
+    reward = float(semantic) if isinstance(semantic, (int, float)) else None
+    record = ExperienceRecord(
+        experience_id="wan-round-%04d" % int(round_index),
+        source_uri=round_dir.resolve().as_uri(),
+        source_sha256=sha256_file(source),
+        source_kind="wan_vllm_round",
+        experiment_id="wan-%s" % fingerprint[:16],
+        parent_model_id=parent_digest,
+        child_model_id=(str(training["student_checkpoint_sha256"]) if training.get("student_checkpoint_sha256") else None),
+        operator=proposal.training.method,
+        operator_args=proposal.to_dict(),
+        training=dict(training),
+        evaluation=dict(evaluation) if evaluation is not None else None,
+        decision=dict(decision),
+        reward=reward,
+        status=status,
+        provenance={
+            "fingerprint": fingerprint,
+            "base_digest": str(identity["base_digest"]),
+            "capability_digest": capability_digest,
+            "evaluator_digest": evaluator_digest,
+            "device_id": str(config.get("device")),
+        },
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    experience_path = Path(str(config.get("experience_path") or (Path(str(config["output_root"])) / "experiences.jsonl")))
+    return ExperienceStore(experience_path).append(record)
 
 
 def _campaign_capabilities(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -740,10 +842,21 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
     events_path = root / "events.jsonl"
     complete_rounds, incomplete_rounds = load_complete_rounds(root)
     failed_rounds = {int(value) for value in state.get("failed_rounds", [])}
+    resumable_rounds: set[int] = set()
     for round_index in incomplete_rounds:
         if round_index in failed_rounds:
             continue
         round_dir = root / ("round-%04d" % round_index)
+        has_proposal = (round_dir / "proposal.json").is_file()
+        has_training_result = (round_dir / "training-result.json").is_file()
+        has_step_checkpoint = any((round_dir / "training").glob("training-checkpoint*.pt"))
+        if has_proposal and not has_training_result and has_step_checkpoint:
+            resumable_rounds.add(round_index)
+            append_event(
+                events_path,
+                {"event": "round.resume_ready", "round": round_index, "checkpoint_dir": str(round_dir / "training")},
+            )
+            continue
         decision = {"accepted": False, "reason": "incomplete_round"}
         atomic_write_json(round_dir / "decision.json", decision)
         failed_rounds.add(round_index)
@@ -778,6 +891,7 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
         rounds.append(
             {
                 "round": int(record["round"]),
+                "fingerprint": record.get("fingerprint"),
                 "proposal": record["proposal"],
                 "training": record["training"],
                 "evaluation": record["evaluation"],
@@ -789,8 +903,9 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
     start_round = max(
         int(state.get("next_round", 1)),
         max((int(item["round"]) for item in complete_rounds), default=0) + 1,
-        max(incomplete_rounds, default=0) + 1,
     )
+    if resumable_rounds:
+        start_round = min(resumable_rounds)
     manifest_digest = str(identity["path_digests"]["evaluation_manifest_digest"])
     capability_digest = _canonical_digest(capabilities)
     evaluator_digest = _canonical_digest(
@@ -812,6 +927,8 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
     )
     write_campaign_state(root, state)
     for round_index in range(start_round, round_limit + 1):
+        if round_index in failed_rounds and round_index not in resumable_rounds:
+            continue
         round_dir = root / ("round-%04d" % round_index)
         round_dir.mkdir(parents=True, exist_ok=True)
         context = {
@@ -832,20 +949,32 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
                 "no_code_edits": True,
             },
         }
-        ensure_controller(config)
-        raw_proposal = _request_vllm(config, context)
+        resuming_round = round_index in resumable_rounds
+        if resuming_round:
+            raw_proposal = _read_json(round_dir / "proposal.json")
+        else:
+            ensure_controller(config)
+            raw_proposal = _request_vllm(config, context)
         proposal = WanTrainingProposal.from_mapping(
             raw_proposal,
             expected_parent_sha256=parent_digest,
             capabilities=capabilities,
         )
-        fingerprint = proposal.fingerprint(
-            manifest_digest=manifest_digest,
+        fingerprint = _wan_experiment_fingerprint(
+            config,
+            identity,
+            proposal,
+            parent_digest=parent_digest,
             capability_digest=capability_digest,
             evaluator_digest=evaluator_digest,
-            code_digest=code_digest,
         )
-        duplicate = register_fingerprint(
+        existing_fingerprint = None
+        fingerprint_artifact = round_dir / "fingerprint.json"
+        if resuming_round and fingerprint_artifact.is_file():
+            existing_fingerprint = _read_json(fingerprint_artifact).get("fingerprint")
+            if existing_fingerprint != fingerprint:
+                raise ValueError("resumable round fingerprint does not match trusted campaign identity")
+        duplicate = False if resuming_round else register_fingerprint(
             root,
             fingerprint,
             {"round": round_index, "proposal_id": proposal.proposal_id, "parent_checkpoint_sha256": parent_digest},
@@ -858,7 +987,23 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
             atomic_write_json(round_dir / "training-result.json", {"status": "skipped", "reason": "duplicate_fingerprint"})
             atomic_write_json(round_dir / "evaluation-result.json", {"status": "skipped", "reason": "duplicate_fingerprint"})
             atomic_write_json(round_dir / "decision.json", decision)
-            rounds.append({"round": round_index, "proposal": proposal.to_dict(), "training": {"status": "skipped"}, "evaluation": {"status": "skipped"}, "decision": decision})
+            duplicate_training = {"status": "skipped", "reason": "duplicate_fingerprint"}
+            duplicate_evaluation = {"status": "skipped", "reason": "duplicate_fingerprint"}
+            _append_experience(
+                config,
+                round_dir,
+                round_index,
+                fingerprint,
+                proposal,
+                duplicate_training,
+                duplicate_evaluation,
+                decision,
+                parent_digest,
+                identity,
+                capability_digest,
+                evaluator_digest,
+            )
+            rounds.append({"round": round_index, "fingerprint": fingerprint, "proposal": proposal.to_dict(), "training": duplicate_training, "evaluation": duplicate_evaluation, "decision": decision})
             state["last_complete_round"] = round_index
             state["next_round"] = round_index + 1
             state["failed_rounds"] = sorted(failed_rounds)
@@ -877,7 +1022,21 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
                 decision = {"accepted": False, "reason": "training_failed"}
                 atomic_write_json(round_dir / "evaluation-result.json", {"status": "skipped", "reason": "training_failed"})
                 atomic_write_json(round_dir / "decision.json", decision)
-                rounds.append({"round": round_index, "proposal": proposal.to_dict(), "training": training, "decision": decision})
+                _append_experience(
+                    config,
+                    round_dir,
+                    round_index,
+                    fingerprint,
+                    proposal,
+                    training,
+                    {"status": "skipped", "reason": "training_failed"},
+                    decision,
+                    parent_digest,
+                    identity,
+                    capability_digest,
+                    evaluator_digest,
+                )
+                rounds.append({"round": round_index, "fingerprint": fingerprint, "proposal": proposal.to_dict(), "training": training, "decision": decision})
                 state["failed_rounds"] = sorted(set(state.get("failed_rounds", [])) | {round_index})
                 state["last_complete_round"] = round_index
                 state["next_round"] = round_index + 1
@@ -900,6 +1059,7 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
             atomic_write_json(round_dir / "decision.json", decision)
             round_record = {
                 "round": round_index,
+                "fingerprint": fingerprint,
                 "proposal": proposal.to_dict(),
                 "parent_checkpoint": str(parent),
                 "parent_checkpoint_sha256": parent_digest,
@@ -907,6 +1067,20 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
                 "evaluation": evaluation,
                 "decision": decision,
             }
+            _append_experience(
+                config,
+                round_dir,
+                round_index,
+                fingerprint,
+                proposal,
+                training,
+                evaluation,
+                decision,
+                parent_digest,
+                identity,
+                capability_digest,
+                evaluator_digest,
+            )
             rounds.append(round_record)
             append_event(events_path, {"event": "round.decided", **round_record})
             state["last_complete_round"] = round_index

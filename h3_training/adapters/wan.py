@@ -139,7 +139,7 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         if noisy.video is None or timestep.video is None:
             raise TrainingFailure("invalid_training_config", "Wan adapter requires video prediction inputs")
         sigma = timestep.video.to(device=noisy.video.device, dtype=noisy.video.dtype)
-        if role.name == "teacher":
+        if isinstance(role.model, WanEndpointTeacher):
             if self._active_clean is None:
                 raise TrainingFailure("wan_teacher_target_missing", "H3 RGB-boundary target was not prepared")
             clean = self._active_clean.to(device=noisy.video.device, dtype=noisy.video.dtype)
@@ -147,10 +147,12 @@ class WanTrainingAdapter(DenoisingModelAdapter):
             velocity = (noisy.video - clean) / denominator.view(-1, 1, 1, 1, 1)
             return ModalPrediction(video=velocity.detach())
         model_timestep = sigma.float() * self._train_timesteps()
+        model_device = noisy.video.device
+        model_dtype = next(self.transformer.parameters()).dtype
         output = role.model(
-            hidden_states=noisy.video,
-            timestep=model_timestep,
-            encoder_hidden_states=conditioning.text,
+            hidden_states=noisy.video.to(device=model_device, dtype=model_dtype),
+            timestep=model_timestep.to(device=model_device, dtype=torch.float32),
+            encoder_hidden_states=conditioning.text.to(device=model_device, dtype=model_dtype),
             return_dict=False,
         )
         prediction = self._prediction_tensor(output)

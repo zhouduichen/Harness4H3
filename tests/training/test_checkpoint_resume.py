@@ -40,3 +40,17 @@ def test_resume_matches_uninterrupted_cpu(tmp_path):
     resumed = resumed_engine.run(interrupted, batches(), max_steps=4, resume_from=checkpoint)
     assert torch.equal(uninterrupted.weight.weight, interrupted.weight.weight)
     assert resumed.loop_state == full.loop_state
+
+
+def test_engine_writes_optimizer_boundary_checkpoints(tmp_path):
+    method = CountingMethod()
+    engine = TrainerEngine(TrainerConfig(seed=9, policy_digest="policy-a"))
+    path = tmp_path / "step-checkpoint.pt"
+    result = engine.run(method, batches(), max_steps=3, checkpoint_path=path, checkpoint_every_steps=2)
+    assert path.is_file()
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    assert payload["loop_state"]["global_step"] == 2
+    assert payload["config_digest"] == engine.config.digest
+    engine.save_checkpoint(method, result.loop_state, path)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    assert payload["loop_state"]["global_step"] == 3

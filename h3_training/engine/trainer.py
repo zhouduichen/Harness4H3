@@ -22,6 +22,7 @@ class TrainerConfig:
     seed: int = 0
     parent_sha256: str = ""
     device: str = "cpu"
+    policy_digest: str = ""
 
     def __post_init__(self) -> None:
         if self.gradient_accumulation_steps <= 0 or self.max_gradient_norm <= 0:
@@ -147,9 +148,13 @@ class TrainerEngine:
         dataloader: Iterable[Any],
         max_steps: int,
         resume_from: Optional[Path] = None,
+        checkpoint_path: Optional[Path] = None,
+        checkpoint_every_steps: int = 0,
     ) -> TrainingRunResult:
         if max_steps <= 0:
             raise TrainingFailure("invalid_training_config", "max_steps must be positive")
+        if checkpoint_every_steps < 0:
+            raise TrainingFailure("invalid_training_config", "checkpoint_every_steps must not be negative")
         try:
             device = torch.device(self.config.device)
         except (TypeError, RuntimeError) as exc:
@@ -211,6 +216,8 @@ class TrainerEngine:
             state.global_step = iteration
             state.accumulation_position = 0
             final_loss = accumulated / self.config.gradient_accumulation_steps
+            if checkpoint_path is not None and checkpoint_every_steps and iteration % checkpoint_every_steps == 0:
+                self.save_checkpoint(method, state, Path(checkpoint_path))
         peak = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
         return TrainingRunResult(
             loop_state=state,

@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import fnmatch
+import hashlib
 import json
 import math
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -39,9 +42,7 @@ from h3_training.algorithms.progressive_distillation import (
     ProgressiveDistillationConfig,
     plan_binary_stages,
 )
-from h3_training.engine.state import TrainingFailure
 from h3_training.engine.trainer import TrainerConfig, TrainerEngine
-from h3_training.algorithms.base import ModelRole
 from harness4h3.student.wan_campaign import WanTrainingPolicy
 from h3_training.data.schema import Conditioning, ModalLatents, ModalTimesteps
 
@@ -51,6 +52,16 @@ def _write(path: Path, value: Mapping[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".part")
     temporary.write_text(json.dumps(dict(value), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def _digest(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _stage_checkpoint_path(base: Path, stage_index: int) -> Path:
+    return base.with_name("%s-stage-%02d%s" % (base.stem, int(stage_index), base.suffix))
 
 
 def _load_mapping(path: Path) -> Mapping[str, Any]:
@@ -318,6 +329,10 @@ def run(
     clean_anchor_weight_override: float | None = None,
     fp32_optimizer_state_override: bool | None = None,
     initialization_mode_override: str | None = None,
+    training_checkpoint_override: Path | None = None,
+    checkpoint_every_steps_override: int | None = None,
+    dmd2_memory_admitted_override: bool | None = None,
+    wan_dmd2_adapter_ready_override: bool | None = None,
 ) -> Mapping[str, Any]:
     wan_config = Path(str(raw["wan_config"])).resolve()
     spec = _training_spec(raw, wan_config)
@@ -360,6 +375,23 @@ def run(
         if fp32_optimizer_state_override is not None
         else raw.get("fp32_optimizer_state", False)
     )
+    checkpoint_every_steps = int(
+        checkpoint_every_steps_override
+        if checkpoint_every_steps_override is not None
+        else raw.get("checkpoint_every_steps", 8)
+    )
+    if checkpoint_every_steps < 0:
+        raise ValueError("checkpoint_every_steps must not be negative")
+    dmd2_memory_admitted = bool(
+        dmd2_memory_admitted_override
+        if dmd2_memory_admitted_override is not None
+        else raw.get("dmd2_memory_admitted", False)
+    )
+    wan_dmd2_adapter_ready = bool(
+        wan_dmd2_adapter_ready_override
+        if wan_dmd2_adapter_ready_override is not None
+        else raw.get("wan_dmd2_adapter_ready", False)
+    )
     policy = WanTrainingPolicy.from_mapping(
         {
             "method": method,
@@ -378,8 +410,22 @@ def run(
             "fp32_optimizer_state": fp32_optimizer_state,
         }
     )
-    if policy.method == "dmd2" and not bool(raw.get("dmd2_memory_admitted", False)):
-        raise WanStudentError("capability_unavailable", "Wan DMD2 critic memory admission is disabled")
+    training_checkpoint = (
+        Path(training_checkpoint_override).resolve()
+        if training_checkpoint_override is not None
+        else Path(output).resolve() / "training-checkpoint.pt"
+    )
+    checkpoint_evidence_path = training_checkpoint
+    policy_digest = _digest({"policy": asdict(policy), "initialization_mode": initialization_mode_override or raw.get("initialization_mode", "inherit")})
+    resumed_from_step = 0
+    if policy.method == "dmd2" and (
+        not dmd2_memory_admitted
+        or not wan_dmd2_adapter_ready
+    ):
+        raise WanStudentError(
+            "capability_unavailable",
+            "Wan DMD2 requires critic memory admission and Wan adapter evidence",
+        )
     requested_teacher_groups = int(math.ceil(float(steps) / float(max(1, teacher_reuse_steps))))
     teacher_groups = max(1, min(requested_teacher_groups, int(raw.get("teacher_target_groups", 4))))
     teacher_devices = _parse_devices(raw["teacher_devices"])
@@ -392,6 +438,31 @@ def run(
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     cache_paths = _training_cache_paths(raw, limit=max(1, teacher_groups))
+    started = time.perf_counter()
+    teacher_forward_count = 0
+    teacher_digest: Optional[str] = None
+    teacher_records: list[dict[str, Any]] = []
+    teacher_samples: list[tuple[torch.Tensor, dict[str, Any]]] = []
+    # Materialize the real H3 RGB targets before loading the Wan pipeline on
+    # the Student GPU.  ComfyUI's H3 VAE and Wan's VAE otherwise share the
+    # same allocator and can return non-finite RGB frames without an OOM.
+    for group_index in range(teacher_groups):
+        frames, forward_count, step_teacher_digest, step_teacher_metadata = _teacher_video(
+            raw,
+            spec,
+            teacher_device,
+            student_device,
+            cache_path=cache_paths[group_index % len(cache_paths)],
+        )
+        teacher_forward_count += int(forward_count)
+        if teacher_digest is None:
+            teacher_digest = step_teacher_digest
+        elif step_teacher_digest != teacher_digest:
+            raise RuntimeError("Teacher checkpoint digest changed during training")
+        metadata = dict(step_teacher_metadata)
+        teacher_records.append(metadata)
+        teacher_samples.append((frames, metadata))
+
     components = load_wan_training_components(spec, device=str(student_device))
     parent_raw = parent_override if parent_override is not None else raw.get("parent_checkpoint")
     parent_checkpoint: Optional[Path] = None
@@ -410,27 +481,10 @@ def run(
     trainable_parameters = [parameter for parameter in components.transformer.parameters() if parameter.requires_grad]
     initial_probe = next(parameter for parameter in trainable_parameters).detach().float().clone()
     generator = torch.Generator(device="cpu").manual_seed(int(raw.get("seed", 20261008)) + 1)
-    started = time.perf_counter()
-    teacher_forward_count = 0
-    teacher_digest: Optional[str] = None
-    teacher_records: list[dict[str, Any]] = []
     training_batches: list[dict[str, Any]] = []
-    for group_index in range(teacher_groups):
-        frames, forward_count, step_teacher_digest, step_teacher_metadata = _teacher_video(
-            raw,
-            spec,
-            teacher_device,
-            student_device,
-            cache_path=cache_paths[group_index % len(cache_paths)],
-        )
-        teacher_forward_count += int(forward_count)
-        if teacher_digest is None:
-            teacher_digest = step_teacher_digest
-        elif step_teacher_digest != teacher_digest:
-            raise RuntimeError("Teacher checkpoint digest changed during training")
-        teacher_records.append(dict(step_teacher_metadata))
+    for group_index, (frames, metadata) in enumerate(teacher_samples):
         clean_latent = encode_wan_video(components.vae, frames, spec, components.device)
-        prompt = str(teacher_records[-1].get("caption", "")).strip() or "A natural cinematic video with coherent motion."
+        prompt = str(metadata.get("caption", "")).strip() or "A natural cinematic video with coherent motion."
         prompt_embeds = _encode_training_prompt(
             components.pipeline,
             prompt,
@@ -447,7 +501,8 @@ def run(
                 "prompt_embeds": prompt_embeds,
             }
         )
-        del clean_latent, prompt_embeds, frames
+        del clean_latent, prompt_embeds
+    teacher_samples.clear()
     adapter = WanTrainingAdapter(
         transformer=components.transformer,
         scheduler=components.scheduler,
@@ -463,6 +518,7 @@ def run(
     initial_loss: Optional[float] = None
     final_loss: Optional[float] = None
     maximum_gradient_norm = 0.0
+    resume_config_digest: Optional[str] = None
     algorithm_path = "h3_training.algorithms.%s.%s" % (
         "progressive_distillation" if policy.method == "progressive_distillation" else "dmd2",
         "ProgressiveDistillation" if policy.method == "progressive_distillation" else "DMD2",
@@ -490,13 +546,28 @@ def run(
                     fp32_optimizer_state=policy.fp32_optimizer_state,
                 ),
             )
-            result = TrainerEngine(
+            stage_checkpoint = _stage_checkpoint_path(training_checkpoint, stage_index)
+            trainer = TrainerEngine(
                 TrainerConfig(
                     seed=20261008 + stage_index,
                     parent_sha256=parent_checkpoint_digest or "",
                     device=str(components.device),
+                    policy_digest=_digest({"policy": policy_digest, "stage": stage_index, "stage_spec": stage.__dict__}),
                 )
-            ).run(stage_method, training_batches, max_steps=stage_budgets[stage_index])
+            )
+            resume_config_digest = trainer.config.digest
+            resume_from = stage_checkpoint if stage_checkpoint.is_file() else None
+            if resume_from is not None:
+                resumed_from_step += int(torch.load(resume_from, map_location="cpu", weights_only=True)["loop_state"]["global_step"])
+            result = trainer.run(
+                stage_method,
+                training_batches,
+                max_steps=stage_budgets[stage_index],
+                resume_from=resume_from,
+                checkpoint_path=stage_checkpoint,
+                checkpoint_every_steps=checkpoint_every_steps,
+            )
+            trainer.save_checkpoint(stage_method, result.loop_state, stage_checkpoint)
             stage_path = output / ("student-stage-%02d.safetensors" % (stage_index + 1))
             stage_path.parent.mkdir(parents=True, exist_ok=True)
             stage_digest = save_wan_checkpoint(
@@ -530,10 +601,63 @@ def run(
                     "teacher_kind": "h3_rgb_boundary_endpoint",
                 }
             )
+        if stages:
+            checkpoint_evidence_path = _stage_checkpoint_path(training_checkpoint, len(stages) - 1)
     else:
-        raise WanStudentError(
-            "capability_unavailable",
-            "Wan DMD2 dispatch is reserved for an admitted critic-memory run; no fallback algorithm is allowed",
+        try:
+            critic = copy.deepcopy(components.transformer)
+        except (RuntimeError, MemoryError) as exc:
+            raise WanStudentError("capability_unavailable", "Wan DMD2 critic allocation failed: %s" % exc) from exc
+        dmd2_method = DMD2(
+            components.transformer,
+            endpoint_teacher,
+            critic,
+            adapter,
+            DMD2Config(
+                student_learning_rate=policy.learning_rate,
+                critic_learning_rate=policy.critic_learning_rate,
+                data_mode="real_latent",
+                regression_weight=policy.clean_anchor_weight,
+                trainable_scope=policy.trainable_scope,
+                video_weight=1.0,
+                audio_weight=0.0,
+                generator_update_interval=2,
+            ),
+        )
+        trainer = TrainerEngine(
+            TrainerConfig(
+                seed=20261008,
+                parent_sha256=parent_checkpoint_digest or "",
+                device=str(components.device),
+                policy_digest=policy_digest,
+            )
+        )
+        resume_config_digest = trainer.config.digest
+        resume_from = training_checkpoint if training_checkpoint.is_file() else None
+        if resume_from is not None:
+            resumed_from_step = int(torch.load(resume_from, map_location="cpu", weights_only=True)["loop_state"]["global_step"])
+        result = trainer.run(
+            dmd2_method,
+            training_batches,
+            max_steps=steps,
+            resume_from=resume_from,
+            checkpoint_path=training_checkpoint,
+            checkpoint_every_steps=checkpoint_every_steps,
+        )
+        trainer.save_checkpoint(dmd2_method, result.loop_state, training_checkpoint)
+        total_optimizer_steps = sum(int(value) for value in result.optimizer_steps.values())
+        initial_loss = result.initial_loss
+        final_loss = result.final_loss
+        maximum_gradient_norm = result.max_gradient_norm
+        stage_lineage.append(
+            {
+                "algorithm": "dmd2",
+                "critic_parameter_count": sum(int(parameter.numel()) for parameter in critic.parameters()),
+                "critic_updates": dmd2_method.critic_updates,
+                "student_updates": dmd2_method.student_updates,
+                "ema_updates": dmd2_method.ema.num_updates,
+                "sampler_samples_drawn": dmd2_method.sampler.samples_drawn,
+            }
         )
     final_probe = next(components.transformer.parameters()).detach().float()
     changed = not torch.equal(initial_probe.cpu(), final_probe.cpu())
@@ -578,6 +702,14 @@ def run(
             "loss_reduction": "fp32",
             "initialization_mode": initialization_mode,
             "stage_lineage": json.dumps(stage_lineage, sort_keys=True),
+            "training_checkpoint": str(training_checkpoint),
+            "training_checkpoint_evidence": str(checkpoint_evidence_path),
+            "checkpoint_every_steps": checkpoint_every_steps,
+            "policy_digest": policy_digest,
+            "resumed_from_step": resumed_from_step,
+            "resume_config_digest": resume_config_digest or "",
+            "dmd2_memory_admitted": dmd2_memory_admitted,
+            "wan_dmd2_adapter_ready": wan_dmd2_adapter_ready,
         },
     )
     result = {
@@ -630,6 +762,15 @@ def run(
         ),
         "training_cache_items": [str(path) for path in cache_paths],
         "wall_time_s": float(time.perf_counter() - started),
+        "training_checkpoint": str(training_checkpoint),
+        "training_checkpoint_evidence": str(checkpoint_evidence_path),
+        "training_checkpoint_sha256": sha256_path(checkpoint_evidence_path),
+        "checkpoint_every_steps": checkpoint_every_steps,
+        "policy_digest": policy_digest,
+        "resumed_from_step": resumed_from_step,
+        "resume_config_digest": resume_config_digest or "",
+        "dmd2_memory_admitted": dmd2_memory_admitted,
+        "wan_dmd2_adapter_ready": wan_dmd2_adapter_ready,
     }
     _write(result_path, result)
     return result
@@ -656,6 +797,10 @@ def main(argv=None) -> int:
     parser.add_argument("--clean-anchor-weight", type=float, default=None)
     parser.add_argument("--fp32-optimizer-state", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--initialization-mode", default=None)
+    parser.add_argument("--training-checkpoint", type=Path, default=None)
+    parser.add_argument("--checkpoint-every-steps", type=int, default=None)
+    parser.add_argument("--dmd2-memory-admitted", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--wan-dmd2-adapter-ready", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -684,6 +829,10 @@ def main(argv=None) -> int:
             clean_anchor_weight_override=args.clean_anchor_weight,
             fp32_optimizer_state_override=args.fp32_optimizer_state,
             initialization_mode_override=args.initialization_mode,
+            training_checkpoint_override=args.training_checkpoint,
+            checkpoint_every_steps_override=args.checkpoint_every_steps,
+            dmd2_memory_admitted_override=args.dmd2_memory_admitted,
+            wan_dmd2_adapter_ready_override=args.wan_dmd2_adapter_ready,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0

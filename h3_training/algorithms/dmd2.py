@@ -29,6 +29,7 @@ class DMD2Config:
     adversarial_weight: float = 0.0
     data_mode: str = "text_only"
     sampler_seed: int = 1234
+    trainable_scope: str = "all"
 
     def __post_init__(self) -> None:
         if self.student_learning_rate <= 0 or self.critic_learning_rate <= 0:
@@ -39,6 +40,8 @@ class DMD2Config:
             raise ValueError("EMA decay must be in [0, 1)")
         if self.data_mode not in {"text_only", "real_latent"}:
             raise ValueError("DMD2 data_mode must be text_only or real_latent")
+        if not str(self.trainable_scope).strip():
+            raise ValueError("DMD2 trainable_scope must not be empty")
         if min(self.video_weight, self.audio_weight, self.regression_weight, self.adversarial_weight) < 0:
             raise ValueError("DMD2 loss weights must be non-negative")
 
@@ -141,12 +144,19 @@ class DMD2(TrainingMethod):
         all_names = frozenset(name for name, _ in self.student_model.named_parameters())
         if not all_names:
             raise TrainingFailure("no_trainable_parameters", "DMD2 student has no parameters")
-        self.trainable_parameter_names = all_names
-        self.frozen_parameter_names = frozenset()
-        for parameter in self.student_model.parameters():
-            parameter.requires_grad_(True)
+        selected = frozenset(self.adapter.resolve_trainable_parameters(self.student, self.config.trainable_scope))
+        if not selected or not selected.issubset(all_names):
+            raise TrainingFailure("no_trainable_parameters", self.config.trainable_scope)
+        self.trainable_parameter_names = selected
+        self.frozen_parameter_names = all_names - selected
+        for name, parameter in self.student_model.named_parameters():
+            parameter.requires_grad_(name in selected)
+        critic_names = frozenset(self.adapter.resolve_trainable_parameters(self.critic, self.config.trainable_scope))
+        for name, parameter in self.critic_model.named_parameters():
+            parameter.requires_grad_(name in critic_names)
         for parameter in self.critic_model.parameters():
-            parameter.requires_grad_(True)
+            if not parameter.requires_grad:
+                parameter.grad = None
         self.teacher_model.eval()
         for parameter in self.teacher_model.parameters():
             parameter.requires_grad_(False)
@@ -167,9 +177,15 @@ class DMD2(TrainingMethod):
     def _mse(actual: ModalLatents, expected: ModalLatents, video_weight: float, audio_weight: float):
         terms = []
         if actual.video is not None:
-            terms.append(video_weight * torch.mean((actual.video - expected.video) ** 2))
+            terms.append(
+                video_weight
+                * torch.mean((actual.video.float() - expected.video.float()) ** 2)
+            )
         if actual.audio is not None:
-            terms.append(audio_weight * torch.mean((actual.audio - expected.audio) ** 2))
+            terms.append(
+                audio_weight
+                * torch.mean((actual.audio.float() - expected.audio.float()) ** 2)
+            )
         return sum(terms)
 
     @staticmethod
@@ -198,9 +214,18 @@ class DMD2(TrainingMethod):
                 raise TrainingFailure("invalid_training_config", "DMD2 requires a latent shape or initial noise")
             source = self.sampler.noise_like(batch.latents)
         sample = source.video if source.video is not None else source.audio
+        # The production Student adapter follows H3 (sigma=1 is noise),
+        # while the legacy TinyH3 adapter keeps its own endpoint convention.
+        # Let the adapter own that boundary instead of hard-coding one global
+        # interpretation into this shared algorithm.
+        start_timestep = float(getattr(self.adapter, "generation_start_timestep", 0.0))
         timesteps = ModalTimesteps(
-            video=source.video.new_zeros(source.video.shape[0]) if source.video is not None else None,
-            audio=source.audio.new_zeros(source.audio.shape[0]) if source.audio is not None else None,
+            video=source.video.new_full((source.video.shape[0],), start_timestep)
+            if source.video is not None
+            else None,
+            audio=source.audio.new_full((source.audio.shape[0],), start_timestep)
+            if source.audio is not None
+            else None,
         )
         context = torch.enable_grad() if with_grad else torch.no_grad()
         with context:

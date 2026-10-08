@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from harness4h3.student.wan_campaign import sha256_file
+from harness4h3.memory.experience import ExperienceStore
 from tools import wan_vllm_campaign
 
 
@@ -113,6 +114,9 @@ def test_v2_policy_reaches_shared_algorithm_and_persists_campaign_state(tmp_path
     def fake_training(config, proposal, parent_path, round_dir):
         child.parent.mkdir(parents=True, exist_ok=True)
         child.write_bytes(b"child")
+        checkpoint = round_dir / "training" / "training-checkpoint-stage-00.pt"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(b"checkpoint")
         return {
             "status": "success",
             "offline_simulation": False,
@@ -121,6 +125,9 @@ def test_v2_policy_reaches_shared_algorithm_and_persists_campaign_state(tmp_path
             "parent_checkpoint_sha256": sha256_file(parent_path),
             "teacher_checkpoint_sha256": "b" * 64,
             "algorithm_path": "h3_training.algorithms.progressive_distillation.ProgressiveDistillation",
+            "training_checkpoint_evidence": str(checkpoint),
+            "training_checkpoint_sha256": sha256_file(checkpoint),
+            "resume_config_digest": "c" * 64,
         }
 
     monkeypatch.setattr(wan_vllm_campaign, "run_training", fake_training)
@@ -130,5 +137,9 @@ def test_v2_policy_reaches_shared_algorithm_and_persists_campaign_state(tmp_path
     assert (output_root / "campaign-base.json").is_file()
     assert (output_root / "campaign-state.json").is_file()
     assert (output_root / "fingerprints.jsonl").is_file()
+    experiences = list(ExperienceStore(output_root / "experiences.jsonl").read())
+    assert len(experiences) == 1
+    assert experiences[0].status == "accepted"
+    assert experiences[0].operator == "progressive_distillation"
     state = json.loads((output_root / "campaign-state.json").read_text(encoding="utf-8"))
     assert state["parent_checkpoint_sha256"] == sha256_file(child)

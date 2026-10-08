@@ -533,9 +533,12 @@ def load_complete_rounds(root: Path) -> tuple[list[dict[str, Any]], list[int]]:
             if any(path.exists() for path in paths.values()):
                 incomplete.append(round_index)
             continue
+        fingerprint_path = round_dir / "fingerprint.json"
+        fingerprint = _json_file(fingerprint_path).get("fingerprint") if fingerprint_path.is_file() else None
         complete.append(
             {
                 "round": round_index,
+                "fingerprint": fingerprint,
                 "proposal": _json_file(paths["proposal.json"]),
                 "training": _json_file(paths["training-result.json"]),
                 "evaluation": _json_file(paths["evaluation-result.json"]),

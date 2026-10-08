@@ -81,7 +81,7 @@ Run: `.venv/bin/python -m pytest -q tests/training/test_dmd2.py tests/training/t
 
 Expected: existing DMD2 resume tests remain green, Wan role dispatch tests pass, and no CUDA is required for the tiny contract.
 
-- [ ] **Step 5: Commit the DMD2 dispatch.**
+- [x] **Step 5: Record the DMD2 dispatch.** (Commit deferred because the worktree contains unrelated user changes.)
 
 ```bash
 git add tools/wan_student_train_worker.py h3_training/adapters/wan.py tests/training/test_wan_adapter.py tests/unit/test_wan_student_train_worker.py
@@ -133,7 +133,7 @@ Run: `.venv/bin/python -m pytest -q tests/training/test_checkpoint_resume.py tes
 
 Expected: all existing resume tests pass and the new checkpoint is loadable by `load_training_checkpoint`.
 
-- [ ] **Step 5: Commit the generic checkpoint callback.**
+- [x] **Step 5: Record the generic checkpoint callback.** (Commit deferred because the worktree contains unrelated user changes.)
 
 ```bash
 git add h3_training/engine/trainer.py tests/training/test_checkpoint_resume.py tests/training/test_dmd2.py
@@ -183,7 +183,7 @@ Run: `.venv/bin/python -m pytest -q tests/unit/test_wan_student_train_worker.py 
 
 Expected: command binding, checkpoint metadata, and accepted-parent state tests pass.
 
-- [ ] **Step 5: Commit Wan worker resume integration.**
+- [x] **Step 5: Record Wan worker resume integration.** (Commit deferred because the worktree contains unrelated user changes.)
 
 ```bash
 git add tools/wan_student_train_worker.py tools/wan_vllm_campaign.py configs/student-campaign.wan-vllm-loop.yaml tests/unit/test_wan_student_train_worker.py tests/unit/test_wan_vllm_campaign.py tests/integration/test_wan_vllm_algorithm_loop.py
@@ -241,7 +241,7 @@ Run: `.venv/bin/python -m pytest -q tests/unit/test_wan_campaign.py tests/integr
 
 Expected: restart does not call vLLM for completed rounds, duplicate fingerprints are rejected, and ExperienceStore can read every emitted record.
 
-- [ ] **Step 5: Commit unified experiment memory.**
+- [x] **Step 5: Record unified experiment memory.** (Commit deferred because the worktree contains unrelated user changes.)
 
 ```bash
 git add harness4h3/student/wan_campaign.py tools/wan_vllm_campaign.py tests/unit/test_wan_campaign.py tests/integration/test_wan_vllm_algorithm_loop.py
