@@ -10,7 +10,7 @@ wan_loop:
   output_root: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w7
   worker_python: /home/intern/miniconda3/envs/comfy/bin/python
   training_entrypoint: /home/intern/huangjiahao/Harness4H3-long-video-30s/tools/wan_student_train_worker.py
-  vllm_base_url: http://127.0.0.1:8000/v1
+  vllm_base_url: http://127.0.0.1:8001/v1
   vllm_model: qwen3.5-controller
   proposal_schema_version: 2
   algorithm_capabilities:
