@@ -129,3 +129,33 @@ On startup, the supervisor loads complete round artifacts and state, marks an in
 - The existing Progressive Distillation path is executable through `WanTrainingAdapter`, including binary stages, velocity/clean-anchor losses, rollout policy, initialization mode, trainable scope, and lineage metadata.
 - DMD2 remains fail-closed for Wan until both a Wan critic adapter evidence flag and explicit critic-memory admission are present; no fallback to the legacy direct-loss loop is allowed for v2 proposals.
 - The local contract suite passes with `53 passed, 1 skipped`; the skipped DMD2 test requires CUDA. A real four-GPU H3/ Wan smoke and semantic 30-second evidence remain deployment checks, not claims made by this implementation.
+
+## DMD2 and step-level training memory extension
+
+The next implementation increment reuses the existing DMD2 and TrainerEngine
+contracts rather than introducing Wan-specific copies:
+
+- `DMD2` remains the only DMD2 implementation. The Wan adapter supplies a
+  Wan Student role, a critic role created from the same trusted Wan checkpoint,
+  and the H3 RGB-boundary endpoint Teacher role.
+- DMD2 is executable only when both `wan_dmd2_adapter_ready=true` and
+  `dmd2_memory_admitted=true` are present in the trusted campaign config. The
+  vLLM proposal cannot enable either flag.
+- The existing `TrainerEngine.save_checkpoint()` and
+  `load_training_checkpoint()` own step-level recovery. Wan worker execution
+  will checkpoint only at optimizer boundaries and will restore Student,
+  Critic, both optimizers, EMA, sampler RNG, CPU/CUDA RNG, loop state, parent
+  digest, and algorithm/config digests.
+- The existing `harness4h3.memory.fingerprint.experiment_fingerprint` is the
+  canonical policy identity. Wan campaign state remains the scheduler state,
+  while `harness4h3.memory.experience.ExperienceStore` receives one append-only
+  evidence record for each completed, rejected, or failed round.
+- A failed or interrupted DMD2 round is never promoted. A restart may resume
+  the last valid training checkpoint only when all parent, algorithm, policy,
+  capability, and evaluator digests match; otherwise it starts a new campaign
+  root.
+
+The extension is complete only when CPU/tiny DMD2 resume tests, Wan adapter
+critic tests, worker checkpoint recovery tests, campaign restart tests, and a
+real GPU memory-gated Wan smoke all pass. No semantic 30-second improvement is
+claimed from contract tests alone.
