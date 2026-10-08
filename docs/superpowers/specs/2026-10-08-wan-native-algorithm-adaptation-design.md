@@ -122,3 +122,10 @@ On startup, the supervisor loads complete round artifacts and state, marks an in
 - worker tests proving Progressive/DMD2 dispatch reaches the shared algorithms and writes stage lineage;
 - resume tests covering complete rounds, partial rounds, duplicate fingerprints, changed base digest, and accepted-parent promotion;
 - integration smoke with one real vLLM proposal and one real Wan/H3 round before increasing the budget.
+
+## Implementation status
+
+- Proposal schema v2, bounded capability validation, campaign fingerprinting, append-only state, and restart recovery are implemented.
+- The existing Progressive Distillation path is executable through `WanTrainingAdapter`, including binary stages, velocity/clean-anchor losses, rollout policy, initialization mode, trainable scope, and lineage metadata.
+- DMD2 remains fail-closed for Wan until both a Wan critic adapter evidence flag and explicit critic-memory admission are present; no fallback to the legacy direct-loss loop is allowed for v2 proposals.
+- The local contract suite passes with `53 passed, 1 skipped`; the skipped DMD2 test requires CUDA. A real four-GPU H3/ Wan smoke and semantic 30-second evidence remain deployment checks, not claims made by this implementation.
