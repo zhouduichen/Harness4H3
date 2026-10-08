@@ -100,7 +100,9 @@ if [ "$CAMPAIGN_KIND" = "wan_vllm" ]; then
         elif [ -n "$pid" ]; then
             state="stale_pid_file"
         fi
-        child=$(tr -d '[:space:]' < "$WAN_CHILD_PID_FILE" 2>/dev/null || true)
+        if [ -f "$WAN_CHILD_PID_FILE" ]; then
+            child=$(tr -d '[:space:]' < "$WAN_CHILD_PID_FILE" 2>/dev/null || true)
+        fi
         printf 'campaign=%s kind=wan_vllm watchdog_pid=%s child_pid=%s state=%s\n' \
             "$WAN_OUTPUT" "${pid:-none}" "${child:-none}" "$state"
         if [ -f "$WAN_OUTPUT/campaign-result.json" ]; then
