@@ -33,6 +33,7 @@ from harness4h3.student.wan_campaign import (
     sha256_file,
     write_campaign_state,
 )
+from harness4h3.student.wan_training import sha256_path
 from harness4h3.student.gpu import acquire_controller_handoff, release_controller_handoff
 from harness4h3.memory.experience import ExperienceRecord, ExperienceStore
 from harness4h3.memory.fingerprint import experiment_fingerprint
@@ -796,7 +797,7 @@ def _campaign_identity(config: Mapping[str, Any], capabilities: Mapping[str, Any
         "wan_config_digest": sha256_file(Path(str(config["wan_config"]))),
         "training_entrypoint_digest": sha256_file(Path(str(config["training_entrypoint"]))),
         "evaluation_manifest_digest": sha256_file(Path(str(config["evaluation_manifest"]))),
-        "clip_model_digest": sha256_file(Path(str(config["clip_model_path"]))),
+        "clip_model_digest": sha256_path(Path(str(config["clip_model_path"]))),
         "teacher_baseline_digest": sha256_file(Path(str(config["teacher_baseline_result"]))),
         "parent_checkpoint_digest": sha256_file(Path(str(config["parent_checkpoint"]))),
     }
