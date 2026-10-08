@@ -75,7 +75,11 @@ if [ "$CAMPAIGN_KIND" = "wan_vllm" ]; then
     wan_pid_matches() {
         local pid="$1" command
         command=$(ps -p "$pid" -o args= 2>/dev/null || true)
-        [[ "$command" == *"$WAN_WATCHDOG"* && "$command" == *"$WAN_CONFIG"* ]]
+        # The config is passed through the watchdog environment, so it does
+        # not appear in the watchdog's argv.  The exact trusted script path
+        # is the ownership check; the child check below validates script and
+        # config together before it is signalled.
+        [[ "$command" == *"$WAN_WATCHDOG"* ]]
     }
 
     wan_live() {
