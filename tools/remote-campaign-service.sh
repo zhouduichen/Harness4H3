@@ -91,7 +91,9 @@ if [ "$CAMPAIGN_KIND" = "wan_vllm" ]; then
     wan_status() {
         local pid="" child="" state="missing"
         pid=$(wan_read_pid || true)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && wan_pid_matches "$pid"; then
+        if [ -f "$WAN_OUTPUT/campaign-result.json" ]; then
+            state="completed"
+        elif [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && wan_pid_matches "$pid"; then
             state="running"
         elif [ -f "$WAN_PAUSE_FILE" ]; then
             state="paused"
@@ -113,6 +115,11 @@ if [ "$CAMPAIGN_KIND" = "wan_vllm" ]; then
         if [ -f "$WAN_PAUSE_FILE" ]; then
             echo "Wan campaign automation is operator-paused: $WAN_PAUSE_FILE" >&2
             return 3
+        fi
+        if [ -f "$WAN_OUTPUT/campaign-result.json" ]; then
+            echo "Wan campaign already has a durable final result: $WAN_OUTPUT/campaign-result.json" >&2
+            echo "start a new campaign root to preserve experiment lineage" >&2
+            return 4
         fi
         if wan_live; then
             echo "Wan campaign watchdog already running pid=$(wan_read_pid)"

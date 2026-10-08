@@ -49,3 +49,5 @@ def test_campaign_service_wan_stop_checks_watchdog_command_before_signaling():
     assert 'refusing to stop PID $pid: command is not the configured Wan watchdog' in source
     assert 'kill -TERM -- "$pid"' in source
     assert '[[ "$command" == *"$WAN_WATCHDOG"* ]]' in source
+    assert 'Wan campaign already has a durable final result' in source
+    assert 'state="completed"' in source
