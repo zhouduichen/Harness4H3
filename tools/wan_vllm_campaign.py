@@ -186,6 +186,21 @@ def _controller_is_ready(config: Mapping[str, Any]) -> bool:
         return False
 
 
+def _controller_launcher_exists(launcher: str) -> bool:
+    try:
+        probe = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True, check=False, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    script_name = Path(launcher).name
+    for line in probe.stdout.splitlines():
+        fields = line.strip().split(None, 1)
+        if len(fields) != 2 or fields[0] == str(os.getpid()):
+            continue
+        if script_name in fields[1] and "controller-wait-launch" in fields[1]:
+            return True
+    return False
+
+
 def ensure_controller(config: Mapping[str, Any]) -> None:
     """Start or wait for the server-local controller without stealing worker GPUs."""
 
@@ -203,6 +218,8 @@ def ensure_controller(config: Mapping[str, Any]) -> None:
             live = True
         except (OSError, TypeError, ValueError):
             live = False
+    if not live:
+        live = _controller_launcher_exists(launcher)
     if not live:
         pid_file.parent.mkdir(parents=True, exist_ok=True)
         log_path = Path(str(config["controller_launcher_log"]))

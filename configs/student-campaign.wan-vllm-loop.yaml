@@ -15,9 +15,9 @@ wan_loop:
   controller_launcher: /home/intern/huangjiahao/Harness4H3-long-video-30s/tools/controller-wait-launch.sh
   controller_launcher_pid_file: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w6/controller-launcher.pid
   controller_launcher_log: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w6/controller-launcher.log
-  controller_hold_file: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w6/.controller-handoff-hold.json
-  controller_release_file: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w6/.controller-release.json
-  controller_worker_lease_file: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w6/.worker-gpu-lease.json
+  controller_hold_file: /data/models/harness4h3-v27-code/evidence/student-campaign/.controller-handoff-hold.json
+  controller_release_file: /data/models/harness4h3-v27-code/evidence/student-campaign/.controller-release.json
+  controller_worker_lease_file: /data/models/harness4h3-v27-code/evidence/student-campaign/.h3-worker-gpu-lease.json
   device: cuda:3
   max_rounds: 2
   max_cases: 4
