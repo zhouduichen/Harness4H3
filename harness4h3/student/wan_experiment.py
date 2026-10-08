@@ -205,8 +205,95 @@ class RemoteWanExperiment:
         return dict(raw)
 
 
+@dataclass(frozen=True)
+class WanTrainingExperimentConfig:
+    """Isolated remote command boundary for the real Wan 5-second worker."""
+
+    training_config: str
+    worker_entrypoint: str
+    remote_output_root: str
+    remote_result: str
+    remote: RemoteConfig
+    steps: int = 1
+
+    def __post_init__(self) -> None:
+        if int(self.steps) <= 0:
+            raise WanExperimentConfigError("steps must be positive")
+        for name in ("training_config", "worker_entrypoint", "remote_output_root", "remote_result"):
+            value = str(getattr(self, name))
+            if not PurePosixPath(value).is_absolute():
+                raise WanExperimentConfigError("%s must be absolute" % name)
+        if not self.remote._under_root(self.training_config, self.remote.harness_root):
+            raise WanExperimentConfigError("training_config must be under remote.harness_root")
+        if not self.remote._under_root(self.worker_entrypoint, self.remote.harness_root):
+            raise WanExperimentConfigError("worker_entrypoint must be under remote.harness_root")
+        if not self.remote._under_root(self.remote_output_root, self.remote.harness_root):
+            raise WanExperimentConfigError("remote_output_root must be under remote.harness_root")
+        if not self.remote._under_root(self.remote_result, self.remote_output_root):
+            raise WanExperimentConfigError("remote_result must be under remote_output_root")
+
+    @classmethod
+    def from_path(cls, path: Path) -> "WanTrainingExperimentConfig":
+        config_path = Path(path).resolve()
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            raise WanExperimentConfigError("unable to read Wan training config: %s" % exc) from exc
+        if not isinstance(raw, Mapping):
+            raise WanExperimentConfigError("Wan training config must be a mapping")
+        training = raw.get("wan_training")
+        remote_raw = raw.get("remote")
+        if not isinstance(training, Mapping) or not isinstance(remote_raw, Mapping):
+            raise WanExperimentConfigError("config requires wan_training and remote mappings")
+        remote = _remote(remote_raw)
+        remote_config = str(PurePosixPath(remote.harness_root) / "configs" / config_path.name)
+        worker = str(PurePosixPath(remote.harness_root) / "tools" / "wan_student_train_worker.py")
+        output = training.get("remote_output_root", remote_raw.get("output_root"))
+        result = training.get("remote_result", remote_raw.get("result_path"))
+        if not isinstance(output, str) or not isinstance(result, str):
+            raise WanExperimentConfigError("remote output_root and result_path are required")
+        return cls(
+            training_config=remote_config,
+            worker_entrypoint=worker,
+            remote_output_root=output,
+            remote_result=result,
+            remote=remote,
+            steps=int(training.get("train_steps", 1)),
+        )
+
+
+class RemoteWanTrainingExperiment:
+    """Start the fixed real Wan 5-second worker on the configured host."""
+
+    def __init__(self, config: WanTrainingExperimentConfig, client: SSHClient):
+        self.config = config
+        self.client = client
+
+    def run(self) -> Mapping[str, Any]:
+        self.client.remove_file(self.config.remote_result)
+        command = (
+            self.config.remote.python,
+            self.config.worker_entrypoint,
+            "--config",
+            self.config.training_config,
+            "--output",
+            self.config.remote_output_root,
+            "--result",
+            self.config.remote_result,
+            "--steps",
+            str(self.config.steps),
+        )
+        self.client.run(command, timeout_s=86400.0, check=False)
+        raw = self.client.read_json(self.config.remote_result)
+        if not isinstance(raw, Mapping):
+            raise WanExperimentConfigError("remote Wan training result must be a JSON object")
+        return dict(raw)
+
+
 __all__ = [
     "RemoteWanExperiment",
+    "RemoteWanTrainingExperiment",
     "WanExperimentConfigError",
     "WanRealExperimentConfig",
+    "WanTrainingExperimentConfig",
 ]

@@ -15,7 +15,13 @@ from .fidelity import FidelityGate, FidelityGateDecision, stage_spec
 from .worker import FidelitySpec, fidelity_spec
 from .target import TargetDeviceProfile
 from .wan import WanStudentError, WanStudentSpec, generate_wan_clip, load_pretrained_wan, load_wan_spec
-from .wan_experiment import RemoteWanExperiment, WanExperimentConfigError, WanRealExperimentConfig
+from .wan_experiment import (
+    RemoteWanExperiment,
+    RemoteWanTrainingExperiment,
+    WanExperimentConfigError,
+    WanRealExperimentConfig,
+    WanTrainingExperimentConfig,
+)
 
 __all__ = [
     "ArchitectureSpec",
@@ -41,6 +47,8 @@ __all__ = [
     "load_pretrained_wan",
     "load_wan_spec",
     "RemoteWanExperiment",
+    "RemoteWanTrainingExperiment",
     "WanExperimentConfigError",
     "WanRealExperimentConfig",
+    "WanTrainingExperimentConfig",
 ]

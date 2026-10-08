@@ -65,7 +65,12 @@ from .student.remote import (
     RemoteStudentWorker,
     RemoteTargetDeviceEvaluator,
 )
-from .student.wan_experiment import RemoteWanExperiment, WanRealExperimentConfig
+from .student.wan_experiment import (
+    RemoteWanExperiment,
+    RemoteWanTrainingExperiment,
+    WanRealExperimentConfig,
+    WanTrainingExperimentConfig,
+)
 
 
 def _emit(value: Any, json_mode: bool) -> None:
@@ -649,6 +654,14 @@ def cmd_wan_student_run(args: argparse.Namespace) -> int:
     return 0 if result.get("status") == "success" else 1
 
 
+def cmd_wan_student_train(args: argparse.Namespace) -> int:
+    config = WanTrainingExperimentConfig.from_path(Path(args.config).resolve())
+    client = LocalCommandClient(config.remote) if args.local_resources else SSHClient(config.remote)
+    result = RemoteWanTrainingExperiment(config, client).run()
+    _emit(result, args.json)
+    return 0 if result.get("status") == "success" else 1
+
+
 def cmd_controller_status(args: argparse.Namespace) -> int:
     """Read or follow the append-only Controller lifecycle stream."""
     path = Path(args.output_root).resolve() / "controller-events.jsonl"
@@ -951,6 +964,13 @@ def build_parser() -> argparse.ArgumentParser:
     wan_run.add_argument("--local-resources", action="store_true", help="execute the trusted worker on this host")
     _json_flag(wan_run)
     wan_run.set_defaults(handler=cmd_wan_student_run)
+    wan_train = wan_student_subparsers.add_parser(
+        "train", help="start real Wan2.1-T2V-1.3B 5-second H3-distillation training"
+    )
+    wan_train.add_argument("--config", default="configs/student-campaign.wan-5s.yaml")
+    wan_train.add_argument("--local-resources", action="store_true", help="execute trusted worker commands on this host")
+    _json_flag(wan_train)
+    wan_train.set_defaults(handler=cmd_wan_student_train)
 
     controller_status = subparsers.add_parser("controller-status", help="show or follow the Controller event stream")
     controller_status.add_argument("--output-root", default="var/remote-h3")

@@ -21,7 +21,7 @@ wan_training:
   distill_loss_weight: 0.5
 
 remote:
-  host: Jiayu-intern
+  host: ai4mbse-remote
   ssh_port: 30902
   harness_root: /home/intern/huangjiahao/Harness4H3-long-video-30s
   model_root: /data/models
