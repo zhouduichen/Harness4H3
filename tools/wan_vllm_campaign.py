@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import os
 import subprocess
@@ -25,7 +26,11 @@ from harness4h3.student.wan_campaign import (
     append_event,
     atomic_write_json,
     candidate_decision,
+    load_campaign_state,
+    load_complete_rounds,
+    register_fingerprint,
     sha256_file,
+    write_campaign_state,
 )
 from harness4h3.student.gpu import acquire_controller_handoff, release_controller_handoff
 
@@ -209,6 +214,14 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         ("controller_hold_file", ""),
         ("controller_release_file", ""),
         ("controller_worker_lease_file", ""),
+        ("proposal_schema_version", 2),
+        ("algorithm_capabilities", ["progressive_distillation"]),
+        ("dmd2_memory_admitted", False),
+        ("fidelity_schedule", ["F1", "F2", "F3"]),
+        ("continuation_contract", "30s"),
+        ("state_path", ""),
+        ("fingerprint_path", ""),
+        ("offline_simulation", False),
     ):
         loop.setdefault(name, default)
     root = Path(str(loop["output_root"]))
@@ -222,6 +235,10 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         loop["controller_release_file"] = str(root / ".controller-release.json")
     if not loop["controller_worker_lease_file"]:
         loop["controller_worker_lease_file"] = str(root / ".worker-gpu-lease.json")
+    if not loop["state_path"]:
+        loop["state_path"] = str(root / "campaign-state.json")
+    if not loop["fingerprint_path"]:
+        loop["fingerprint_path"] = str(root / "fingerprints.jsonl")
     for name in (
         "controller_launcher",
         "controller_launcher_pid_file",
@@ -240,6 +257,17 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         raise ValueError("semantic_floor_ratio must be in (0, 1]")
     if not 0 < float(loop["quality_floor_ratio"]) <= 1:
         raise ValueError("quality_floor_ratio must be in (0, 1]")
+    if int(loop["proposal_schema_version"]) != 2:
+        raise ValueError("proposal_schema_version must be 2")
+    if bool(loop["offline_simulation"]):
+        raise ValueError("Wan vLLM loop requires offline_simulation=false")
+    capabilities = loop["algorithm_capabilities"]
+    if not isinstance(capabilities, list) or not capabilities or any(str(item) not in {"progressive_distillation", "dmd2"} for item in capabilities):
+        raise ValueError("algorithm_capabilities must list progressive_distillation and/or dmd2")
+    if not isinstance(loop["fidelity_schedule"], list) or not loop["fidelity_schedule"]:
+        raise ValueError("fidelity_schedule must be a non-empty list")
+    if any(str(item) not in {"F1", "F2", "F3"} for item in loop["fidelity_schedule"]):
+        raise ValueError("fidelity_schedule contains unsupported fidelity")
     return loop
 
 
@@ -375,6 +403,29 @@ def build_training_command(
         str(proposal.teacher_reuse_steps),
         "--learning-rate",
         str(proposal.learning_rate),
+        "--method",
+        str(proposal.training.method),
+        "--source-steps",
+        str(proposal.training.source_steps),
+        "--target-steps",
+        str(proposal.training.target_steps),
+        "--rollout-steps",
+        str(proposal.training.rollout_steps),
+        "--rollout-every",
+        str(proposal.training.rollout_every),
+        "--rollout-endpoint-weight",
+        str(proposal.training.rollout_endpoint_weight),
+        "--rollout-clean-weight",
+        str(proposal.training.rollout_clean_weight),
+        "--velocity-weight",
+        str(proposal.training.velocity_weight),
+        "--clean-anchor-weight",
+        str(proposal.training.clean_anchor_weight),
+        "--trainable-scope",
+        str(proposal.training.trainable_scope),
+        "--fp32-optimizer-state" if proposal.training.fp32_optimizer_state else "--no-fp32-optimizer-state",
+        "--initialization-mode",
+        str(proposal.initialization.mode),
         "--parent-checkpoint",
         str(parent_checkpoint),
     )
@@ -600,28 +651,162 @@ def _teacher_semantic(config: Mapping[str, Any]) -> float:
     return float(metrics["semantic"])
 
 
+def _canonical_digest(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _campaign_capabilities(config: Mapping[str, Any]) -> dict[str, Any]:
+    enabled = {str(item) for item in config.get("algorithm_capabilities", ("progressive_distillation",))}
+    return {
+        "capabilities": [
+            {
+                "name": "progressive_distillation",
+                "available": "progressive_distillation" in enabled,
+                "backend": "h3_training.algorithms.progressive_distillation.ProgressiveDistillation",
+                "constraints": {"binary_stages": True, "rollout_steps": [0, 2, 4]},
+                "evidence_level": "V4",
+                "reason": "Wan adapter boundary and shared algorithm are loaded",
+            },
+            {
+                "name": "dmd2",
+                "available": "dmd2" in enabled and bool(config.get("dmd2_memory_admitted", False)),
+                "backend": "h3_training.algorithms.dmd2.DMD2",
+                "constraints": {"critic_memory_admitted": bool(config.get("dmd2_memory_admitted", False))},
+                "evidence_level": "V4",
+                "reason": "Wan critic requires explicit trusted memory admission",
+            },
+        ],
+        "continuation": {
+            "contract": str(config.get("continuation_contract", "30s")),
+            "overlap_latent_frames": int(config.get("overlap_latent_frames", 7)),
+            "offline_simulation": False,
+        },
+    }
+
+
+def _campaign_identity(config: Mapping[str, Any], capabilities: Mapping[str, Any]) -> dict[str, Any]:
+    path_digests = {
+        "wan_config_digest": sha256_file(Path(str(config["wan_config"]))),
+        "training_entrypoint_digest": sha256_file(Path(str(config["training_entrypoint"]))),
+        "evaluation_manifest_digest": sha256_file(Path(str(config["evaluation_manifest"]))),
+        "clip_model_digest": sha256_file(Path(str(config["clip_model_path"]))),
+        "teacher_baseline_digest": sha256_file(Path(str(config["teacher_baseline_result"]))),
+        "parent_checkpoint_digest": sha256_file(Path(str(config["parent_checkpoint"]))),
+    }
+    code_files = [Path(__file__), Path(__file__).resolve().parents[1] / "harness4h3" / "student" / "wan_campaign.py"]
+    code_files.append(Path(__file__).resolve().parents[1] / "h3_training" / "adapters" / "wan.py")
+    path_digests["code_digest"] = _canonical_digest({str(path): sha256_file(path) for path in code_files})
+    identity = {
+        "schema_version": int(config.get("proposal_schema_version", 2)),
+        "student_family": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        "teacher_identity": "real_h3_teacher",
+        "evaluator_contract": "30s-overlap-window-clip-temporal-v1",
+        "path_digests": path_digests,
+        "capability_snapshot": dict(capabilities),
+        "fidelity_schedule": list(config.get("fidelity_schedule", ["F1", "F2", "F3"])),
+        "offline_simulation": False,
+    }
+    identity["base_digest"] = _canonical_digest(identity)
+    return identity
+
+
+def _load_or_create_campaign_base(root: Path, identity: Mapping[str, Any]) -> dict[str, Any]:
+    path = Path(root) / "campaign-base.json"
+    if path.is_file():
+        stored = _read_json(path)
+        if stored.get("base_digest") != identity.get("base_digest"):
+            raise ValueError("campaign verification base changed; start a new campaign root")
+        return stored
+    value = dict(identity)
+    atomic_write_json(path, value)
+    return value
+
+
 def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) -> dict[str, Any]:
     root = Path(str(config["output_root"])).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    parent = Path(str(config["parent_checkpoint"])).resolve()
+    capabilities = _campaign_capabilities(config)
+    identity = _campaign_identity(config, capabilities)
+    _load_or_create_campaign_base(root, identity)
+    state = load_campaign_state(root)
+    if state.get("base_digest") and state["base_digest"] != identity["base_digest"]:
+        raise ValueError("campaign state belongs to a different campaign base")
+    state["base_digest"] = identity["base_digest"]
+    events_path = root / "events.jsonl"
+    complete_rounds, incomplete_rounds = load_complete_rounds(root)
+    failed_rounds = {int(value) for value in state.get("failed_rounds", [])}
+    for round_index in incomplete_rounds:
+        if round_index in failed_rounds:
+            continue
+        round_dir = root / ("round-%04d" % round_index)
+        decision = {"accepted": False, "reason": "incomplete_round"}
+        atomic_write_json(round_dir / "decision.json", decision)
+        failed_rounds.add(round_index)
+        append_event(events_path, {"event": "round.incomplete", "round": round_index, "decision": decision})
+    state["failed_rounds"] = sorted(failed_rounds)
+
+    parent = Path(str(state.get("parent_checkpoint") or config["parent_checkpoint"])).resolve()
     if not parent.is_file():
         raise FileNotFoundError("parent checkpoint does not exist: %s" % parent)
     parent_digest = sha256_file(parent)
+    stored_parent_digest = state.get("parent_checkpoint_sha256")
+    if stored_parent_digest and str(stored_parent_digest) != parent_digest:
+        raise ValueError("campaign state parent checkpoint digest does not match the file")
     teacher_semantic = _teacher_semantic(config)
     campaign_result_path = root / "campaign-result.json"
-    events_path = root / "events.jsonl"
-    acquire_controller_handoff(*_controller_handoff(config))
-    try:
-        wait_for_gpu_quiet(config)
-        parent_eval = evaluate_checkpoint(config, parent, root / "parent-evaluation")
-    finally:
-        release_controller_handoff(*_controller_handoff(config))
-    atomic_write_json(root / "parent-evaluation.json", parent_eval)
-    append_event(events_path, {"event": "parent.evaluated", "parent": str(parent), "parent_sha256": parent_digest, "evaluation": parent_eval})
+    parent_eval = state.get("parent_evaluation")
+    if not isinstance(parent_eval, Mapping):
+        cached_parent_eval = root / "parent-evaluation.json"
+        parent_eval = _read_json(cached_parent_eval) if cached_parent_eval.is_file() else None
+    if not isinstance(parent_eval, Mapping):
+        acquire_controller_handoff(*_controller_handoff(config))
+        try:
+            wait_for_gpu_quiet(config)
+            parent_eval = evaluate_checkpoint(config, parent, root / "parent-evaluation")
+        finally:
+            release_controller_handoff(*_controller_handoff(config))
+        atomic_write_json(root / "parent-evaluation.json", parent_eval)
+        append_event(events_path, {"event": "parent.evaluated", "parent": str(parent), "parent_sha256": parent_digest, "evaluation": parent_eval})
+    parent_eval = dict(parent_eval)
     rounds: list[dict[str, Any]] = []
+    for record in complete_rounds:
+        rounds.append(
+            {
+                "round": int(record["round"]),
+                "proposal": record["proposal"],
+                "training": record["training"],
+                "evaluation": record["evaluation"],
+                "decision": record["decision"],
+            }
+        )
     no_improvement = 0
     round_limit = int(max_rounds if max_rounds is not None else config["max_rounds"])
-    for round_index in range(1, round_limit + 1):
+    start_round = max(
+        int(state.get("next_round", 1)),
+        max((int(item["round"]) for item in complete_rounds), default=0) + 1,
+        max(incomplete_rounds, default=0) + 1,
+    )
+    manifest_digest = str(identity["path_digests"]["evaluation_manifest_digest"])
+    capability_digest = _canonical_digest(capabilities)
+    evaluator_digest = _canonical_digest(
+        {
+            "manifest_digest": manifest_digest,
+            "clip_model_digest": identity["path_digests"]["clip_model_digest"],
+            "contract": "30s-overlap-window-clip-temporal-v1",
+        }
+    )
+    code_digest = str(identity["path_digests"]["code_digest"])
+    state.update(
+        {
+            "parent_checkpoint": str(parent),
+            "parent_checkpoint_sha256": parent_digest,
+            "parent_evaluation": parent_eval,
+            "last_complete_round": max((int(item["round"]) for item in complete_rounds), default=0),
+            "next_round": start_round,
+        }
+    )
+    write_campaign_state(root, state)
+    for round_index in range(start_round, round_limit + 1):
         round_dir = root / ("round-%04d" % round_index)
         round_dir.mkdir(parents=True, exist_ok=True)
         context = {
@@ -632,6 +817,8 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
             "teacher_semantic": teacher_semantic,
             "semantic_floor": teacher_semantic * float(config["semantic_floor_ratio"]),
             "prior_rounds": rounds,
+            "capability_snapshot": capabilities,
+            "failed_rounds": sorted(failed_rounds),
             "trusted_constraints": {
                 "offline_simulation": False,
                 "frames": "708-732",
@@ -642,9 +829,39 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
         }
         ensure_controller(config)
         raw_proposal = _request_vllm(config, context)
-        proposal = WanTrainingProposal.from_mapping(raw_proposal, expected_parent_sha256=parent_digest)
+        proposal = WanTrainingProposal.from_mapping(
+            raw_proposal,
+            expected_parent_sha256=parent_digest,
+            capabilities=capabilities,
+        )
+        fingerprint = proposal.fingerprint(
+            manifest_digest=manifest_digest,
+            capability_digest=capability_digest,
+            evaluator_digest=evaluator_digest,
+            code_digest=code_digest,
+        )
+        duplicate = register_fingerprint(
+            root,
+            fingerprint,
+            {"round": round_index, "proposal_id": proposal.proposal_id, "parent_checkpoint_sha256": parent_digest},
+        )
         atomic_write_json(round_dir / "proposal.json", proposal.to_dict())
-        append_event(events_path, {"event": "proposal.validated", "round": round_index, "proposal": proposal.to_dict()})
+        atomic_write_json(round_dir / "fingerprint.json", {"fingerprint": fingerprint, "duplicate": duplicate})
+        append_event(events_path, {"event": "proposal.validated", "round": round_index, "proposal": proposal.to_dict(), "fingerprint": fingerprint, "duplicate": duplicate})
+        if duplicate:
+            decision = {"accepted": False, "reason": "duplicate_fingerprint", "fingerprint": fingerprint}
+            atomic_write_json(round_dir / "training-result.json", {"status": "skipped", "reason": "duplicate_fingerprint"})
+            atomic_write_json(round_dir / "evaluation-result.json", {"status": "skipped", "reason": "duplicate_fingerprint"})
+            atomic_write_json(round_dir / "decision.json", decision)
+            rounds.append({"round": round_index, "proposal": proposal.to_dict(), "training": {"status": "skipped"}, "evaluation": {"status": "skipped"}, "decision": decision})
+            state["last_complete_round"] = round_index
+            state["next_round"] = round_index + 1
+            state["failed_rounds"] = sorted(failed_rounds)
+            write_campaign_state(root, state)
+            no_improvement += 1
+            if no_improvement >= int(config["no_improvement_patience"]):
+                break
+            continue
         acquire_controller_handoff(*_controller_handoff(config))
         try:
             wait_for_gpu_quiet(config)
@@ -653,9 +870,17 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
             append_event(events_path, {"event": "training.finished", "round": round_index, "training": training})
             if training.get("status") != "success":
                 decision = {"accepted": False, "reason": "training_failed"}
+                atomic_write_json(round_dir / "evaluation-result.json", {"status": "skipped", "reason": "training_failed"})
                 atomic_write_json(round_dir / "decision.json", decision)
                 rounds.append({"round": round_index, "proposal": proposal.to_dict(), "training": training, "decision": decision})
-                break
+                state["failed_rounds"] = sorted(set(state.get("failed_rounds", [])) | {round_index})
+                state["last_complete_round"] = round_index
+                state["next_round"] = round_index + 1
+                write_campaign_state(root, state)
+                no_improvement += 1
+                if no_improvement >= int(config["no_improvement_patience"]):
+                    break
+                continue
             child = Path(str(training["student_checkpoint"])).resolve()
             evaluation = evaluate_checkpoint(config, child, round_dir / "evaluation")
             atomic_write_json(round_dir / "evaluation-result.json", evaluation)
@@ -679,6 +904,13 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
             }
             rounds.append(round_record)
             append_event(events_path, {"event": "round.decided", **round_record})
+            state["last_complete_round"] = round_index
+            state["next_round"] = round_index + 1
+            state["accepted_history"] = [item for item in rounds if item.get("decision", {}).get("accepted")]
+            state["parent_checkpoint"] = str(child) if decision.get("accepted") else str(parent)
+            state["parent_checkpoint_sha256"] = sha256_file(child) if decision.get("accepted") else parent_digest
+            state["parent_evaluation"] = evaluation if decision.get("accepted") else parent_eval
+            write_campaign_state(root, state)
         finally:
             release_controller_handoff(*_controller_handoff(config))
         if decision.get("accepted"):

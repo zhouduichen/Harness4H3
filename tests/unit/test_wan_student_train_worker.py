@@ -4,7 +4,14 @@ import pytest
 
 import torch
 
-from tools.wan_student_train_worker import _encode_training_prompt, _parse_devices, _training_spec
+from tools.wan_student_train_worker import (
+    _apply_initialization_mode,
+    _configure_trainable_scope,
+    _encode_training_prompt,
+    _parse_devices,
+    _training_cache_paths,
+    _training_spec,
+)
 
 
 def test_parse_devices_requires_three_distinct_cuda_devices():
@@ -52,3 +59,50 @@ def test_training_prompt_is_normal_autograd_tensor():
     result = _encode_training_prompt(FakePipeline(), "test", Spec(), torch.device("cpu"), torch.float32)
     assert not result.is_inference()
     assert result.requires_grad is False
+
+
+def test_training_cache_paths_select_unique_captions(tmp_path: Path):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    for index, caption in enumerate(("red plane", "red plane", "orange cat", "yellow train")):
+        torch.save({"caption": caption}, cache_dir / ("%08d.pt" % index))
+
+    selected = _training_cache_paths({"h3_cache_dir": str(cache_dir)}, limit=3)
+
+    assert [path.name for path in selected] == ["00000000.pt", "00000002.pt", "00000003.pt"]
+
+
+def test_trainable_scope_can_keep_only_text_conditioning_paths():
+    class FakeTransformer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.blocks = torch.nn.ModuleList([torch.nn.Module()])
+            self.blocks[0].attn2 = torch.nn.Module()
+            self.blocks[0].attn2.to_k = torch.nn.Linear(2, 2)
+            self.blocks[0].attn2.to_q = torch.nn.Linear(2, 2)
+            self.condition_embedder = torch.nn.Module()
+            self.condition_embedder.text_embedder = torch.nn.Linear(2, 2)
+
+    transformer = FakeTransformer()
+    scope = _configure_trainable_scope(
+        transformer,
+        "blocks.*.attn2.to_k.*,condition_embedder.text_embedder.*",
+    )
+
+    assert scope.startswith("blocks.*.attn2.to_k.*")
+    assert transformer.blocks[0].attn2.to_k.weight.requires_grad
+    assert not transformer.blocks[0].attn2.to_q.weight.requires_grad
+    assert transformer.condition_embedder.text_embedder.weight.requires_grad
+
+
+def test_initialization_mode_resets_wan_output_projection():
+    class FakeTransformer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj_out = torch.nn.Linear(2, 2)
+
+    transformer = FakeTransformer()
+    assert _apply_initialization_mode(transformer, "inherit") == "inherit"
+    assert _apply_initialization_mode(transformer, "generation_head_reset") == "generation_head_reset"
+    assert torch.count_nonzero(transformer.proj_out.weight) == 0
+    assert torch.count_nonzero(transformer.proj_out.bias) == 0

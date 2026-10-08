@@ -91,12 +91,20 @@ class WanTrainingAdapter(DenoisingModelAdapter):
             raise TrainingFailure("invalid_training_config", "Wan batches must be mappings")
         if "frames" not in raw or "prompt" not in raw:
             raise TrainingFailure("invalid_training_config", "Wan batch requires frames and prompt")
-        clean = self.encode_frames(raw["frames"])
+        clean = raw.get("wan_latent")
+        if clean is None:
+            clean = self.encode_frames(raw["frames"])
+        else:
+            clean = torch.as_tensor(clean)
         if not isinstance(clean, torch.Tensor) or clean.ndim != 5:
             raise TrainingFailure("wan_video_shape_invalid", "Wan frame encoder must return [B,C,T,H,W]")
         if not torch.isfinite(clean).all():
             raise TrainingFailure("wan_video_nonfinite", "Wan clean latent contains non-finite values")
-        text = self.encode_prompt(str(raw["prompt"]))
+        text = raw.get("prompt_embeds")
+        if text is None:
+            text = self.encode_prompt(str(raw["prompt"]))
+        else:
+            text = torch.as_tensor(text)
         if not isinstance(text, torch.Tensor) or text.ndim < 2:
             raise TrainingFailure("wan_conditioning_invalid", "Wan prompt encoder must return [B,S,D]")
         if text.shape[0] != clean.shape[0]:

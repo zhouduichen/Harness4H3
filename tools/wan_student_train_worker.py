@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -20,6 +22,7 @@ from harness4h3.student.proposal import StudentTarget
 from harness4h3.student.schedule import h3_video_sigmas
 from harness4h3.student.teacher_service import TeacherService
 from harness4h3.student.wan import WanStudentError, load_wan_spec
+from harness4h3.student.wan_long_video import load_wan_transformer_checkpoint
 from harness4h3.student.wan_training import (
     WanTrainingSpec,
     encode_wan_video,
@@ -28,8 +31,18 @@ from harness4h3.student.wan_training import (
     resample_video_frames,
     save_wan_checkpoint,
     sha256_path,
-    wan_velocity_loss,
 )
+from h3_training.adapters.wan import WanEndpointTeacher, WanTrainingAdapter
+from h3_training.algorithms.dmd2 import DMD2, DMD2Config
+from h3_training.algorithms.progressive_distillation import (
+    ProgressiveDistillation,
+    ProgressiveDistillationConfig,
+    plan_binary_stages,
+)
+from h3_training.engine.state import TrainingFailure
+from h3_training.engine.trainer import TrainerConfig, TrainerEngine
+from h3_training.algorithms.base import ModelRole
+from harness4h3.student.wan_campaign import WanTrainingPolicy
 from h3_training.data.schema import Conditioning, ModalLatents, ModalTimesteps
 
 
@@ -159,6 +172,49 @@ def _encode_training_prompt(pipeline: Any, prompt: str, spec: WanTrainingSpec, d
     return prompt_embeds.detach().clone()
 
 
+def _configure_trainable_scope(transformer: Any, scope: str | None) -> str:
+    """Freeze the Wan backbone when a semantic adapter scope is requested."""
+
+    selected = str(scope or "all").strip()
+    if not selected or selected == "all":
+        for parameter in transformer.parameters():
+            parameter.requires_grad_(True)
+        return "all"
+    patterns = tuple(item.strip() for item in selected.split(",") if item.strip())
+    if not patterns:
+        raise ValueError("trainable_scope must be 'all' or contain at least one pattern")
+    trainable = 0
+    for name, parameter in transformer.named_parameters():
+        enabled = any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+        parameter.requires_grad_(enabled)
+        trainable += int(enabled)
+    if trainable <= 0:
+        raise ValueError("trainable_scope selected no Wan Transformer parameters: %s" % selected)
+    return ",".join(patterns)
+
+
+def _apply_initialization_mode(transformer: Any, mode: str | None) -> str:
+    selected = str(mode or "inherit").strip()
+    if selected == "inherit":
+        return selected
+    if selected not in {"generation_head_reset", "dit_zero"}:
+        raise ValueError("unsupported Wan initialization mode: %s" % selected)
+    candidates = []
+    for name, module in transformer.named_modules():
+        lowered = name.lower()
+        if any(token in lowered for token in ("proj_out", "output_proj", "generation_head", "output_head")):
+            if hasattr(module, "weight") and hasattr(module, "bias"):
+                candidates.append((name, module))
+    if not candidates:
+        raise WanStudentError("initialization_unsupported", "Wan Transformer has no resettable generation output projection")
+    with torch.no_grad():
+        for _, module in candidates:
+            module.weight.zero_()
+            if module.bias is not None:
+                module.bias.zero_()
+    return selected
+
+
 def _teacher_video(
     raw: Mapping[str, Any],
     spec: WanTrainingSpec,
@@ -241,12 +297,91 @@ def _teacher_video(
     return frames, forward_count, teacher_digest, metadata
 
 
-def run(raw: Mapping[str, Any], *, output: Path, result_path: Path, steps_override: int | None = None) -> Mapping[str, Any]:
+def run(
+    raw: Mapping[str, Any],
+    *,
+    output: Path,
+    result_path: Path,
+    steps_override: int | None = None,
+    reuse_override: int | None = None,
+    parent_override: Path | None = None,
+    learning_rate_override: float | None = None,
+    trainable_scope_override: str | None = None,
+    method_override: str | None = None,
+    source_steps_override: int | None = None,
+    target_steps_override: int | None = None,
+    rollout_steps_override: int | None = None,
+    rollout_every_override: int | None = None,
+    rollout_endpoint_weight_override: float | None = None,
+    rollout_clean_weight_override: float | None = None,
+    velocity_weight_override: float | None = None,
+    clean_anchor_weight_override: float | None = None,
+    fp32_optimizer_state_override: bool | None = None,
+    initialization_mode_override: str | None = None,
+) -> Mapping[str, Any]:
     wan_config = Path(str(raw["wan_config"])).resolve()
     spec = _training_spec(raw, wan_config)
     steps = int(steps_override if steps_override is not None else raw.get("train_steps", spec.train_steps))
     if steps <= 0:
         raise ValueError("train_steps must be positive")
+    teacher_reuse_steps = int(reuse_override if reuse_override is not None else raw.get("teacher_reuse_steps", 1))
+    if teacher_reuse_steps <= 0:
+        raise ValueError("teacher_reuse_steps must be positive")
+    learning_rate = float(
+        learning_rate_override if learning_rate_override is not None else raw.get("learning_rate", spec.learning_rate)
+    )
+    if not math.isfinite(learning_rate) or learning_rate <= 0:
+        raise ValueError("learning_rate must be finite and positive")
+    method = str(method_override or raw.get("method", "progressive_distillation"))
+    source_steps = int(source_steps_override if source_steps_override is not None else raw.get("source_steps", 32))
+    target_steps = int(target_steps_override if target_steps_override is not None else raw.get("target_steps", 8))
+    rollout_steps = int(rollout_steps_override if rollout_steps_override is not None else raw.get("rollout_steps", 0))
+    rollout_every = int(rollout_every_override if rollout_every_override is not None else raw.get("rollout_every", teacher_reuse_steps))
+    rollout_endpoint_weight = float(
+        rollout_endpoint_weight_override
+        if rollout_endpoint_weight_override is not None
+        else raw.get("rollout_endpoint_weight", 0.0)
+    )
+    rollout_clean_weight = float(
+        rollout_clean_weight_override
+        if rollout_clean_weight_override is not None
+        else raw.get("rollout_clean_weight", 0.0)
+    )
+    velocity_weight = float(
+        velocity_weight_override if velocity_weight_override is not None else raw.get("velocity_weight", 1.0)
+    )
+    clean_anchor_weight = float(
+        clean_anchor_weight_override
+        if clean_anchor_weight_override is not None
+        else raw.get("clean_anchor_weight", 0.5)
+    )
+    fp32_optimizer_state = bool(
+        fp32_optimizer_state_override
+        if fp32_optimizer_state_override is not None
+        else raw.get("fp32_optimizer_state", False)
+    )
+    policy = WanTrainingPolicy.from_mapping(
+        {
+            "method": method,
+            "source_steps": source_steps,
+            "target_steps": target_steps,
+            "train_steps": steps,
+            "learning_rate": learning_rate,
+            "critic_learning_rate": float(raw.get("critic_learning_rate", learning_rate)),
+            "velocity_weight": velocity_weight,
+            "clean_anchor_weight": clean_anchor_weight,
+            "rollout_steps": rollout_steps,
+            "rollout_every": rollout_every,
+            "rollout_endpoint_weight": rollout_endpoint_weight,
+            "rollout_clean_weight": rollout_clean_weight,
+            "trainable_scope": trainable_scope_override if trainable_scope_override is not None else raw.get("trainable_scope", "all"),
+            "fp32_optimizer_state": fp32_optimizer_state,
+        }
+    )
+    if policy.method == "dmd2" and not bool(raw.get("dmd2_memory_admitted", False)):
+        raise WanStudentError("capability_unavailable", "Wan DMD2 critic memory admission is disabled")
+    requested_teacher_groups = int(math.ceil(float(steps) / float(max(1, teacher_reuse_steps))))
+    teacher_groups = max(1, min(requested_teacher_groups, int(raw.get("teacher_target_groups", 4))))
     teacher_devices = _parse_devices(raw["teacher_devices"])
     student_device = torch.device(str(raw.get("student_device", "cuda:3")))
     teacher_device = torch.device(teacher_devices[0])
@@ -256,32 +391,44 @@ def run(raw: Mapping[str, Any], *, output: Path, result_path: Path, steps_overri
         raise RuntimeError("real Wan training requires a CUDA Student device")
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    cache_paths = _training_cache_paths(raw, limit=max(1, steps))
-    frames, teacher_forward_count, teacher_digest, teacher_metadata = _teacher_video(
-        raw, spec, teacher_device, student_device, cache_path=cache_paths[0]
-    )
-    teacher_records = [dict(teacher_metadata)]
+    cache_paths = _training_cache_paths(raw, limit=max(1, teacher_groups))
     components = load_wan_training_components(spec, device=str(student_device))
-    optimizer = torch.optim.AdamW(components.transformer.parameters(), lr=float(spec.learning_rate))
-    initial_probe = next(components.transformer.parameters()).detach().float().clone()
-    generator = torch.Generator(device=str(components.device)).manual_seed(int(raw.get("seed", 20261008)) + 1)
-    losses = []
-    standard_losses = []
-    distill_losses = []
+    parent_raw = parent_override if parent_override is not None else raw.get("parent_checkpoint")
+    parent_checkpoint: Optional[Path] = None
+    parent_checkpoint_digest: Optional[str] = None
+    if parent_raw:
+        parent_checkpoint = Path(str(parent_raw)).resolve()
+        parent_checkpoint_digest = load_wan_transformer_checkpoint(components.pipeline, parent_checkpoint)
+    initialization_mode = _apply_initialization_mode(
+        components.transformer,
+        initialization_mode_override if initialization_mode_override is not None else raw.get("initialization_mode", "inherit"),
+    )
+    trainable_scope = _configure_trainable_scope(
+        components.transformer,
+        trainable_scope_override if trainable_scope_override is not None else raw.get("trainable_scope"),
+    )
+    trainable_parameters = [parameter for parameter in components.transformer.parameters() if parameter.requires_grad]
+    initial_probe = next(parameter for parameter in trainable_parameters).detach().float().clone()
+    generator = torch.Generator(device="cpu").manual_seed(int(raw.get("seed", 20261008)) + 1)
     started = time.perf_counter()
-    for step in range(steps):
-        if step > 0:
-            frames, forward_count, step_teacher_digest, step_teacher_metadata = _teacher_video(
-                raw,
-                spec,
-                teacher_device,
-                student_device,
-                cache_path=cache_paths[step % len(cache_paths)],
-            )
-            teacher_forward_count += int(forward_count)
-            if step_teacher_digest != teacher_digest:
-                raise RuntimeError("Teacher checkpoint digest changed during training")
-            teacher_records.append(dict(step_teacher_metadata))
+    teacher_forward_count = 0
+    teacher_digest: Optional[str] = None
+    teacher_records: list[dict[str, Any]] = []
+    training_batches: list[dict[str, Any]] = []
+    for group_index in range(teacher_groups):
+        frames, forward_count, step_teacher_digest, step_teacher_metadata = _teacher_video(
+            raw,
+            spec,
+            teacher_device,
+            student_device,
+            cache_path=cache_paths[group_index % len(cache_paths)],
+        )
+        teacher_forward_count += int(forward_count)
+        if teacher_digest is None:
+            teacher_digest = step_teacher_digest
+        elif step_teacher_digest != teacher_digest:
+            raise RuntimeError("Teacher checkpoint digest changed during training")
+        teacher_records.append(dict(step_teacher_metadata))
         clean_latent = encode_wan_video(components.vae, frames, spec, components.device)
         prompt = str(teacher_records[-1].get("caption", "")).strip() or "A natural cinematic video with coherent motion."
         prompt_embeds = _encode_training_prompt(
@@ -291,43 +438,112 @@ def run(raw: Mapping[str, Any], *, output: Path, result_path: Path, steps_overri
             components.device,
             components.dtype,
         )
-        optimizer.zero_grad(set_to_none=True)
-        noisy, timestep, target, sigma = flow_match_batch(
-            clean_latent,
-            scheduler=components.scheduler,
-            generator=generator,
-            device=components.device,
+        training_batches.append(
+            {
+                "sample_id": "wan-%04d" % group_index,
+                "frames": frames,
+                "prompt": prompt,
+                "wan_latent": clean_latent,
+                "prompt_embeds": prompt_embeds,
+            }
         )
-        prediction = components.transformer(
-            hidden_states=noisy,
-            timestep=timestep,
-            encoder_hidden_states=prompt_embeds,
-            return_dict=False,
-        )[0]
-        total, standard, distill = wan_velocity_loss(
-            prediction,
-            target,
-            noisy,
-            clean_latent,
-            sigma,
-            standard_weight=spec.standard_loss_weight,
-            distill_weight=spec.distill_loss_weight,
-        )
-        if not torch.isfinite(total):
-            raise RuntimeError("Wan training loss is non-finite")
-        total.backward()
-        torch.nn.utils.clip_grad_norm_(components.transformer.parameters(), 1.0)
-        optimizer.step()
-        losses.append(float(total.detach().cpu()))
-        standard_losses.append(float(standard.cpu()))
-        distill_losses.append(float(distill.cpu()))
         del clean_latent, prompt_embeds, frames
+    adapter = WanTrainingAdapter(
+        transformer=components.transformer,
+        scheduler=components.scheduler,
+        encode_frames=lambda value: encode_wan_video(components.vae, value, spec, components.device),
+        encode_prompt=lambda value: _encode_training_prompt(
+            components.pipeline, value, spec, components.device, components.dtype
+        ),
+        model_id=spec.model_id,
+    )
+    endpoint_teacher = WanEndpointTeacher()
+    stage_lineage: list[dict[str, Any]] = []
+    total_optimizer_steps = 0
+    initial_loss: Optional[float] = None
+    final_loss: Optional[float] = None
+    maximum_gradient_norm = 0.0
+    algorithm_path = "h3_training.algorithms.%s.%s" % (
+        "progressive_distillation" if policy.method == "progressive_distillation" else "dmd2",
+        "ProgressiveDistillation" if policy.method == "progressive_distillation" else "DMD2",
+    )
+    if policy.method == "progressive_distillation":
+        stages = plan_binary_stages(policy.source_steps, policy.target_steps)
+        stage_budgets = [max(1, steps // len(stages)) for _ in stages]
+        stage_budgets[-1] += max(0, steps - sum(stage_budgets))
+        for stage_index, stage in enumerate(stages):
+            stage_method = ProgressiveDistillation(
+                components.transformer,
+                endpoint_teacher,
+                adapter,
+                ProgressiveDistillationConfig(
+                    stage=stage,
+                    learning_rate=policy.learning_rate,
+                    trainable_scope=policy.trainable_scope,
+                    audio_weight=0.0,
+                    velocity_weight=policy.velocity_weight,
+                    clean_anchor_weight=policy.clean_anchor_weight,
+                    rollout_steps=policy.rollout_steps,
+                    rollout_every=policy.rollout_every,
+                    rollout_endpoint_weight=policy.rollout_endpoint_weight,
+                    rollout_clean_weight=policy.rollout_clean_weight,
+                    fp32_optimizer_state=policy.fp32_optimizer_state,
+                ),
+            )
+            result = TrainerEngine(
+                TrainerConfig(
+                    seed=20261008 + stage_index,
+                    parent_sha256=parent_checkpoint_digest or "",
+                    device=str(components.device),
+                )
+            ).run(stage_method, training_batches, max_steps=stage_budgets[stage_index])
+            stage_path = output / ("student-stage-%02d.safetensors" % (stage_index + 1))
+            stage_path.parent.mkdir(parents=True, exist_ok=True)
+            stage_digest = save_wan_checkpoint(
+                components.transformer,
+                stage_path,
+                {
+                    "model_id": spec.model_id,
+                    "algorithm_name": policy.method,
+                    "teacher_nfe": stage.teacher_nfe,
+                    "student_nfe": stage.student_nfe,
+                    "stage_index": stage_index,
+                    "teacher_checkpoint_sha256": teacher_digest or "",
+                    "offline_simulation": "false",
+                },
+            )
+            optimizer_steps = sum(int(value) for value in result.optimizer_steps.values())
+            total_optimizer_steps += optimizer_steps
+            initial_loss = result.initial_loss if initial_loss is None else initial_loss
+            final_loss = result.final_loss
+            maximum_gradient_norm = max(maximum_gradient_norm, result.max_gradient_norm)
+            stage_lineage.append(
+                {
+                    "stage_index": stage_index,
+                    "teacher_nfe": stage.teacher_nfe,
+                    "student_nfe": stage.student_nfe,
+                    "stage_train_steps": stage_budgets[stage_index],
+                    "stage_optimizer_steps": optimizer_steps,
+                    "stage_child": str(stage_path),
+                    "stage_child_sha256": stage_digest,
+                    "teacher_checkpoint_sha256": teacher_digest,
+                    "teacher_kind": "h3_rgb_boundary_endpoint",
+                }
+            )
+    else:
+        raise WanStudentError(
+            "capability_unavailable",
+            "Wan DMD2 dispatch is reserved for an admitted critic-memory run; no fallback algorithm is allowed",
+        )
     final_probe = next(components.transformer.parameters()).detach().float()
     changed = not torch.equal(initial_probe.cpu(), final_probe.cpu())
     if not changed:
         raise RuntimeError("Wan Transformer parameters did not change")
+    if teacher_digest is None:
+        raise RuntimeError("training completed without a real Teacher target")
     parent_source = Path(str(spec.pretrained_path or spec.model_id))
-    parent_digest = sha256_path(parent_source) if parent_source.exists() else "model-id:%s" % spec.model_id
+    lineage_root_digest = sha256_path(parent_source) if parent_source.exists() else "model-id:%s" % spec.model_id
+    parent_digest = parent_checkpoint_digest or lineage_root_digest
     checkpoint_path = output / "student.safetensors"
     checkpoint_digest = save_wan_checkpoint(
         components.transformer,
@@ -337,11 +553,31 @@ def run(raw: Mapping[str, Any], *, output: Path, result_path: Path, steps_overri
             "lineage_root": spec.lineage_root,
             "pretrained": "true",
             "parent_model_digest": parent_digest,
+            "lineage_root_digest": lineage_root_digest,
+            "parent_checkpoint": str(parent_checkpoint) if parent_checkpoint else "",
+            "parent_checkpoint_sha256": parent_checkpoint_digest or "",
             "teacher_checkpoint_sha256": teacher_digest,
             "teacher_forward_count": teacher_forward_count,
             "offline_simulation": "false",
             "frame_contract": "81@16fps@256x256",
             "train_steps": steps,
+            "teacher_reuse_steps": teacher_reuse_steps,
+            "learning_rate": learning_rate,
+            "trainable_scope": trainable_scope,
+            "algorithm_name": policy.method,
+            "algorithm_path": algorithm_path,
+            "source_steps": policy.source_steps,
+            "target_steps": policy.target_steps,
+            "rollout_steps": policy.rollout_steps,
+            "rollout_every": policy.rollout_every,
+            "rollout_endpoint_weight": policy.rollout_endpoint_weight,
+            "rollout_clean_weight": policy.rollout_clean_weight,
+            "velocity_weight": policy.velocity_weight,
+            "clean_anchor_weight": policy.clean_anchor_weight,
+            "fp32_optimizer_state": policy.fp32_optimizer_state,
+            "loss_reduction": "fp32",
+            "initialization_mode": initialization_mode,
+            "stage_lineage": json.dumps(stage_lineage, sort_keys=True),
         },
     )
     result = {
@@ -350,10 +586,29 @@ def run(raw: Mapping[str, Any], *, output: Path, result_path: Path, steps_overri
         "pretrained": True,
         "lineage_root": spec.lineage_root,
         "parent_model_digest": parent_digest,
+        "lineage_root_digest": lineage_root_digest,
+        "parent_checkpoint": str(parent_checkpoint) if parent_checkpoint else None,
+        "parent_checkpoint_sha256": parent_checkpoint_digest,
         "teacher_checkpoint_sha256": teacher_digest,
         "student_checkpoint_sha256": checkpoint_digest,
         "student_checkpoint": str(checkpoint_path),
-        "optimizer_steps": steps,
+        "optimizer_steps": total_optimizer_steps,
+        "algorithm_name": policy.method,
+        "algorithm_path": algorithm_path,
+        "teacher_reuse_steps": teacher_reuse_steps,
+        "teacher_target_groups": teacher_groups,
+        "learning_rate": learning_rate,
+        "trainable_scope": trainable_scope,
+        "rollout_policy": {
+            "rollout_steps": policy.rollout_steps,
+            "rollout_every": policy.rollout_every,
+            "rollout_endpoint_weight": policy.rollout_endpoint_weight,
+            "rollout_clean_weight": policy.rollout_clean_weight,
+        },
+        "loss_reduction": "fp32",
+        "fp32_optimizer_state": policy.fp32_optimizer_state,
+        "initialization_mode": initialization_mode,
+        "stage_lineage": stage_lineage,
         "teacher_forward_count": teacher_forward_count,
         "offline_simulation": False,
         "frame_contract": {
@@ -363,14 +618,9 @@ def run(raw: Mapping[str, Any], *, output: Path, result_path: Path, steps_overri
             "width": spec.width,
             "height": spec.height,
         },
-        "loss": {
-            "total_final": losses[-1],
-            "standard_final": standard_losses[-1],
-            "distill_final": distill_losses[-1],
-            "total_history": losses,
-        },
+        "loss": {"total_final": final_loss, "initial": initial_loss},
         "teacher": (
-            teacher_metadata
+            teacher_records[0]
             if len(teacher_records) == 1
             else {
                 "teacher_checkpoint_sha256": teacher_digest,
@@ -391,6 +641,21 @@ def main(argv=None) -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--result", required=True, type=Path)
     parser.add_argument("--steps", type=int, default=None)
+    parser.add_argument("--teacher-reuse-steps", type=int, default=None)
+    parser.add_argument("--parent-checkpoint", type=Path, default=None)
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--trainable-scope", default=None)
+    parser.add_argument("--method", default=None)
+    parser.add_argument("--source-steps", type=int, default=None)
+    parser.add_argument("--target-steps", type=int, default=None)
+    parser.add_argument("--rollout-steps", type=int, default=None)
+    parser.add_argument("--rollout-every", type=int, default=None)
+    parser.add_argument("--rollout-endpoint-weight", type=float, default=None)
+    parser.add_argument("--rollout-clean-weight", type=float, default=None)
+    parser.add_argument("--velocity-weight", type=float, default=None)
+    parser.add_argument("--clean-anchor-weight", type=float, default=None)
+    parser.add_argument("--fp32-optimizer-state", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--initialization-mode", default=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -399,7 +664,27 @@ def main(argv=None) -> int:
             spec = _training_spec(raw, Path(str(raw["wan_config"])))
             print(json.dumps(spec.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
             return 0
-        result = run(raw, output=args.output, result_path=args.result, steps_override=args.steps)
+        result = run(
+            raw,
+            output=args.output,
+            result_path=args.result,
+            steps_override=args.steps,
+            reuse_override=args.teacher_reuse_steps,
+            parent_override=args.parent_checkpoint,
+            learning_rate_override=args.learning_rate,
+            trainable_scope_override=args.trainable_scope,
+            method_override=args.method,
+            source_steps_override=args.source_steps,
+            target_steps_override=args.target_steps,
+            rollout_steps_override=args.rollout_steps,
+            rollout_every_override=args.rollout_every,
+            rollout_endpoint_weight_override=args.rollout_endpoint_weight,
+            rollout_clean_weight_override=args.rollout_clean_weight,
+            velocity_weight_override=args.velocity_weight,
+            clean_anchor_weight_override=args.clean_anchor_weight,
+            fp32_optimizer_state_override=args.fp32_optimizer_state,
+            initialization_mode_override=args.initialization_mode,
+        )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     except (OSError, RuntimeError, TypeError, ValueError, WanStudentError) as exc:
