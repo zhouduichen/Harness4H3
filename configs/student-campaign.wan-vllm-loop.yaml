@@ -1,0 +1,33 @@
+schema_version: 1
+
+wan_loop:
+  training_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/student-campaign.wan-5s.yaml
+  wan_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-1.3b.remote.yaml
+  evaluation_manifest: /home/intern/huangjiahao/Harness4H3-long-video-30s/work/student-campaign-30s-fixed-v13/evaluation-manifest.json
+  clip_model_path: /data/models/clip-vit-large-patch14-336
+  teacher_baseline_result: /home/intern/huangjiahao/Harness4H3-long-video-30s/work/student-campaign-30s-fixed-v13/teacher-baseline-result.json
+  parent_checkpoint: /data/models/harness4h3-v27-code-long-30s/wan-student-5s-w5-semantic/student.safetensors
+  output_root: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w6
+  worker_python: /home/intern/miniconda3/envs/comfy/bin/python
+  training_entrypoint: /home/intern/huangjiahao/Harness4H3-long-video-30s/tools/wan_student_train_worker.py
+  vllm_base_url: http://127.0.0.1:8000/v1
+  vllm_model: qwen3.5-controller
+  controller_launcher: /home/intern/huangjiahao/Harness4H3-long-video-30s/tools/controller-wait-launch.sh
+  controller_launcher_pid_file: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w6/controller-launcher.pid
+  controller_launcher_log: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w6/controller-launcher.log
+  controller_hold_file: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w6/.controller-handoff-hold.json
+  controller_release_file: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w6/.controller-release.json
+  controller_worker_lease_file: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w6/.worker-gpu-lease.json
+  device: cuda:3
+  max_rounds: 2
+  max_cases: 4
+  seed_count: 2
+  window_count: 7
+  overlap_latent_frames: 6
+  inference_steps: 30
+  vllm_timeout_s: 900
+  training_timeout_s: 86400
+  semantic_floor_ratio: 0.95
+  quality_floor_ratio: 0.90
+  min_semantic_delta: 0.005
+  no_improvement_patience: 2
