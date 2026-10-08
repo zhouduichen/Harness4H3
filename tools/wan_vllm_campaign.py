@@ -31,6 +31,8 @@ from harness4h3.student.gpu import acquire_controller_handoff, release_controlle
 
 
 def proposal_json_schema() -> dict[str, Any]:
+    positive = {"type": "number", "exclusiveMinimum": 0, "maximum": 0.01}
+    non_negative = {"type": "number", "minimum": 0, "maximum": 10.0}
     return {
         "type": "object",
         "additionalProperties": False,
@@ -38,19 +40,92 @@ def proposal_json_schema() -> dict[str, Any]:
             "schema_version",
             "proposal_id",
             "parent_checkpoint_sha256",
-            "steps",
-            "teacher_reuse_steps",
-            "learning_rate",
+            "training",
+            "initialization",
+            "precision",
+            "curriculum",
+            "data",
+            "continuation",
             "focus",
             "hypothesis",
         ],
         "properties": {
-            "schema_version": {"type": "integer", "const": 1},
+            "schema_version": {"type": "integer", "const": 2},
             "proposal_id": {"type": "string", "pattern": "^wan_[0-9]{4,}$"},
             "parent_checkpoint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "steps": {"type": "integer", "minimum": 1, "maximum": 32},
-            "teacher_reuse_steps": {"type": "integer", "minimum": 1, "maximum": 32},
-            "learning_rate": {"type": "number", "minimum": 1e-8, "maximum": 1e-4},
+            "training": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "method", "source_steps", "target_steps", "train_steps", "learning_rate",
+                    "critic_learning_rate", "velocity_weight", "clean_anchor_weight", "rollout_steps",
+                    "rollout_every", "rollout_endpoint_weight", "rollout_clean_weight", "trainable_scope",
+                    "fp32_optimizer_state",
+                ],
+                "properties": {
+                    "method": {"type": "string", "enum": ["progressive_distillation", "dmd2"]},
+                    "source_steps": {"type": "integer", "minimum": 1, "maximum": 256},
+                    "target_steps": {"type": "integer", "minimum": 1, "maximum": 64},
+                    "train_steps": {"type": "integer", "minimum": 1, "maximum": 100000},
+                    "learning_rate": positive,
+                    "critic_learning_rate": positive,
+                    "velocity_weight": non_negative,
+                    "clean_anchor_weight": non_negative,
+                    "rollout_steps": {"type": "integer", "enum": [0, 2, 4]},
+                    "rollout_every": {"type": "integer", "minimum": 1, "maximum": 16},
+                    "rollout_endpoint_weight": non_negative,
+                    "rollout_clean_weight": non_negative,
+                    "trainable_scope": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "fp32_optimizer_state": {"type": "boolean"},
+                },
+            },
+            "initialization": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["mode"],
+                "properties": {"mode": {"type": "string", "enum": ["inherit", "generation_head_reset", "dit_zero"]}},
+            },
+            "precision": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["loss_reduction", "optimizer_state"],
+                "properties": {
+                    "loss_reduction": {"type": "string", "enum": ["bf16", "fp32"]},
+                    "optimizer_state": {"type": "string", "enum": ["bf16", "fp32"]},
+                },
+            },
+            "curriculum": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["fidelity_schedule"],
+                "properties": {
+                    "fidelity_schedule": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "items": {"type": "string", "enum": ["F1", "F2", "F3"]},
+                    }
+                },
+            },
+            "data": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["manifest_digest", "prompt_policy", "seed_policy"],
+                "properties": {
+                    "manifest_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "prompt_policy": {"type": "string", "enum": ["balanced", "fixed_manifest"]},
+                    "seed_policy": {"type": "string", "enum": ["fixed", "rotating"]},
+                },
+            },
+            "continuation": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["overlap_latent_frames", "anchor_schedule"],
+                "properties": {
+                    "overlap_latent_frames": {"type": "integer", "minimum": 6, "maximum": 12},
+                    "anchor_schedule": {"type": "string", "enum": ["constant", "linear", "cosine"]},
+                },
+            },
             "focus": {"type": "string", "enum": ["semantic", "temporal", "stability", "efficiency"]},
             "hypothesis": {"type": "string", "minLength": 1, "maxLength": 512},
         },
@@ -309,7 +384,8 @@ def _request_vllm(config: Mapping[str, Any], context: Mapping[str, Any]) -> Mapp
     schema = proposal_json_schema()
     system = (
         "You are the Wan Student training controller. Return JSON only. "
-        "You may adjust only steps, teacher_reuse_steps, learning_rate, focus, and hypothesis. "
+        "Choose exactly one bounded training policy from the supplied capability snapshot, including method, "
+        "rollout, initialization, precision, curriculum, data, continuation, focus, and hypothesis. "
         "Never output code, shell commands, paths, device IDs, architecture, or checkpoint content. "
         "The trusted runner will bind the parent digest and all execution paths."
     )

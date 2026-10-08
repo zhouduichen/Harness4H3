@@ -17,7 +17,7 @@ class WanProposalError(ValueError):
     """Raised when a vLLM Wan proposal cannot cross the trusted boundary."""
 
 
-_PROPOSAL_FIELDS = {
+_PROPOSAL_FIELDS_V1 = {
     "schema_version",
     "proposal_id",
     "parent_checkpoint_sha256",
@@ -28,6 +28,13 @@ _PROPOSAL_FIELDS = {
     "hypothesis",
 }
 _FOCUS = {"semantic", "temporal", "stability", "efficiency"}
+_METHODS = {"progressive_distillation", "dmd2"}
+_INITIALIZATION = {"inherit", "generation_head_reset", "dit_zero"}
+_LOSS_REDUCTION = {"bf16", "fp32"}
+_OPTIMIZER_STATE = {"bf16", "fp32"}
+_PROMPT_POLICIES = {"balanced", "fixed_manifest"}
+_SEED_POLICIES = {"fixed", "rotating"}
+_ANCHOR_SCHEDULES = {"constant", "linear", "cosine"}
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -51,14 +58,230 @@ def _string(value: Any, name: str, *, max_length: int | None = None) -> str:
     return result
 
 
+def _integer(value: Any, name: str, *, minimum: int, maximum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise WanProposalError("%s must be an integer" % name)
+    if value < minimum or (maximum is not None and value > maximum):
+        bound = "[%d, %d]" % (minimum, maximum) if maximum is not None else ">= %d" % minimum
+        raise WanProposalError("%s must be in %s" % (name, bound))
+    return int(value)
+
+
+def _number(value: Any, name: str, *, minimum: float, maximum: float | None = None) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise WanProposalError("%s must be numeric" % name)
+    result = float(value)
+    if not math.isfinite(result) or result <= minimum or (maximum is not None and result > maximum):
+        if maximum is None:
+            raise WanProposalError("%s must be finite and > %s" % (name, minimum))
+        raise WanProposalError("%s must be finite and in (%s, %s]" % (name, minimum, maximum))
+    return result
+
+
+def _sha256(value: Any, name: str) -> str:
+    result = _string(value, name).lower()
+    if re.fullmatch(r"[0-9a-f]{64}", result) is None:
+        raise WanProposalError("%s must be a lowercase SHA-256 digest" % name)
+    return result
+
+
+def _unknown(raw: Mapping[str, Any], allowed: set[str], name: str) -> None:
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise WanProposalError("%s has unknown field(s): %s" % (name, ", ".join(unknown)))
+
+
+def _capability_available(capabilities: Any, name: str) -> bool:
+    if capabilities is None:
+        return name == "progressive_distillation"
+    if isinstance(capabilities, Mapping):
+        entries = capabilities.get("capabilities", capabilities)
+    else:
+        entries = capabilities
+    if isinstance(entries, Mapping):
+        item = entries.get(name)
+        return bool(item.get("available")) if isinstance(item, Mapping) else bool(item)
+    if isinstance(entries, (list, tuple)):
+        for item in entries:
+            if isinstance(item, Mapping) and str(item.get("name")) == name:
+                return bool(item.get("available"))
+    return False
+
+
+@dataclass(frozen=True)
+class WanTrainingPolicy:
+    method: str
+    source_steps: int
+    target_steps: int
+    train_steps: int
+    learning_rate: float
+    critic_learning_rate: float
+    velocity_weight: float = 1.0
+    clean_anchor_weight: float = 0.5
+    rollout_steps: int = 0
+    rollout_every: int = 1
+    rollout_endpoint_weight: float = 0.0
+    rollout_clean_weight: float = 0.0
+    trainable_scope: str = "all"
+    fp32_optimizer_state: bool = False
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any], *, legacy: bool = False) -> "WanTrainingPolicy":
+        raw = _mapping(raw, "training")
+        allowed = {
+            "method", "source_steps", "target_steps", "train_steps", "learning_rate", "critic_learning_rate",
+            "velocity_weight", "clean_anchor_weight", "rollout_steps", "rollout_every",
+            "rollout_endpoint_weight", "rollout_clean_weight", "trainable_scope", "fp32_optimizer_state",
+        }
+        _unknown(raw, allowed, "training")
+        _require(raw, ("method", "source_steps", "target_steps", "train_steps", "learning_rate", "critic_learning_rate"))
+        method = _string(raw["method"], "training.method")
+        if method not in _METHODS:
+            raise WanProposalError("training.method is unsupported: %s" % method)
+        source_steps = _integer(raw["source_steps"], "training.source_steps", minimum=1, maximum=256)
+        target_steps = _integer(raw["target_steps"], "training.target_steps", minimum=1, maximum=64)
+        train_steps = _integer(raw["train_steps"], "training.train_steps", minimum=1, maximum=100000)
+        if target_steps > source_steps:
+            raise WanProposalError("training.target_steps must not exceed source_steps")
+        if method == "progressive_distillation":
+            current = source_steps
+            while current > target_steps:
+                if current % 2 or current // 2 < target_steps:
+                    raise WanProposalError(
+                        "progressive_distillation source_steps=%d cannot reach target_steps=%d by binary halving"
+                        % (source_steps, target_steps)
+                    )
+                current //= 2
+        learning_rate = _number(raw["learning_rate"], "training.learning_rate", minimum=0.0, maximum=0.01)
+        critic_learning_rate = _number(raw["critic_learning_rate"], "training.critic_learning_rate", minimum=0.0, maximum=0.01)
+        velocity_weight = _number(raw.get("velocity_weight", 1.0), "training.velocity_weight", minimum=-1e-12)
+        clean_anchor_weight = _number(raw.get("clean_anchor_weight", 0.5), "training.clean_anchor_weight", minimum=-1e-12)
+        rollout_steps = _integer(raw.get("rollout_steps", 0), "training.rollout_steps", minimum=0, maximum=4)
+        if rollout_steps not in (0, 2, 4):
+            raise WanProposalError("training.rollout_steps must be 0, 2, or 4")
+        rollout_every = _integer(raw.get("rollout_every", 1), "training.rollout_every", minimum=1, maximum=16)
+        rollout_endpoint_weight = _number(raw.get("rollout_endpoint_weight", 0.0), "training.rollout_endpoint_weight", minimum=-1e-12)
+        rollout_clean_weight = _number(raw.get("rollout_clean_weight", 0.0), "training.rollout_clean_weight", minimum=-1e-12)
+        if rollout_steps == 0 and (rollout_endpoint_weight != 0.0 or rollout_clean_weight != 0.0):
+            raise WanProposalError("disabled rollout must have zero rollout weights")
+        if rollout_steps > 0 and rollout_endpoint_weight + rollout_clean_weight <= 0:
+            raise WanProposalError("active rollout requires a positive rollout weight")
+        trainable_scope = _string(raw.get("trainable_scope", "all"), "training.trainable_scope")
+        if trainable_scope not in {"all", "heads"} and not any(item.strip() for item in trainable_scope.split(",")):
+            raise WanProposalError("training.trainable_scope must select parameters")
+        fp32_optimizer_state = raw.get("fp32_optimizer_state", False)
+        if not isinstance(fp32_optimizer_state, bool):
+            raise WanProposalError("training.fp32_optimizer_state must be boolean")
+        return cls(
+            method=method,
+            source_steps=source_steps,
+            target_steps=target_steps,
+            train_steps=train_steps,
+            learning_rate=learning_rate,
+            critic_learning_rate=critic_learning_rate,
+            velocity_weight=velocity_weight,
+            clean_anchor_weight=clean_anchor_weight,
+            rollout_steps=rollout_steps,
+            rollout_every=rollout_every,
+            rollout_endpoint_weight=rollout_endpoint_weight,
+            rollout_clean_weight=rollout_clean_weight,
+            trainable_scope=trainable_scope,
+            fp32_optimizer_state=fp32_optimizer_state,
+        )
+
+
+@dataclass(frozen=True)
+class WanInitializationPolicy:
+    mode: str = "inherit"
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "WanInitializationPolicy":
+        raw = _mapping(raw, "initialization")
+        _unknown(raw, {"mode"}, "initialization")
+        mode = _string(raw.get("mode", "inherit"), "initialization.mode")
+        if mode not in _INITIALIZATION:
+            raise WanProposalError("initialization.mode is unsupported: %s" % mode)
+        return cls(mode)
+
+
+@dataclass(frozen=True)
+class WanPrecisionPolicy:
+    loss_reduction: str = "fp32"
+    optimizer_state: str = "bf16"
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "WanPrecisionPolicy":
+        raw = _mapping(raw, "precision")
+        _unknown(raw, {"loss_reduction", "optimizer_state"}, "precision")
+        loss_reduction = _string(raw.get("loss_reduction", "fp32"), "precision.loss_reduction")
+        optimizer_state = _string(raw.get("optimizer_state", "bf16"), "precision.optimizer_state")
+        if loss_reduction not in _LOSS_REDUCTION or optimizer_state not in _OPTIMIZER_STATE:
+            raise WanProposalError("precision policy is unsupported")
+        return cls(loss_reduction, optimizer_state)
+
+
+@dataclass(frozen=True)
+class WanCurriculumPolicy:
+    fidelity_schedule: tuple[str, ...] = ("F1", "F2", "F3")
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "WanCurriculumPolicy":
+        raw = _mapping(raw, "curriculum")
+        _unknown(raw, {"fidelity_schedule"}, "curriculum")
+        value = raw.get("fidelity_schedule", ("F1", "F2", "F3"))
+        if not isinstance(value, (list, tuple)) or not value or tuple(value) != tuple(value):
+            raise WanProposalError("curriculum.fidelity_schedule must be a non-empty list")
+        schedule = tuple(str(item) for item in value)
+        if any(item not in {"F1", "F2", "F3"} for item in schedule) or schedule != tuple(sorted(schedule, key=("F1", "F2", "F3").index)):
+            raise WanProposalError("curriculum.fidelity_schedule must be an ordered F1/F2/F3 prefix")
+        return cls(schedule)
+
+
+@dataclass(frozen=True)
+class WanDataPolicy:
+    manifest_digest: str = ""
+    prompt_policy: str = "balanced"
+    seed_policy: str = "fixed"
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "WanDataPolicy":
+        raw = _mapping(raw, "data")
+        _unknown(raw, {"manifest_digest", "prompt_policy", "seed_policy"}, "data")
+        digest = _sha256(raw.get("manifest_digest", "0" * 64), "data.manifest_digest")
+        prompt_policy = _string(raw.get("prompt_policy", "balanced"), "data.prompt_policy")
+        seed_policy = _string(raw.get("seed_policy", "fixed"), "data.seed_policy")
+        if prompt_policy not in _PROMPT_POLICIES or seed_policy not in _SEED_POLICIES:
+            raise WanProposalError("data policy is unsupported")
+        return cls(digest, prompt_policy, seed_policy)
+
+
+@dataclass(frozen=True)
+class WanContinuationPolicy:
+    overlap_latent_frames: int = 7
+    anchor_schedule: str = "linear"
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "WanContinuationPolicy":
+        raw = _mapping(raw, "continuation")
+        _unknown(raw, {"overlap_latent_frames", "anchor_schedule"}, "continuation")
+        overlap = _integer(raw.get("overlap_latent_frames", 7), "continuation.overlap_latent_frames", minimum=6, maximum=12)
+        anchor = _string(raw.get("anchor_schedule", "linear"), "continuation.anchor_schedule")
+        if anchor not in _ANCHOR_SCHEDULES:
+            raise WanProposalError("continuation.anchor_schedule is unsupported")
+        return cls(overlap, anchor)
+
+
 @dataclass(frozen=True)
 class WanTrainingProposal:
     schema_version: int
     proposal_id: str
     parent_checkpoint_sha256: str
-    steps: int
-    teacher_reuse_steps: int
-    learning_rate: float
+    training: WanTrainingPolicy
+    initialization: WanInitializationPolicy
+    precision: WanPrecisionPolicy
+    curriculum: WanCurriculumPolicy
+    data: WanDataPolicy
+    continuation: WanContinuationPolicy
     focus: str
     hypothesis: str
 
@@ -68,51 +291,136 @@ class WanTrainingProposal:
         value: Mapping[str, Any],
         *,
         expected_parent_sha256: str,
+        capabilities: Any = None,
     ) -> "WanTrainingProposal":
         raw = _mapping(value, "proposal")
-        unknown = sorted(set(raw) - _PROPOSAL_FIELDS)
-        if unknown:
-            raise WanProposalError("proposal has unknown field(s): %s" % ", ".join(unknown))
-        _require(raw, tuple(sorted(_PROPOSAL_FIELDS)))
-        if raw["schema_version"] != 1:
-            raise WanProposalError("schema_version must be 1")
+        schema_version = raw.get("schema_version")
+        if schema_version == 1:
+            _unknown(raw, _PROPOSAL_FIELDS_V1, "proposal")
+            _require(raw, tuple(sorted(_PROPOSAL_FIELDS_V1)))
+        elif schema_version == 2:
+            _unknown(raw, {
+                "schema_version", "proposal_id", "parent_checkpoint_sha256", "training", "initialization",
+                "precision", "curriculum", "data", "continuation", "focus", "hypothesis",
+            }, "proposal")
+            _require(raw, ("schema_version", "proposal_id", "parent_checkpoint_sha256", "training", "focus", "hypothesis"))
+        else:
+            raise WanProposalError("schema_version must be 1 or 2")
         proposal_id = _string(raw["proposal_id"], "proposal_id")
         if re.fullmatch(r"wan_[0-9]{4,}", proposal_id) is None:
             raise WanProposalError("proposal_id must match wan_[0-9]{4,}")
-        parent = _string(raw["parent_checkpoint_sha256"], "parent_checkpoint_sha256")
-        if re.fullmatch(r"[0-9a-f]{64}", parent) is None:
-            raise WanProposalError("parent_checkpoint_sha256 must be a lowercase SHA-256 digest")
+        parent = _sha256(raw["parent_checkpoint_sha256"], "parent_checkpoint_sha256")
         expected = str(expected_parent_sha256).strip().lower()
         if parent != expected:
             raise WanProposalError("parent_checkpoint_sha256 does not match trusted parent")
-        steps = raw["steps"]
-        if isinstance(steps, bool) or not isinstance(steps, int) or not 1 <= steps <= 32:
-            raise WanProposalError("steps must be an integer in [1, 32]")
-        reuse = raw["teacher_reuse_steps"]
-        if isinstance(reuse, bool) or not isinstance(reuse, int) or not 1 <= reuse <= steps:
-            raise WanProposalError("teacher_reuse_steps must be an integer in [1, steps]")
-        learning_rate = raw["learning_rate"]
-        if isinstance(learning_rate, bool) or not isinstance(learning_rate, (int, float)):
-            raise WanProposalError("learning_rate must be numeric")
-        learning_rate = float(learning_rate)
-        if not math.isfinite(learning_rate) or not 1e-8 <= learning_rate <= 1e-4:
-            raise WanProposalError("learning_rate must be finite and in [1e-8, 1e-4]")
+        if schema_version == 1:
+            steps = raw["steps"]
+            if isinstance(steps, bool) or not isinstance(steps, int) or not 1 <= steps <= 32:
+                raise WanProposalError("steps must be an integer in [1, 32]")
+            reuse = raw["teacher_reuse_steps"]
+            if isinstance(reuse, bool) or not isinstance(reuse, int) or not 1 <= reuse <= steps:
+                raise WanProposalError("teacher_reuse_steps must be an integer in [1, steps]")
+            legacy_learning_rate = raw["learning_rate"]
+            if isinstance(legacy_learning_rate, bool) or not isinstance(legacy_learning_rate, (int, float)):
+                raise WanProposalError("learning_rate must be numeric")
+            if not math.isfinite(float(legacy_learning_rate)) or not 1e-8 <= float(legacy_learning_rate) <= 1e-4:
+                raise WanProposalError("learning_rate must be finite and in [1e-8, 1e-4]")
+            training = WanTrainingPolicy.from_mapping(
+                {
+                    "method": "progressive_distillation",
+                    "source_steps": 32,
+                    "target_steps": 8,
+                    "train_steps": steps,
+                    "learning_rate": float(legacy_learning_rate),
+                    "critic_learning_rate": float(legacy_learning_rate),
+                    "rollout_every": reuse,
+                },
+                legacy=True,
+            )
+            initialization = WanInitializationPolicy()
+            precision = WanPrecisionPolicy()
+            curriculum = WanCurriculumPolicy()
+            data = WanDataPolicy()
+            continuation = WanContinuationPolicy()
+        else:
+            training = WanTrainingPolicy.from_mapping(raw["training"])
+            initialization = WanInitializationPolicy.from_mapping(raw.get("initialization", {}))
+            precision = WanPrecisionPolicy.from_mapping(raw.get("precision", {}))
+            curriculum = WanCurriculumPolicy.from_mapping(raw.get("curriculum", {}))
+            data = WanDataPolicy.from_mapping(raw.get("data", {}))
+            continuation = WanContinuationPolicy.from_mapping(raw.get("continuation", {}))
+        if not _capability_available(capabilities, training.method):
+            raise WanProposalError("capability_unavailable: %s" % training.method)
         focus = _string(raw["focus"], "focus")
         if focus not in _FOCUS:
             raise WanProposalError("focus must be one of: %s" % ", ".join(sorted(_FOCUS)))
         hypothesis = _string(raw["hypothesis"], "hypothesis", max_length=512)
         return cls(
-            schema_version=1,
+            schema_version=int(schema_version),
             proposal_id=proposal_id,
             parent_checkpoint_sha256=parent,
-            steps=steps,
-            teacher_reuse_steps=reuse,
-            learning_rate=learning_rate,
+            training=training,
+            initialization=initialization,
+            precision=precision,
+            curriculum=curriculum,
+            data=data,
+            continuation=continuation,
             focus=focus,
             hypothesis=hypothesis,
         )
 
+    @property
+    def steps(self) -> int:
+        return self.training.train_steps
+
+    @property
+    def teacher_reuse_steps(self) -> int:
+        return self.training.rollout_every
+
+    @property
+    def learning_rate(self) -> float:
+        return self.training.learning_rate
+
+    def capability_requirements(self) -> dict[str, Any]:
+        return {
+            "method": self.training.method,
+            "rollout_steps": self.training.rollout_steps,
+            "trainable_scope": self.training.trainable_scope,
+            "initialization": self.initialization.mode,
+            "optimizer_state": self.precision.optimizer_state,
+            "fidelity_schedule": list(self.curriculum.fidelity_schedule),
+        }
+
+    def fingerprint(
+        self,
+        *,
+        manifest_digest: str = "0" * 64,
+        capability_digest: str = "0" * 64,
+        evaluator_digest: str = "0" * 64,
+        code_digest: str = "0" * 64,
+    ) -> str:
+        payload = {
+            "proposal": self.to_dict(),
+            "parent_checkpoint_sha256": self.parent_checkpoint_sha256,
+            "manifest_digest": _sha256(manifest_digest, "manifest_digest"),
+            "capability_digest": _sha256(capability_digest, "capability_digest"),
+            "evaluator_digest": _sha256(evaluator_digest, "evaluator_digest"),
+            "code_digest": _sha256(code_digest, "code_digest"),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
     def to_dict(self) -> dict[str, Any]:
+        if self.schema_version == 1:
+            return {
+                "schema_version": 1,
+                "proposal_id": self.proposal_id,
+                "parent_checkpoint_sha256": self.parent_checkpoint_sha256,
+                "steps": self.training.train_steps,
+                "teacher_reuse_steps": self.training.rollout_every,
+                "learning_rate": self.training.learning_rate,
+                "focus": self.focus,
+                "hypothesis": self.hypothesis,
+            }
         return asdict(self)
 
 
