@@ -15,6 +15,12 @@ from .fidelity import FidelityGate, FidelityGateDecision, stage_spec
 from .worker import FidelitySpec, fidelity_spec
 from .target import TargetDeviceProfile
 from .wan import WanStudentError, WanStudentSpec, generate_wan_clip, load_pretrained_wan, load_wan_spec
+from .wan_long_video import (
+    WanLongVideoError,
+    WanLongVideoSpec,
+    generate_wan_long_video,
+    validate_wan_long_video,
+)
 from .wan_experiment import (
     RemoteWanExperiment,
     RemoteWanTrainingExperiment,
@@ -46,6 +52,10 @@ __all__ = [
     "generate_wan_clip",
     "load_pretrained_wan",
     "load_wan_spec",
+    "WanLongVideoError",
+    "WanLongVideoSpec",
+    "generate_wan_long_video",
+    "validate_wan_long_video",
     "RemoteWanExperiment",
     "RemoteWanTrainingExperiment",
     "WanExperimentConfigError",

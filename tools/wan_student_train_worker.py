@@ -8,7 +8,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 import torch
 import yaml
@@ -94,6 +94,31 @@ def _parse_devices(raw: Any) -> tuple[str, ...]:
     return values
 
 
+def _training_cache_paths(raw: Mapping[str, Any], *, limit: int) -> list[Path]:
+    """Select one real H3 cache item per caption for prompt-diverse training."""
+
+    cache_dir = Path(str(raw["h3_cache_dir"])).resolve()
+    paths = sorted(cache_dir.glob("*.pt"))
+    if not paths:
+        raise FileNotFoundError("no H3 cache items under %s" % cache_dir)
+    selected: list[Path] = []
+    captions: set[str] = set()
+    for path in paths:
+        item = torch.load(path, map_location="cpu", weights_only=False)
+        caption = str(item.get("caption", "")).strip() if isinstance(item, Mapping) else ""
+        del item
+        key = caption or path.name
+        if key in captions:
+            continue
+        captions.add(key)
+        selected.append(path)
+        if len(selected) >= int(limit):
+            break
+    if not selected:
+        raise ValueError("H3 cache contains no usable captions")
+    return selected
+
+
 def _release_h3_vae() -> None:
     try:
         from harness4h3.student import inference
@@ -114,11 +139,33 @@ def _release_h3_vae() -> None:
         torch.cuda.empty_cache()
 
 
+def _encode_training_prompt(pipeline: Any, prompt: str, spec: WanTrainingSpec, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Encode frozen text without creating inference-mode tensors.
+
+    The returned embeddings are consumed by the trainable Wan Transformer.
+    ``inference_mode`` tensors cannot be saved for backward by autograd even
+    when they are detached, so use ``no_grad`` and clone into normal tensors.
+    """
+
+    with torch.no_grad():
+        prompt_embeds, _ = pipeline.encode_prompt(
+            prompt,
+            do_classifier_free_guidance=False,
+            num_videos_per_prompt=1,
+            max_sequence_length=spec.max_sequence_length,
+            device=device,
+            dtype=dtype,
+        )
+    return prompt_embeds.detach().clone()
+
+
 def _teacher_video(
     raw: Mapping[str, Any],
     spec: WanTrainingSpec,
     teacher_device: torch.device,
     decode_device: torch.device,
+    *,
+    cache_path: Optional[Path] = None,
 ) -> tuple[torch.Tensor, int, str, Mapping[str, Any]]:
     teacher_checkpoint = Path(str(raw["teacher_checkpoint"])).resolve()
     cache_dir = Path(str(raw["h3_cache_dir"])).resolve()
@@ -134,7 +181,7 @@ def _teacher_video(
         latent_width=spec.h3_latent_width,
         condition_dim=5120,
     )
-    cache_item = load_h3_cache_item(cache_dir, target, teacher_device, torch.bfloat16)
+    cache_item = load_h3_cache_item(cache_dir, target, teacher_device, torch.bfloat16, cache_path=cache_path)
     prompt = cache_item["prompt"]
     h3_latent = cache_item["latent"]
     h3_audio = cache_item.get("audio_latent")
@@ -209,22 +256,12 @@ def run(raw: Mapping[str, Any], *, output: Path, result_path: Path, steps_overri
         raise RuntimeError("real Wan training requires a CUDA Student device")
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    cache_paths = _training_cache_paths(raw, limit=max(1, steps))
     frames, teacher_forward_count, teacher_digest, teacher_metadata = _teacher_video(
-        raw, spec, teacher_device, student_device
+        raw, spec, teacher_device, student_device, cache_path=cache_paths[0]
     )
+    teacher_records = [dict(teacher_metadata)]
     components = load_wan_training_components(spec, device=str(student_device))
-    clean_latent = encode_wan_video(components.vae, frames, spec, components.device)
-    prompt = str(teacher_metadata.get("caption", "")).strip() or "A natural cinematic video with coherent motion."
-    with torch.inference_mode():
-        prompt_embeds, _ = components.pipeline.encode_prompt(
-            prompt,
-            do_classifier_free_guidance=False,
-            num_videos_per_prompt=1,
-            max_sequence_length=spec.max_sequence_length,
-            device=components.device,
-            dtype=components.dtype,
-        )
-    prompt_embeds = prompt_embeds.detach()
     optimizer = torch.optim.AdamW(components.transformer.parameters(), lr=float(spec.learning_rate))
     initial_probe = next(components.transformer.parameters()).detach().float().clone()
     generator = torch.Generator(device=str(components.device)).manual_seed(int(raw.get("seed", 20261008)) + 1)
@@ -233,6 +270,27 @@ def run(raw: Mapping[str, Any], *, output: Path, result_path: Path, steps_overri
     distill_losses = []
     started = time.perf_counter()
     for step in range(steps):
+        if step > 0:
+            frames, forward_count, step_teacher_digest, step_teacher_metadata = _teacher_video(
+                raw,
+                spec,
+                teacher_device,
+                student_device,
+                cache_path=cache_paths[step % len(cache_paths)],
+            )
+            teacher_forward_count += int(forward_count)
+            if step_teacher_digest != teacher_digest:
+                raise RuntimeError("Teacher checkpoint digest changed during training")
+            teacher_records.append(dict(step_teacher_metadata))
+        clean_latent = encode_wan_video(components.vae, frames, spec, components.device)
+        prompt = str(teacher_records[-1].get("caption", "")).strip() or "A natural cinematic video with coherent motion."
+        prompt_embeds = _encode_training_prompt(
+            components.pipeline,
+            prompt,
+            spec,
+            components.device,
+            components.dtype,
+        )
         optimizer.zero_grad(set_to_none=True)
         noisy, timestep, target, sigma = flow_match_batch(
             clean_latent,
@@ -263,6 +321,7 @@ def run(raw: Mapping[str, Any], *, output: Path, result_path: Path, steps_overri
         losses.append(float(total.detach().cpu()))
         standard_losses.append(float(standard.cpu()))
         distill_losses.append(float(distill.cpu()))
+        del clean_latent, prompt_embeds, frames
     final_probe = next(components.transformer.parameters()).detach().float()
     changed = not torch.equal(initial_probe.cpu(), final_probe.cpu())
     if not changed:
@@ -310,7 +369,16 @@ def run(raw: Mapping[str, Any], *, output: Path, result_path: Path, steps_overri
             "distill_final": distill_losses[-1],
             "total_history": losses,
         },
-        "teacher": teacher_metadata,
+        "teacher": (
+            teacher_metadata
+            if len(teacher_records) == 1
+            else {
+                "teacher_checkpoint_sha256": teacher_digest,
+                "teacher_forward_count": teacher_forward_count,
+                "cache_items": teacher_records,
+            }
+        ),
+        "training_cache_items": [str(path) for path in cache_paths],
         "wall_time_s": float(time.perf_counter() - started),
     }
     _write(result_path, result)

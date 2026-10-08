@@ -2,7 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from tools.wan_student_train_worker import _parse_devices, _training_spec
+import torch
+
+from tools.wan_student_train_worker import _encode_training_prompt, _parse_devices, _training_spec
 
 
 def test_parse_devices_requires_three_distinct_cuda_devices():
@@ -35,3 +37,18 @@ def test_training_spec_reads_the_existing_wan_model_config(tmp_path: Path):
     assert spec.lineage_root == "W0000"
     assert spec.num_frames == 81
     assert spec.h3_latent_frames == 36
+
+
+def test_training_prompt_is_normal_autograd_tensor():
+    class FakePipeline:
+        @staticmethod
+        def encode_prompt(*args, **kwargs):
+            with torch.inference_mode():
+                return torch.ones(1, 4, 8), None
+
+    class Spec:
+        max_sequence_length = 512
+
+    result = _encode_training_prompt(FakePipeline(), "test", Spec(), torch.device("cpu"), torch.float32)
+    assert not result.is_inference()
+    assert result.requires_grad is False
