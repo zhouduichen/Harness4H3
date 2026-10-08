@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from tools.wan_vllm_campaign import (
+    _campaign_capabilities,
     build_training_command,
     extract_json_content,
     load_loop_config,
@@ -80,3 +81,27 @@ def test_proposal_schema_disallows_code_and_paths():
     assert schema["additionalProperties"] is False
     assert "shell" not in schema["properties"]
     assert "parent_checkpoint_sha256" in schema["properties"]
+
+
+def test_v2_schema_contains_bounded_algorithm_policy_and_capability_snapshot():
+    schema = proposal_json_schema()
+    assert schema["properties"]["schema_version"]["const"] == 2
+    assert "training" in schema["properties"]
+    assert "method" in schema["properties"]["training"]["properties"]
+    assert "source_steps" in schema["properties"]["training"]["properties"]
+    assert "initialization" in schema["properties"]
+    assert "continuation" in schema["properties"]
+
+
+def test_dmd2_capability_requires_adapter_and_memory_admission():
+    disabled = _campaign_capabilities({"algorithm_capabilities": ["dmd2"], "dmd2_memory_admitted": True})
+    dmd2 = next(item for item in disabled["capabilities"] if item["name"] == "dmd2")
+    assert dmd2["available"] is False
+    enabled = _campaign_capabilities(
+        {
+            "algorithm_capabilities": ["dmd2"],
+            "dmd2_memory_admitted": True,
+            "wan_dmd2_adapter_ready": True,
+        }
+    )
+    assert next(item for item in enabled["capabilities"] if item["name"] == "dmd2")["available"] is True

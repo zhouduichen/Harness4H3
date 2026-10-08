@@ -217,6 +217,7 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         ("proposal_schema_version", 2),
         ("algorithm_capabilities", ["progressive_distillation"]),
         ("dmd2_memory_admitted", False),
+        ("wan_dmd2_adapter_ready", False),
         ("fidelity_schedule", ["F1", "F2", "F3"]),
         ("continuation_contract", "30s"),
         ("state_path", ""),
@@ -669,11 +670,15 @@ def _campaign_capabilities(config: Mapping[str, Any]) -> dict[str, Any]:
             },
             {
                 "name": "dmd2",
-                "available": "dmd2" in enabled and bool(config.get("dmd2_memory_admitted", False)),
+                "available": (
+                    "dmd2" in enabled
+                    and bool(config.get("dmd2_memory_admitted", False))
+                    and bool(config.get("wan_dmd2_adapter_ready", False))
+                ),
                 "backend": "h3_training.algorithms.dmd2.DMD2",
                 "constraints": {"critic_memory_admitted": bool(config.get("dmd2_memory_admitted", False))},
                 "evidence_level": "V4",
-                "reason": "Wan critic requires explicit trusted memory admission",
+                "reason": "Wan critic requires both adapter evidence and explicit trusted memory admission",
             },
         ],
         "continuation": {

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -6,7 +7,11 @@ from harness4h3.student.wan_campaign import (
     WanProposalError,
     WanTrainingProposal,
     candidate_decision,
+    load_campaign_state,
+    load_complete_rounds,
+    register_fingerprint,
     sha256_file,
+    write_campaign_state,
 )
 
 
@@ -166,3 +171,31 @@ def test_v2_rejects_unavailable_dmd2_and_unknown_shell():
             expected_parent_sha256=parent,
             capabilities=_progressive_capabilities(),
         )
+
+
+def test_campaign_state_and_complete_round_loading(tmp_path: Path):
+    round_dir = tmp_path / "round-0000"
+    round_dir.mkdir()
+    for name, value in (
+        ("proposal.json", {"proposal_id": "wan_0001"}),
+        ("training-result.json", {"status": "success"}),
+        ("evaluation-result.json", {"status": "success"}),
+        ("decision.json", {"accepted": True}),
+    ):
+        (round_dir / name).write_text(json.dumps(value), encoding="utf-8")
+    incomplete = tmp_path / "round-0001"
+    incomplete.mkdir()
+    (incomplete / "proposal.json").write_text("{}", encoding="utf-8")
+    complete, partial = load_complete_rounds(tmp_path)
+    assert [item["round"] for item in complete] == [0]
+    assert partial == [1]
+    state = load_campaign_state(tmp_path)
+    state["base_digest"] = "a" * 64
+    write_campaign_state(tmp_path, state)
+    assert load_campaign_state(tmp_path)["base_digest"] == "a" * 64
+
+
+def test_register_fingerprint_is_append_only_and_deduplicated(tmp_path: Path):
+    assert register_fingerprint(tmp_path, "f1", {"round": 1}) is False
+    assert register_fingerprint(tmp_path, "f1", {"round": 2}) is True
+    assert len((tmp_path / "fingerprints.jsonl").read_text(encoding="utf-8").splitlines()) == 1

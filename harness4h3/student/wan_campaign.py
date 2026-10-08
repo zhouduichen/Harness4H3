@@ -229,7 +229,7 @@ class WanCurriculumPolicy:
         raw = _mapping(raw, "curriculum")
         _unknown(raw, {"fidelity_schedule"}, "curriculum")
         value = raw.get("fidelity_schedule", ("F1", "F2", "F3"))
-        if not isinstance(value, (list, tuple)) or not value or tuple(value) != tuple(value):
+        if not isinstance(value, (list, tuple)) or not value:
             raise WanProposalError("curriculum.fidelity_schedule must be a non-empty list")
         schedule = tuple(str(item) for item in value)
         if any(item not in {"F1", "F2", "F3"} for item in schedule) or schedule != tuple(sorted(schedule, key=("F1", "F2", "F3").index)):
@@ -303,7 +303,13 @@ class WanTrainingProposal:
                 "schema_version", "proposal_id", "parent_checkpoint_sha256", "training", "initialization",
                 "precision", "curriculum", "data", "continuation", "focus", "hypothesis",
             }, "proposal")
-            _require(raw, ("schema_version", "proposal_id", "parent_checkpoint_sha256", "training", "focus", "hypothesis"))
+            _require(
+                raw,
+                (
+                    "schema_version", "proposal_id", "parent_checkpoint_sha256", "training", "initialization",
+                    "precision", "curriculum", "data", "continuation", "focus", "hypothesis",
+                ),
+            )
         else:
             raise WanProposalError("schema_version must be 1 or 2")
         proposal_id = _string(raw["proposal_id"], "proposal_id")
@@ -502,11 +508,97 @@ def append_event(path: Path, event: Mapping[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
+def _json_file(path: Path) -> dict[str, Any]:
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise WanProposalError("campaign artifact must be an object: %s" % path)
+    return dict(value)
+
+
+def load_complete_rounds(root: Path) -> tuple[list[dict[str, Any]], list[int]]:
+    """Load complete round records and identify rounds interrupted mid-write."""
+
+    root = Path(root)
+    complete: list[dict[str, Any]] = []
+    incomplete: list[int] = []
+    for round_dir in sorted(root.glob("round-*")):
+        if not round_dir.is_dir():
+            continue
+        try:
+            round_index = int(round_dir.name.split("-", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        paths = {name: round_dir / name for name in ("proposal.json", "training-result.json", "evaluation-result.json", "decision.json")}
+        if not all(path.is_file() for path in paths.values()):
+            if any(path.exists() for path in paths.values()):
+                incomplete.append(round_index)
+            continue
+        complete.append(
+            {
+                "round": round_index,
+                "proposal": _json_file(paths["proposal.json"]),
+                "training": _json_file(paths["training-result.json"]),
+                "evaluation": _json_file(paths["evaluation-result.json"]),
+                "decision": _json_file(paths["decision.json"]),
+            }
+        )
+    complete.sort(key=lambda item: int(item["round"]))
+    return complete, incomplete
+
+
+def load_campaign_state(root: Path) -> dict[str, Any]:
+    path = Path(root) / "campaign-state.json"
+    if not path.is_file():
+        return {
+            "base_digest": "",
+            "last_complete_round": 0,
+            "next_round": 1,
+            "parent_checkpoint": None,
+            "parent_checkpoint_sha256": None,
+            "parent_evaluation": None,
+            "accepted_history": [],
+            "failed_rounds": [],
+        }
+    state = _json_file(path)
+    for name in ("base_digest", "last_complete_round", "next_round", "accepted_history", "failed_rounds"):
+        if name not in state:
+            raise WanProposalError("campaign state is missing %s" % name)
+    return state
+
+
+def write_campaign_state(root: Path, state: Mapping[str, Any]) -> None:
+    atomic_write_json(Path(root) / "campaign-state.json", state)
+
+
+def register_fingerprint(root: Path, fingerprint: str, metadata: Mapping[str, Any]) -> bool:
+    """Append a policy fingerprint and return whether it was already present."""
+
+    path = Path(root) / "fingerprints.jsonl"
+    fingerprint = _string(fingerprint, "fingerprint")
+    existing: set[str] = set()
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, Mapping) and item.get("fingerprint"):
+                existing.add(str(item["fingerprint"]))
+    if fingerprint in existing:
+        return True
+    append_event(path, {"fingerprint": fingerprint, **dict(metadata)})
+    return False
+
+
 __all__ = [
     "WanProposalError",
     "WanTrainingProposal",
     "append_event",
     "atomic_write_json",
     "candidate_decision",
+    "load_campaign_state",
+    "load_complete_rounds",
+    "register_fingerprint",
     "sha256_file",
+    "write_campaign_state",
 ]
