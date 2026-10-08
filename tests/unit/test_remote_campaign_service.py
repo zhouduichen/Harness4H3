@@ -31,3 +31,20 @@ def test_campaign_service_has_explicit_operator_pause_gate():
     assert 'ACTION" != "resume"' in source
     assert 'campaign automation is operator-paused' in source
     assert 'campaign automation resumed; no campaign was started' in source
+
+
+def test_campaign_service_dispatches_wan_watchdog_without_changing_default_mode():
+    source = Path("tools/remote-campaign-service.sh").read_text(encoding="utf-8")
+
+    assert 'CAMPAIGN_KIND="${REMOTE_CAMPAIGN_KIND:-overnight}"' in source
+    assert 'if [ "$CAMPAIGN_KIND" = "wan_vllm" ]' in source
+    assert "wan-vllm-campaign-watchdog.sh" in source
+    assert "WAN_CAMPAIGN_RESTART_LIMIT" in source
+    assert 'CAMPAIGN_KIND="${REMOTE_CAMPAIGN_KIND:-overnight}"' in source
+
+
+def test_campaign_service_wan_stop_checks_watchdog_command_before_signaling():
+    source = Path("tools/remote-campaign-service.sh").read_text(encoding="utf-8")
+
+    assert 'refusing to stop PID $pid: command is not the configured Wan watchdog' in source
+    assert 'kill -TERM -- "$pid"' in source

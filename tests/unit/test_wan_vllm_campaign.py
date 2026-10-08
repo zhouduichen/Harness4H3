@@ -78,6 +78,16 @@ def test_loop_config_requires_absolute_trusted_paths(tmp_path: Path):
         load_loop_config(config)
 
 
+def test_wan_loop_config_exposes_unattended_service_defaults():
+    config = load_loop_config(Path("configs/student-campaign.wan-vllm-loop.yaml"))
+    assert int(config["watchdog_restart_limit"]) >= 1
+    assert int(config["watchdog_backoff_seconds"]) >= 0
+    assert str(config["watchdog_stop_file"]).startswith(str(config["output_root"]))
+    assert str(config["watchdog_lock_file"]).startswith(str(config["output_root"]))
+    assert str(config["watchdog_child_pid_file"]).startswith(str(config["output_root"]))
+    assert str(config["watchdog_log"]).startswith(str(config["output_root"]))
+
+
 def test_proposal_schema_disallows_code_and_paths():
     schema = proposal_json_schema()
     assert schema["additionalProperties"] is False

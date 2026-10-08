@@ -23,6 +23,12 @@ wan_loop:
   fingerprint_path: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w8/fingerprints.jsonl
   experience_path: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w8/experiences.jsonl
   checkpoint_every_steps: 8
+  watchdog_restart_limit: 3
+  watchdog_backoff_seconds: 30
+  watchdog_stop_file: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w8/.wan-watchdog-stop
+  watchdog_lock_file: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w8/.watchdog.lock
+  watchdog_child_pid_file: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w8/.campaign-child.pid
+  watchdog_log: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w8/watchdog.log
   offline_simulation: false
   controller_launcher: /home/intern/huangjiahao/Harness4H3-long-video-30s/tools/controller-wait-launch.sh
   controller_launcher_pid_file: /data/models/harness4h3-v27-code-long-30s/wan-vllm-loop-w8/controller-launcher.pid

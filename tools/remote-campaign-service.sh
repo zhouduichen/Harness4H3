@@ -42,6 +42,147 @@ CONTROLLER_FALLBACK_PORTS="${REMOTE_CAMPAIGN_CONTROLLER_FALLBACK_PORTS:-8000}"
 RESOURCE_POLL_INTERVAL_S="${REMOTE_CAMPAIGN_RESOURCE_POLL_INTERVAL_S:-15}"
 CAMPAIGN_MAX_ITERATIONS="${REMOTE_CAMPAIGN_MAX_ITERATIONS:-512}"
 
+# Wan vLLM uses the same service entrypoint but a different child lifecycle.
+# Keep the overnight controller path below untouched when this kind is not
+# explicitly selected.
+CAMPAIGN_KIND="${REMOTE_CAMPAIGN_KIND:-overnight}"
+if [ "$CAMPAIGN_KIND" = "wan_vllm" ]; then
+    WAN_CONFIG="$CONFIG"
+    WAN_OUTPUT="$OUTPUT"
+    WAN_WATCHDOG="${REMOTE_WAN_CAMPAIGN_WATCHDOG:-$REPO_ROOT/tools/wan-vllm-campaign-watchdog.sh}"
+    WAN_CAMPAIGN_SCRIPT="${REMOTE_WAN_CAMPAIGN_SCRIPT:-$REPO_ROOT/tools/wan_vllm_campaign.py}"
+    WAN_PID_FILE="${REMOTE_CAMPAIGN_PID_FILE:-$WAN_OUTPUT/.wan-watchdog.pid}"
+    WAN_LOG_FILE="${REMOTE_CAMPAIGN_LOG_FILE:-$WAN_OUTPUT/wan-watchdog-service.log}"
+    WAN_STOP_FILE="${REMOTE_CAMPAIGN_STOP_FILE:-$WAN_OUTPUT/.wan-watchdog-stop}"
+    WAN_PAUSE_FILE="${REMOTE_CAMPAIGN_PAUSE_FILE:-$WAN_OUTPUT/.wan-watchdog-paused}"
+    WAN_LOCK_FILE="${REMOTE_WAN_CAMPAIGN_LOCK_FILE:-$WAN_OUTPUT/.watchdog.lock}"
+    WAN_CHILD_PID_FILE="${REMOTE_WAN_CAMPAIGN_CHILD_PID_FILE:-$WAN_OUTPUT/.campaign-child.pid}"
+    WAN_WATCHDOG_LOG="${REMOTE_WAN_CAMPAIGN_WATCHDOG_LOG:-$WAN_OUTPUT/watchdog.log}"
+    WAN_MAX_ROUNDS="${REMOTE_WAN_CAMPAIGN_MAX_ROUNDS:-2}"
+    WAN_RESTART_LIMIT="${REMOTE_WAN_CAMPAIGN_RESTART_LIMIT:-3}"
+    WAN_BACKOFF_SECONDS="${REMOTE_WAN_CAMPAIGN_BACKOFF_SECONDS:-30}"
+
+    wan_read_pid() {
+        [ -f "$WAN_PID_FILE" ] || return 1
+        local value
+        value=$(tr -d '[:space:]' < "$WAN_PID_FILE")
+        case "$value" in
+            ''|*[!0-9]*) return 1 ;;
+            *) printf '%s\n' "$value" ;;
+        esac
+    }
+
+    wan_pid_matches() {
+        local pid="$1" command
+        command=$(ps -p "$pid" -o args= 2>/dev/null || true)
+        [[ "$command" == *"$WAN_WATCHDOG"* && "$command" == *"$WAN_CONFIG"* ]]
+    }
+
+    wan_live() {
+        local pid
+        pid=$(wan_read_pid || true)
+        [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && wan_pid_matches "$pid"
+    }
+
+    wan_status() {
+        local pid="" child="" state="missing"
+        pid=$(wan_read_pid || true)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && wan_pid_matches "$pid"; then
+            state="running"
+        elif [ -f "$WAN_PAUSE_FILE" ]; then
+            state="paused"
+        elif [ -n "$pid" ]; then
+            state="stale_pid_file"
+        fi
+        child=$(tr -d '[:space:]' < "$WAN_CHILD_PID_FILE" 2>/dev/null || true)
+        printf 'campaign=%s kind=wan_vllm watchdog_pid=%s child_pid=%s state=%s\n' \
+            "$WAN_OUTPUT" "${pid:-none}" "${child:-none}" "$state"
+        if [ -f "$WAN_OUTPUT/campaign-result.json" ]; then
+            printf 'campaign_result=present\n'
+        else
+            printf 'campaign_result=absent\n'
+        fi
+    }
+
+    wan_start() {
+        mkdir -p -- "$WAN_OUTPUT"
+        if [ -f "$WAN_PAUSE_FILE" ]; then
+            echo "Wan campaign automation is operator-paused: $WAN_PAUSE_FILE" >&2
+            return 3
+        fi
+        if wan_live; then
+            echo "Wan campaign watchdog already running pid=$(wan_read_pid)"
+            return 0
+        fi
+        if [ -f "$WAN_PID_FILE" ]; then
+            rm -f -- "$WAN_PID_FILE"
+        fi
+        [ -x "$PYTHON" ] || { echo "trusted Python is not executable: $PYTHON" >&2; return 1; }
+        [ -f "$WAN_WATCHDOG" ] || { echo "Wan watchdog not found: $WAN_WATCHDOG" >&2; return 1; }
+        [ -f "$WAN_CAMPAIGN_SCRIPT" ] || { echo "Wan campaign script not found: $WAN_CAMPAIGN_SCRIPT" >&2; return 1; }
+        [ -f "$WAN_CONFIG" ] || { echo "Wan campaign config not found: $WAN_CONFIG" >&2; return 1; }
+        rm -f -- "$WAN_STOP_FILE"
+        nohup env \
+            WAN_CAMPAIGN_PYTHON="$PYTHON" \
+            WAN_CAMPAIGN_SCRIPT="$WAN_CAMPAIGN_SCRIPT" \
+            WAN_CAMPAIGN_CONFIG="$WAN_CONFIG" \
+            WAN_CAMPAIGN_OUTPUT="$WAN_OUTPUT" \
+            WAN_CAMPAIGN_MAX_ROUNDS="$WAN_MAX_ROUNDS" \
+            WAN_CAMPAIGN_RESTART_LIMIT="$WAN_RESTART_LIMIT" \
+            WAN_CAMPAIGN_BACKOFF_SECONDS="$WAN_BACKOFF_SECONDS" \
+            WAN_CAMPAIGN_STOP_FILE="$WAN_STOP_FILE" \
+            WAN_CAMPAIGN_LOCK_FILE="$WAN_LOCK_FILE" \
+            WAN_CAMPAIGN_CHILD_PID_FILE="$WAN_CHILD_PID_FILE" \
+            WAN_CAMPAIGN_LOG="$WAN_WATCHDOG_LOG" \
+            bash "$WAN_WATCHDOG" \
+            >> "$WAN_LOG_FILE" 2>&1 < /dev/null &
+        local pid=$!
+        printf '%s\n' "$pid" > "$WAN_PID_FILE"
+        echo "started Wan campaign watchdog pid=$pid log=$WAN_LOG_FILE"
+    }
+
+    wan_stop() {
+        local pid
+        pid=$(wan_read_pid || true)
+        if [ -z "$pid" ]; then
+            echo "Wan campaign watchdog not running"
+            return 0
+        fi
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f -- "$WAN_PID_FILE"
+            echo "stale Wan watchdog pid file removed"
+            return 0
+        fi
+        if ! wan_pid_matches "$pid"; then
+            echo "refusing to stop PID $pid: command is not the configured Wan watchdog" >&2
+            return 1
+        fi
+        touch -- "$WAN_STOP_FILE"
+        kill -TERM -- "$pid"
+        echo "graceful Wan campaign stop requested pid=$pid marker=$WAN_STOP_FILE"
+    }
+
+    case "$ACTION" in
+        start) wan_start ;;
+        status) wan_status ;;
+        stop) wan_stop ;;
+        pause)
+            mkdir -p -- "$WAN_OUTPUT"
+            touch -- "$WAN_PAUSE_FILE"
+            wan_stop || true
+            echo "Wan campaign automation paused"
+            ;;
+        resume)
+            rm -f -- "$WAN_PAUSE_FILE" "$WAN_STOP_FILE"
+            echo "Wan campaign automation resumed; no campaign was started"
+            ;;
+        ensure-controller|cleanup-controller)
+            echo "Wan campaign owns Controller readiness through wan_vllm_campaign.py"
+            ;;
+    esac
+    exit 0
+fi
+
 read_pid() {
     [ -f "$PID_FILE" ] || return 1
     local value

@@ -228,6 +228,12 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         ("fingerprint_path", ""),
         ("experience_path", ""),
         ("checkpoint_every_steps", 8),
+        ("watchdog_restart_limit", 3),
+        ("watchdog_backoff_seconds", 30),
+        ("watchdog_stop_file", ""),
+        ("watchdog_lock_file", ""),
+        ("watchdog_child_pid_file", ""),
+        ("watchdog_log", ""),
         ("offline_simulation", False),
     ):
         loop.setdefault(name, default)
@@ -248,6 +254,14 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         loop["fingerprint_path"] = str(root / "fingerprints.jsonl")
     if not loop["experience_path"]:
         loop["experience_path"] = str(root / "experiences.jsonl")
+    if not loop["watchdog_stop_file"]:
+        loop["watchdog_stop_file"] = str(root / ".wan-watchdog-stop")
+    if not loop["watchdog_lock_file"]:
+        loop["watchdog_lock_file"] = str(root / ".watchdog.lock")
+    if not loop["watchdog_child_pid_file"]:
+        loop["watchdog_child_pid_file"] = str(root / ".campaign-child.pid")
+    if not loop["watchdog_log"]:
+        loop["watchdog_log"] = str(root / "watchdog.log")
     for name in (
         "controller_launcher",
         "controller_launcher_pid_file",
@@ -256,6 +270,10 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         "controller_release_file",
         "controller_worker_lease_file",
         "experience_path",
+        "watchdog_stop_file",
+        "watchdog_lock_file",
+        "watchdog_child_pid_file",
+        "watchdog_log",
     ):
         if loop[name] and not Path(str(loop[name])).is_absolute():
             raise ValueError("%s must be absolute" % name)
@@ -276,6 +294,10 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         raise ValueError("algorithm_capabilities must list progressive_distillation and/or dmd2")
     if int(loop["checkpoint_every_steps"]) < 0:
         raise ValueError("checkpoint_every_steps must not be negative")
+    if int(loop["watchdog_restart_limit"]) <= 0:
+        raise ValueError("watchdog_restart_limit must be positive")
+    if int(loop["watchdog_backoff_seconds"]) < 0:
+        raise ValueError("watchdog_backoff_seconds must not be negative")
     if not isinstance(loop["fidelity_schedule"], list) or not loop["fidelity_schedule"]:
         raise ValueError("fidelity_schedule must be a non-empty list")
     if any(str(item) not in {"F1", "F2", "F3"} for item in loop["fidelity_schedule"]):
