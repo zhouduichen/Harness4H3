@@ -905,6 +905,7 @@ def evaluate_checkpoint(config: Mapping[str, Any], checkpoint: Path, output_dir:
         load_wan_transformer_checkpoint,
         validate_wan_long_video,
     )
+    import torch
 
     output_dir.mkdir(parents=True, exist_ok=True)
     result_path = output_dir / "evaluation-result.json"
@@ -956,6 +957,8 @@ def evaluate_checkpoint(config: Mapping[str, Any], checkpoint: Path, output_dir:
                 case_dir = output_dir / "videos" / case.case_id / ("seed_%d" % int(seed))
                 video_path = case_dir / ("wan-5s.mp4" if short_contract else "wan-long.mp4")
                 started = time.perf_counter()
+                if device.type == "cuda":
+                    torch.cuda.reset_peak_memory_stats(device)
                 if short_contract:
                     frames, generation = generate_wan_clip(
                         pipeline,
@@ -979,6 +982,16 @@ def evaluate_checkpoint(config: Mapping[str, Any], checkpoint: Path, output_dir:
                     write_wan_video(frames, video_path, contract.output_fps)
                     validity = validate_wan_long_video(video_path, contract)
                 evidence = quality_backend.evaluate(video_path, case.caption)
+                peak_memory_bytes = (
+                    int(torch.cuda.max_memory_allocated(device))
+                    if device.type == "cuda"
+                    else 0
+                )
+                generation = {
+                    **dict(generation),
+                    "peak_memory_bytes": peak_memory_bytes,
+                    "peak_memory_gb": float(peak_memory_bytes / (1024**3)),
+                }
                 cases.append(
                     {
                         "case_id": case.case_id,
@@ -1046,6 +1059,14 @@ def evaluate_checkpoint(config: Mapping[str, Any], checkpoint: Path, output_dir:
                     ),
                 },
                 "score_type": "clip_temporal",
+            },
+            "hardware_metrics": {
+                "generation_wall_time_s_total": sum(float(item["generation_wall_time_s"]) for item in cases),
+                "generation_wall_time_s_mean": sum(float(item["generation_wall_time_s"]) for item in cases) / len(cases),
+                "peak_memory_bytes_max": max(int(item["generation"].get("peak_memory_bytes", 0)) for item in cases),
+                "peak_memory_gb_max": max(float(item["generation"].get("peak_memory_gb", 0.0)) for item in cases),
+                "inference_steps_total": sum(int(item["generation"].get("num_inference_steps", 0)) for item in cases),
+                "transformer_nfe_proxy": sum(int(item["generation"].get("num_inference_steps", 0)) for item in cases),
             },
             "visual_quality_gate": {
                 "enabled": any(bool(item.get("enabled", False)) for item in visual_gate_results),
