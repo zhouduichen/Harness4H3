@@ -67,6 +67,12 @@ def _stage_checkpoint_path(base: Path, stage_index: int) -> Path:
     return base.with_name("%s-stage-%02d%s" % (base.stem, int(stage_index), base.suffix))
 
 
+def _training_seed(raw: Mapping[str, Any], stage_index: int = 0) -> int:
+    """Return the declared experiment seed, offset per progressive stage."""
+
+    return int(raw.get("seed", 20261008)) + int(stage_index)
+
+
 def _load_mapping(path: Path) -> Mapping[str, Any]:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, Mapping) or not isinstance(raw.get("wan_training"), Mapping):
@@ -578,6 +584,10 @@ def run(
     teacher_target_mode = str(raw.get("teacher_target_mode", "online_h3")).strip()
     teacher_devices = _parse_devices(raw["teacher_devices"])
     student_device = torch.device(str(raw.get("student_device", "cuda:3")))
+    # Bind the optimizer/data RNG to the declared experiment seed.  Keeping
+    # this hard-coded makes cache-RGB seed replays identical apart from GPU
+    # nondeterminism and invalidates the requested seed comparison.
+    training_seed = _training_seed(raw)
     teacher_device = torch.device(teacher_devices[0])
     if student_device in {torch.device(item) for item in teacher_devices}:
         raise ValueError("Student device overlaps a Teacher device")
@@ -718,7 +728,7 @@ def run(
             stage_checkpoint = _stage_checkpoint_path(training_checkpoint, stage_index)
             trainer = TrainerEngine(
                 TrainerConfig(
-                    seed=20261008 + stage_index,
+                    seed=_training_seed(raw, stage_index),
                     parent_sha256=parent_checkpoint_digest or "",
                     device=str(components.device),
                     policy_digest=_digest({"policy": policy_digest, "stage": stage_index, "stage_spec": stage.__dict__}),
@@ -822,7 +832,7 @@ def run(
         )
         trainer = TrainerEngine(
             TrainerConfig(
-                seed=20261008,
+                seed=training_seed,
                 parent_sha256=parent_checkpoint_digest or "",
                 device=str(components.device),
                 policy_digest=policy_digest,
@@ -917,6 +927,7 @@ def run(
             "wan_schedule_shift": source_schedule.shift,
             "wan_schedule_source_nfe": source_schedule.nfe,
             "wan_schedule_digest": source_schedule_digest,
+            "training_seed": training_seed,
         },
     )
     result = {
@@ -960,6 +971,7 @@ def run(
         "stage_lineage": stage_lineage,
         "teacher_forward_count": teacher_forward_count,
         "teacher_target_mode": teacher_target_mode,
+        "training_seed": training_seed,
         "offline_simulation": False,
         "frame_contract": {
             "frames": spec.num_frames,

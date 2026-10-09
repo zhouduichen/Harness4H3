@@ -11,6 +11,7 @@ from tools.wan_student_train_worker import (
     _parse_devices,
     _trainable_parameter_probe,
     _training_cache_paths,
+    _training_seed,
     _training_spec,
 )
 
@@ -27,6 +28,12 @@ def test_worker_schedule_provider_uses_native_32_and_coarsened_16():
     assert source.mode == "native"
     assert target.mode == "coarsened_from_source"
     assert target.sigmas == source.sigmas[::2]
+
+
+def test_training_seed_is_bound_to_config_and_stage():
+    assert _training_seed({"seed": 20261009}) == 20261009
+    assert _training_seed({"seed": 20261009}, stage_index=1) == 20261010
+    assert _training_seed({}) == 20261008
 
 
 def test_parse_devices_requires_three_distinct_cuda_devices():
