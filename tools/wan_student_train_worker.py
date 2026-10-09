@@ -285,6 +285,7 @@ def _teacher_video(
     decode_device: torch.device,
     *,
     cache_path: Optional[Path] = None,
+    teacher_digest_override: Optional[str] = None,
 ) -> tuple[torch.Tensor, int, str, Mapping[str, Any]]:
     teacher_checkpoint = Path(str(raw["teacher_checkpoint"])).resolve()
     cache_dir = Path(str(raw["h3_cache_dir"])).resolve()
@@ -341,7 +342,7 @@ def _teacher_video(
                 "wan_cache_video_nonfinite",
                 "native H3 cache RGB resampling produced non-finite frames for cache item %s" % cache_path,
             )
-        teacher_digest = sha256_path(teacher_checkpoint)
+        teacher_digest = teacher_digest_override or sha256_path(teacher_checkpoint)
         cached_teacher_digest = str(cache_metadata.get("teacher_checkpoint_sha256", "")).strip()
         if cached_teacher_digest and cached_teacher_digest != teacher_digest:
             raise WanStudentError(
@@ -418,7 +419,7 @@ def _teacher_video(
         forward_count = int(service.forward_count)
         if forward_count <= 0:
             raise RuntimeError("real H3 Teacher completed without a forward")
-        teacher_digest = sha256_path(teacher_checkpoint)
+        teacher_digest = teacher_digest_override or sha256_path(teacher_checkpoint)
     finally:
         forward_count = int(service.forward_count)
         service.close()
@@ -587,7 +588,7 @@ def run(
     cache_paths = _training_cache_paths(raw, limit=max(1, teacher_groups))
     started = time.perf_counter()
     teacher_forward_count = 0
-    teacher_digest: Optional[str] = None
+    teacher_digest: Optional[str] = sha256_path(Path(str(raw["teacher_checkpoint"])).resolve())
     teacher_records: list[dict[str, Any]] = []
     teacher_samples: list[tuple[torch.Tensor, dict[str, Any]]] = []
     # Materialize the real H3 RGB targets before loading the Wan pipeline on
@@ -600,11 +601,10 @@ def run(
             teacher_device,
             student_device,
             cache_path=cache_paths[group_index % len(cache_paths)],
+            teacher_digest_override=teacher_digest,
         )
         teacher_forward_count += int(forward_count)
-        if teacher_digest is None:
-            teacher_digest = step_teacher_digest
-        elif step_teacher_digest != teacher_digest:
+        if step_teacher_digest != teacher_digest:
             raise RuntimeError("Teacher checkpoint digest changed during training")
         metadata = dict(step_teacher_metadata)
         teacher_records.append(metadata)
