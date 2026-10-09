@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import math
+import gc
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -145,6 +146,51 @@ def load_wan_training_components(spec: WanTrainingSpec, *, device: Optional[str]
         device=selected,
         dtype=torch_dtype,
     )
+
+
+def load_wan_trajectory_teacher(spec: WanTrainingSpec, *, device: str) -> Any:
+    """Load only a frozen pretrained Wan Transformer for real 32-step targets.
+
+    The Student training pipeline already owns a VAE, text encoder, and
+    Transformer.  Loading another full pipeline directly onto the same GPU
+    can transiently exceed a 48-GB card, so the second pipeline is assembled
+    on CPU, its Transformer is moved to the requested device, and every other
+    component is released before training starts.  The returned module is
+    intentionally the official pretrained Wan Transformer, never the Student
+    checkpoint or a random-initialized substitute.
+    """
+
+    try:
+        diffusers = importlib.import_module("diffusers")
+        pipeline_class = getattr(diffusers, "WanPipeline")
+    except (ImportError, AttributeError) as exc:
+        raise WanStudentError("diffusers_missing", "Wan trajectory Teacher requires diffusers.WanPipeline") from exc
+    source = str(spec.pretrained_path or spec.model_id)
+    try:
+        pipeline = pipeline_class.from_pretrained(
+            source,
+            torch_dtype=_torch_dtype(torch, spec),
+            local_files_only=True,
+        )
+        transformer = getattr(pipeline, "transformer", None)
+        if transformer is None:
+            raise WanStudentError("transformer_missing", "Wan checkpoint has no Transformer component")
+        transformer = transformer.to(torch.device(str(device)))
+        transformer.eval()
+        for parameter in transformer.parameters():
+            parameter.requires_grad_(False)
+        # Break the pipeline's reference to the Transformer before releasing
+        # its VAE/text encoder/tokenizer.  The returned module remains alive.
+        pipeline.transformer = None
+        del pipeline
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return transformer
+    except WanStudentError:
+        raise
+    except Exception as exc:
+        raise WanStudentError("wan_teacher_load_failed", str(exc)) from exc
 
 
 def _wan_latent_normalize(raw_latent: torch.Tensor, vae: Any) -> torch.Tensor:

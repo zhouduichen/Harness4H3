@@ -32,6 +32,7 @@ from harness4h3.student.wan_training import (
     WanTrainingSpec,
     encode_wan_video,
     flow_match_batch,
+    load_wan_trajectory_teacher,
     load_wan_training_components,
     resample_video_frames,
     save_wan_checkpoint,
@@ -568,6 +569,9 @@ def run(
         raise ValueError("Student device overlaps a Teacher device")
     if student_device.type != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("real Wan training requires a CUDA Student device")
+    wan_teacher_mode = str(raw.get("wan_teacher_mode", "h3_endpoint")).strip()
+    if wan_teacher_mode not in {"h3_endpoint", "wan_base_trajectory"}:
+        raise ValueError("unsupported wan_teacher_mode: %s" % wan_teacher_mode)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     cache_paths = _training_cache_paths(raw, limit=max(1, teacher_groups))
@@ -603,6 +607,20 @@ def run(
     if parent_raw:
         parent_checkpoint = Path(str(parent_raw)).resolve()
         parent_checkpoint_digest = load_wan_transformer_checkpoint(components.pipeline, parent_checkpoint)
+    wan_teacher_digest: Optional[str] = None
+    if wan_teacher_mode == "wan_base_trajectory":
+        # Use the official pretrained Wan Transformer as the frozen 32-step
+        # Teacher.  The H3 cache still supplies the clean RGB/Wan-VAE target,
+        # but it must not stand in for the Wan denoising trajectory.
+        wan_teacher_model = load_wan_trajectory_teacher(spec, device=str(student_device))
+        wan_teacher_source = Path(str(spec.pretrained_path or spec.model_id))
+        wan_teacher_digest = (
+            sha256_path(wan_teacher_source)
+            if wan_teacher_source.exists()
+            else "model-id:%s" % spec.model_id
+        )
+    else:
+        wan_teacher_model = WanEndpointTeacher()
     initialization_mode = _apply_initialization_mode(
         components.transformer,
         initialization_mode_override if initialization_mode_override is not None else raw.get("initialization_mode", "inherit"),
@@ -647,7 +665,7 @@ def run(
     )
     source_schedule = adapter.schedule_provider(policy.source_steps)
     source_schedule_digest = _digest(source_schedule.to_dict())
-    endpoint_teacher = WanEndpointTeacher()
+    endpoint_teacher = wan_teacher_model
     stage_lineage: list[dict[str, Any]] = []
     total_optimizer_steps = 0
     initial_loss: Optional[float] = None
@@ -740,7 +758,13 @@ def run(
                     "stage_child": str(stage_path),
                     "stage_child_sha256": stage_digest,
                     "teacher_checkpoint_sha256": teacher_digest,
-                    "teacher_kind": "native_h3_cache_rgb" if teacher_target_mode == "cache_rgb" else "h3_rgb_boundary_endpoint",
+                    "teacher_kind": (
+                        "wan_base_trajectory"
+                        if wan_teacher_mode == "wan_base_trajectory"
+                        else ("native_h3_cache_rgb_endpoint" if teacher_target_mode == "cache_rgb" else "h3_rgb_boundary_endpoint")
+                    ),
+                    "wan_teacher_mode": wan_teacher_mode,
+                    "wan_teacher_checkpoint_sha256": wan_teacher_digest or "",
                     "wan_schedule_mode": stage_schedule.mode,
                     "wan_schedule_shift": stage_schedule.shift,
                     "wan_schedule_source_nfe": stage_schedule.source_nfe or stage_schedule.nfe,
@@ -837,6 +861,8 @@ def run(
             "parent_checkpoint": str(parent_checkpoint) if parent_checkpoint else "",
             "parent_checkpoint_sha256": parent_checkpoint_digest or "",
             "teacher_checkpoint_sha256": teacher_digest,
+            "wan_teacher_mode": wan_teacher_mode,
+            "wan_teacher_checkpoint_sha256": wan_teacher_digest or "",
             "teacher_forward_count": teacher_forward_count,
             "teacher_target_mode": teacher_target_mode,
             "offline_simulation": "false",
@@ -883,6 +909,8 @@ def run(
         "parent_checkpoint": str(parent_checkpoint) if parent_checkpoint else None,
         "parent_checkpoint_sha256": parent_checkpoint_digest,
         "teacher_checkpoint_sha256": teacher_digest,
+        "wan_teacher_mode": wan_teacher_mode,
+        "wan_teacher_checkpoint_sha256": wan_teacher_digest or "",
         "student_checkpoint_sha256": checkpoint_digest,
         "student_checkpoint": str(checkpoint_path),
         "optimizer_steps": total_optimizer_steps,
