@@ -1091,9 +1091,14 @@ def _evaluate_checkpoint_strict_single(config: Mapping[str, Any], checkpoint: Pa
             for seed in case.seeds[: int(config["seed_count"])]:
                 case_dir = output_dir / "videos" / case.case_id / ("seed_%d" % int(seed))
                 video_path = case_dir / ("wan-5s.mp4" if short_contract else "wan-long.mp4")
-                started = time.perf_counter()
+                case_started = time.perf_counter()
                 if device.type == "cuda":
                     torch.cuda.reset_peak_memory_stats(device)
+                    # CUDA kernels are asynchronous.  Synchronize the
+                    # boundary so this hardware metric measures actual Wan
+                    # inference rather than Python launch time.
+                    torch.cuda.synchronize(device)
+                inference_started = time.perf_counter()
                 if short_contract:
                     frames, generation = generate_wan_clip(
                         pipeline,
@@ -1103,8 +1108,6 @@ def _evaluate_checkpoint_strict_single(config: Mapping[str, Any], checkpoint: Pa
                         device=device,
                     )
                     generation = {**dict(generation), "continuation_verified": True, "offline_simulation": False}
-                    write_wan_video(frames, video_path, spec.native_fps)
-                    validity = validate_video_output(video_path, contract)
                 else:
                     frames, generation = generate_wan_long_video(
                         pipeline,
@@ -1114,9 +1117,21 @@ def _evaluate_checkpoint_strict_single(config: Mapping[str, Any], checkpoint: Pa
                         seed=int(seed),
                         device=device,
                     )
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                inference_wall_time = time.perf_counter() - inference_started
+                io_started = time.perf_counter()
+                if short_contract:
+                    write_wan_video(frames, video_path, spec.native_fps)
+                    validity = validate_video_output(video_path, contract)
+                else:
                     write_wan_video(frames, video_path, contract.output_fps)
                     validity = validate_wan_long_video(video_path, contract)
+                io_wall_time = time.perf_counter() - io_started
+                quality_started = time.perf_counter()
                 evidence = quality_backend.evaluate(video_path, case.caption)
+                quality_wall_time = time.perf_counter() - quality_started
+                case_wall_time = time.perf_counter() - case_started
                 peak_memory_bytes = (
                     int(torch.cuda.max_memory_allocated(device))
                     if device.type == "cuda"
@@ -1133,7 +1148,11 @@ def _evaluate_checkpoint_strict_single(config: Mapping[str, Any], checkpoint: Pa
                         "seed": int(seed),
                         "caption": case.caption,
                         "video_path": str(video_path),
-                        "generation_wall_time_s": float(time.perf_counter() - started),
+                        "generation_wall_time_s": float(inference_wall_time),
+                        "inference_wall_time_s": float(inference_wall_time),
+                        "video_io_wall_time_s": float(io_wall_time),
+                        "quality_eval_wall_time_s": float(quality_wall_time),
+                        "case_wall_time_s": float(case_wall_time),
                         "generation": dict(generation),
                         "validity": dict(validity),
                         "quality": {
@@ -1198,6 +1217,12 @@ def _evaluate_checkpoint_strict_single(config: Mapping[str, Any], checkpoint: Pa
             "hardware_metrics": {
                 "generation_wall_time_s_total": sum(float(item["generation_wall_time_s"]) for item in cases),
                 "generation_wall_time_s_mean": sum(float(item["generation_wall_time_s"]) for item in cases) / len(cases),
+                "inference_wall_time_s_total": sum(float(item["inference_wall_time_s"]) for item in cases),
+                "inference_wall_time_s_mean": sum(float(item["inference_wall_time_s"]) for item in cases) / len(cases),
+                "video_io_wall_time_s_total": sum(float(item["video_io_wall_time_s"]) for item in cases),
+                "quality_eval_wall_time_s_total": sum(float(item["quality_eval_wall_time_s"]) for item in cases),
+                "case_wall_time_s_total": sum(float(item["case_wall_time_s"]) for item in cases),
+                "case_wall_time_s_mean": sum(float(item["case_wall_time_s"]) for item in cases) / len(cases),
                 "peak_memory_bytes_max": max(int(item["generation"].get("peak_memory_bytes", 0)) for item in cases),
                 "peak_memory_gb_max": max(float(item["generation"].get("peak_memory_gb", 0.0)) for item in cases),
                 "inference_steps_total": sum(int(item["generation"].get("num_inference_steps", 0)) for item in cases),
@@ -1270,6 +1295,10 @@ def _merge_parallel_strict_results(
     hardware = [item.get("hardware_metrics") for item in results if isinstance(item.get("hardware_metrics"), Mapping)]
     first = results[0]
     total_wall = sum(float(item.get("generation_wall_time_s_total", 0.0)) for item in hardware)
+    total_inference_wall = sum(float(item.get("inference_wall_time_s_total", 0.0)) for item in hardware)
+    total_io_wall = sum(float(item.get("video_io_wall_time_s_total", 0.0)) for item in hardware)
+    total_quality_wall = sum(float(item.get("quality_eval_wall_time_s_total", 0.0)) for item in hardware)
+    total_case_wall = sum(float(item.get("case_wall_time_s_total", 0.0)) for item in hardware)
     peak_vram = max((float(item.get("peak_memory_gb_max", 0.0)) for item in hardware), default=0.0)
     total_nfe = sum(int(item.get("inference_steps_total", 0)) for item in hardware)
     result = {
@@ -1299,6 +1328,12 @@ def _merge_parallel_strict_results(
         "hardware_metrics": {
             "generation_wall_time_s_total": total_wall,
             "generation_wall_time_s_mean": total_wall / len(cases),
+            "inference_wall_time_s_total": total_inference_wall,
+            "inference_wall_time_s_mean": total_inference_wall / len(cases),
+            "video_io_wall_time_s_total": total_io_wall,
+            "quality_eval_wall_time_s_total": total_quality_wall,
+            "case_wall_time_s_total": total_case_wall,
+            "case_wall_time_s_mean": total_case_wall / len(cases),
             "peak_memory_gb_max": peak_vram,
             "inference_steps_total": total_nfe,
             "transformer_nfe_proxy": total_nfe,
