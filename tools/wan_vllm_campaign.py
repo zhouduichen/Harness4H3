@@ -7,7 +7,9 @@ import argparse
 import gc
 import hashlib
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -208,6 +210,7 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         ("quality_floor_ratio", 0.90),
         ("min_semantic_delta", 0.005),
         ("no_improvement_patience", 2),
+        ("max_train_steps", 100000),
         ("device", "cuda:3"),
         ("gpu_count", 4),
         ("min_free_memory_gb", 35.0),
@@ -235,6 +238,30 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         ("watchdog_child_pid_file", ""),
         ("watchdog_log", ""),
         ("offline_simulation", False),
+        ("correctness_audit_passed", False),
+        ("correctness_evidence_path", ""),
+        ("correctness_evidence_sha256", ""),
+        ("legacy_r2_promotion_frozen", True),
+        ("legacy_r2_checkpoint_digests", []),
+        ("controller_primary_objective", "semantic_alignment"),
+        ("controller_secondary_objectives", ["temporal_consistency", "visual_quality", "motion_quality"]),
+        ("controller_min_quality_delta", 0.0),
+        ("controller_max_temporal_drop", 0.005),
+        ("controller_memory_limit", 3),
+        ("controller_search_space", {}),
+        ("memory_seed_paths", []),
+        (
+            "visual_quality_gate",
+            {
+                "enabled": False,
+                "version": "visual-structure-v1",
+                "min_spatial_gradient": 0.30,
+                "min_laplacian_std": 1.8,
+                "min_block_variance": 12.0,
+                "min_frame_difference": 0.01,
+                "max_low_texture_frame_ratio": 0.25,
+            },
+        ),
     ):
         loop.setdefault(name, default)
     root = Path(str(loop["output_root"]))
@@ -281,6 +308,8 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         raise ValueError("max_rounds must be positive")
     if int(loop["max_cases"]) <= 0 or int(loop["seed_count"]) <= 0:
         raise ValueError("max_cases and seed_count must be positive")
+    if int(loop["max_train_steps"]) <= 0:
+        raise ValueError("max_train_steps must be positive")
     if not 0 < float(loop["semantic_floor_ratio"]) <= 1:
         raise ValueError("semantic_floor_ratio must be in (0, 1]")
     if not 0 < float(loop["quality_floor_ratio"]) <= 1:
@@ -289,6 +318,8 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         raise ValueError("proposal_schema_version must be 2")
     if bool(loop["offline_simulation"]):
         raise ValueError("Wan vLLM loop requires offline_simulation=false")
+    if str(loop["continuation_contract"]) not in {"30s", "5s"}:
+        raise ValueError("continuation_contract must be 30s or 5s")
     capabilities = loop["algorithm_capabilities"]
     if not isinstance(capabilities, list) or not capabilities or any(str(item) not in {"progressive_distillation", "dmd2"} for item in capabilities):
         raise ValueError("algorithm_capabilities must list progressive_distillation and/or dmd2")
@@ -298,11 +329,112 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         raise ValueError("watchdog_restart_limit must be positive")
     if int(loop["watchdog_backoff_seconds"]) < 0:
         raise ValueError("watchdog_backoff_seconds must not be negative")
+    if not str(loop["controller_primary_objective"]).strip():
+        raise ValueError("controller_primary_objective must not be empty")
+    secondary = loop["controller_secondary_objectives"]
+    if not isinstance(secondary, list) or not secondary or any(not str(item).strip() for item in secondary):
+        raise ValueError("controller_secondary_objectives must be a non-empty list")
+    if float(loop["controller_min_quality_delta"]) < 0:
+        raise ValueError("controller_min_quality_delta must be non-negative")
+    if not 0 <= float(loop["controller_max_temporal_drop"]) <= 1:
+        raise ValueError("controller_max_temporal_drop must be in [0, 1]")
+    if int(loop["controller_memory_limit"]) <= 0:
+        raise ValueError("controller_memory_limit must be positive")
+    if not isinstance(loop["controller_search_space"], Mapping):
+        raise ValueError("controller_search_space must be a mapping")
+    if not isinstance(loop["memory_seed_paths"], list):
+        raise ValueError("memory_seed_paths must be a list")
+    for seed_path in loop["memory_seed_paths"]:
+        if not Path(str(seed_path)).is_absolute():
+            raise ValueError("memory_seed_paths must contain absolute paths")
     if not isinstance(loop["fidelity_schedule"], list) or not loop["fidelity_schedule"]:
         raise ValueError("fidelity_schedule must be a non-empty list")
     if any(str(item) not in {"F1", "F2", "F3"} for item in loop["fidelity_schedule"]):
         raise ValueError("fidelity_schedule contains unsupported fidelity")
+    visual_gate = loop["visual_quality_gate"]
+    if not isinstance(visual_gate, Mapping):
+        raise ValueError("visual_quality_gate must be a mapping")
+    visual_gate = dict(visual_gate)
+    for name, default in (
+        ("enabled", False),
+        ("version", "visual-structure-v1"),
+        ("min_spatial_gradient", 0.30),
+        ("min_laplacian_std", 1.8),
+        ("min_block_variance", 12.0),
+        ("min_frame_difference", 0.01),
+        ("max_low_texture_frame_ratio", 0.25),
+    ):
+        visual_gate.setdefault(name, default)
+    if not str(visual_gate["version"]).strip():
+        raise ValueError("visual_quality_gate.version must not be empty")
+    if bool(visual_gate["enabled"]):
+        for name in ("min_spatial_gradient", "min_laplacian_std", "min_block_variance", "min_frame_difference"):
+            value = float(visual_gate[name])
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError("visual_quality_gate.%s must be positive" % name)
+        low_texture_ratio = float(visual_gate["max_low_texture_frame_ratio"])
+        if not math.isfinite(low_texture_ratio) or not 0 <= low_texture_ratio < 1:
+            raise ValueError("visual_quality_gate.max_low_texture_frame_ratio must be in [0, 1)")
+    loop["visual_quality_gate"] = visual_gate
+    validate_correctness_gate(loop)
     return loop
+
+
+def validate_correctness_gate(config: Mapping[str, Any]) -> None:
+    """Validate the immutable P0 evidence binding before campaign startup."""
+
+    evidence_digests = config.get("legacy_r2_checkpoint_digests", [])
+    if not isinstance(evidence_digests, list) or any(
+        not isinstance(item, str) or re.fullmatch(r"[0-9a-f]{64}", item) is None for item in evidence_digests
+    ):
+        raise ValueError("legacy_r2_checkpoint_digests must contain lowercase SHA-256 digests")
+    if not bool(config.get("correctness_audit_passed", False)):
+        return
+    evidence_path = Path(str(config.get("correctness_evidence_path", ""))).resolve()
+    expected_digest = str(config.get("correctness_evidence_sha256", "")).strip()
+    if not evidence_path.is_file() or not expected_digest:
+        raise ValueError("correctness evidence path and digest are required when audit is passed")
+    if re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
+        raise ValueError("correctness evidence digest must be a lowercase SHA-256")
+    try:
+        payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("correctness evidence is not readable JSON") from exc
+    if not isinstance(payload, Mapping) or payload.get("status") != "passed":
+        raise ValueError("correctness evidence must be a JSON object with status=passed")
+    if sha256_file(evidence_path) != expected_digest:
+        raise ValueError("correctness evidence SHA-256 does not match configured digest")
+
+
+def correctness_gate_decision(
+    config: Mapping[str, Any],
+    parent: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Return the P0 gate result that must precede all quality decisions."""
+
+    validate_correctness_gate(config)
+    if not bool(config.get("correctness_audit_passed", False)):
+        return {
+            "passed": False,
+            "legacy_r2_promotion_frozen": bool(config.get("legacy_r2_promotion_frozen", True)),
+        }
+    parent_digest = str(
+        parent.get("student_checkpoint_sha256")
+        or parent.get("checkpoint_sha256")
+        or parent.get("parent_checkpoint_sha256")
+        or ""
+    )
+    legacy_digests = {str(item) for item in config.get("legacy_r2_checkpoint_digests", [])}
+    frozen = bool(config.get("legacy_r2_promotion_frozen", True)) and parent_digest in legacy_digests
+    return {
+        "passed": True,
+        "legacy_r2_promotion_frozen": bool(config.get("legacy_r2_promotion_frozen", True)),
+        "legacy_r2_frozen": frozen,
+        "correctness_evidence_path": str(config.get("correctness_evidence_path", "")),
+        "correctness_evidence_sha256": str(config.get("correctness_evidence_sha256", "")),
+        "parent_checkpoint_sha256": parent_digest,
+    }
 
 
 def _controller_handoff(config: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
@@ -471,6 +603,109 @@ def build_training_command(
     )
 
 
+def _compact_controller_evaluation(value: Any) -> Mapping[str, Any]:
+    """Keep only trusted aggregate evaluation fields in the LLM prompt.
+
+    Full evaluation records contain one large entry per video (including paths
+    and validity metadata).  They are useful on disk, but would crowd the
+    Controller context and can exceed the vLLM context window after the first
+    round.  The Controller only needs the aggregate gate metrics and digest.
+    """
+
+    if not isinstance(value, Mapping):
+        return {}
+    metrics = value.get("quality_metrics")
+    compact: dict[str, Any] = {
+        key: value.get(key)
+        for key in (
+            "status",
+            "case_count",
+            "valid",
+            "promotable",
+            "quality_score",
+            "student_checkpoint_sha256",
+            "evaluation_manifest_digest",
+        )
+        if key in value
+    }
+    if isinstance(metrics, Mapping):
+        compact["quality_metrics"] = {
+            key: metrics.get(key)
+            for key in ("semantic", "temporal", "motion", "score_type", "visual_quality_gate")
+            if key in metrics
+        }
+    if isinstance(value.get("visual_quality_gate"), Mapping):
+        compact["visual_quality_gate"] = {
+            key: value["visual_quality_gate"].get(key)
+            for key in ("enabled", "passed", "failures", "version")
+            if key in value["visual_quality_gate"]
+        }
+    contract = value.get("contract")
+    if isinstance(contract, Mapping):
+        compact["contract"] = {
+            key: contract.get(key)
+            for key in ("decoded_frames_min", "decoded_frames_max", "fps", "width", "height")
+            if key in contract
+        }
+    return compact
+
+
+def _compact_controller_training(value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    loss = value.get("loss") if isinstance(value.get("loss"), Mapping) else {}
+    return {
+        key: value.get(key)
+        for key in (
+            "status",
+            "optimizer_steps",
+            "teacher_forward_count",
+            "teacher_reuse_steps",
+            "teacher_target_groups",
+            "student_checkpoint_sha256",
+            "parent_checkpoint_sha256",
+            "offline_simulation",
+            "algorithm_name",
+            "trainable_scope",
+        )
+        if key in value
+    } | ({"loss": {key: loss.get(key) for key in ("initial", "total_final") if key in loss}} if loss else {})
+
+
+def _compact_controller_round(value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    proposal = value.get("proposal")
+    compact: dict[str, Any] = {
+        key: value.get(key)
+        for key in ("round", "fingerprint")
+        if key in value
+    }
+    if isinstance(proposal, Mapping):
+        compact["proposal"] = proposal
+    if isinstance(value.get("training"), Mapping):
+        compact["training"] = _compact_controller_training(value["training"])
+    if isinstance(value.get("evaluation"), Mapping):
+        compact["evaluation"] = _compact_controller_evaluation(value["evaluation"])
+    if isinstance(value.get("decision"), Mapping):
+        compact["decision"] = value["decision"]
+    return compact
+
+
+def _compact_controller_context(context: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Build a bounded prompt view while leaving full artifacts on disk."""
+
+    compact = dict(context)
+    compact["parent_evaluation"] = _compact_controller_evaluation(context.get("parent_evaluation"))
+    prior_rounds = context.get("prior_rounds")
+    if isinstance(prior_rounds, list):
+        compact["prior_rounds"] = [_compact_controller_round(item) for item in prior_rounds[-3:]]
+    lessons = context.get("memory_lessons")
+    if isinstance(lessons, list):
+        compact["memory_lessons"] = lessons[-3:]
+    return compact
+
+
 def _request_vllm(config: Mapping[str, Any], context: Mapping[str, Any]) -> Mapping[str, Any]:
     schema = proposal_json_schema()
     system = (
@@ -480,14 +715,51 @@ def _request_vllm(config: Mapping[str, Any], context: Mapping[str, Any]) -> Mapp
         "Never output code, shell commands, paths, device IDs, architecture, or checkpoint content. "
         "The trusted runner will bind the parent digest and all execution paths."
     )
+    contract = str(config.get("continuation_contract", "30s"))
+    if contract == "5s":
+        contract_text = "the Wan-native 81-frame, 16 FPS, 256x256, approximately 5.06-second contract"
+    else:
+        contract_text = "the 30-second overlapping-latent contract"
+    smoke_budget = int(config.get("max_train_steps", 100000))
+    source_steps = config.get("progressive_source_steps")
+    target_steps = config.get("progressive_target_steps")
+    trainable_scope = config.get("wan_trainable_scope")
+    search_space = dict(config.get("controller_search_space") or {})
+    step_text = (
+        " For progressive_distillation use source_steps=%d and target_steps=%d exactly; train_steps must be <=%d."
+        % (int(source_steps), int(target_steps), smoke_budget)
+        if source_steps is not None and target_steps is not None
+        else ""
+    )
+    scope_text = (
+        " Use trainable_scope=%s exactly; this is a trusted Wan smoke constraint."
+        % str(trainable_scope)
+        if trainable_scope
+        else ""
+    )
+    objective_text = (
+        " Optimize %s first, then protect %s. Choose only values from SEARCH_SPACE and do not repeat a rejected recipe unless the hypothesis explicitly explains the change."
+        % (
+            str(config.get("controller_primary_objective", "semantic_alignment")),
+            ", ".join(str(item) for item in config.get("controller_secondary_objectives", [])),
+        )
+    )
+    controller_context = _compact_controller_context(context)
     user = (
         "Propose exactly one next Wan training policy. Preserve the real H3 Teacher, "
-        "offline_simulation=false, the 30-second overlapping-latent contract, and the 1-2B Wan Student. "
+        "offline_simulation=false, %s, and the 1-2B Wan Student. " % contract_text
+        +
         "Prefer semantic alignment when semantic is below the Teacher floor; otherwise protect continuity. "
+        + step_text
+        + scope_text
+        + objective_text
+        +
         "Return fields exactly matching this JSON schema:\n"
         + json.dumps(schema, ensure_ascii=False, sort_keys=True)
+        + "\nSEARCH_SPACE=\n"
+        + json.dumps(search_space, ensure_ascii=False, sort_keys=True)
         + "\nCONTEXT=\n"
-        + json.dumps(dict(context), ensure_ascii=False, sort_keys=True)
+        + json.dumps(dict(controller_context), ensure_ascii=False, sort_keys=True)
     )
     payload = {
         "model": str(config["vllm_model"]),
@@ -537,12 +809,95 @@ def _write_failure(path: Path, code: str, message: str, **extra: Any) -> dict[st
     return value
 
 
+def _normalize_controller_recipe(raw: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Apply only an explicit, audited compatibility repair to Controller JSON.
+
+    The real Controller has been observed to abbreviate the required
+    ``hypothesis`` key as ``hypo``.  This is a recipe-field spelling repair,
+    not a policy or code mutation; every other unknown field remains fail
+    closed in ``WanTrainingProposal.from_mapping``.
+    """
+
+    normalized = dict(raw)
+    repair: dict[str, Any] = {"applied": False}
+    if "hypothesis" not in normalized and "hypo" in normalized:
+        value = normalized.pop("hypo")
+        if isinstance(value, str) and value.strip():
+            normalized["hypothesis"] = value
+            repair = {"applied": True, "from": "hypo", "to": "hypothesis", "reason": "controller_schema_spelling"}
+    return normalized, repair
+
+
+def _validate_recipe_search_space(proposal: WanTrainingProposal, config: Mapping[str, Any]) -> None:
+    """Fail closed when the Controller leaves the trusted recipe search space."""
+
+    search_space = config.get("controller_search_space") or {}
+    if not isinstance(search_space, Mapping):
+        raise WanProposalError("controller_search_space must be a mapping")
+    values = {
+        "learning_rate": proposal.training.learning_rate,
+        "critic_learning_rate": proposal.training.critic_learning_rate,
+        "rollout_endpoint_weight": proposal.training.rollout_endpoint_weight,
+        "rollout_clean_weight": proposal.training.rollout_clean_weight,
+        "rollout_every": proposal.training.rollout_every,
+        "rollout_steps": proposal.training.rollout_steps,
+        "train_steps": proposal.training.train_steps,
+        "teacher_reuse_steps": proposal.teacher_reuse_steps,
+    }
+    for key, allowed in search_space.items():
+        if key not in values:
+            raise WanProposalError("controller_search_space contains unsupported field: %s" % key)
+        if not isinstance(allowed, list) or not allowed:
+            raise WanProposalError("controller_search_space.%s must be a non-empty list" % key)
+        value = values[key]
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            matches = any(
+                isinstance(candidate, (int, float))
+                and not isinstance(candidate, bool)
+                and math.isclose(float(value), float(candidate), rel_tol=1e-9, abs_tol=1e-12)
+                for candidate in allowed
+            )
+        else:
+            matches = value in allowed
+        if not matches:
+            raise WanProposalError("%s=%s is outside the trusted Controller search space" % (key, value))
+
+
+def _apply_controller_promotion_gate(
+    parent_eval: Mapping[str, Any],
+    candidate_eval: Mapping[str, Any],
+    decision: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply the paper campaign's trusted quality/continuity gate."""
+
+    result = dict(decision)
+    if not bool(result.get("accepted")):
+        return result
+    parent_metrics = parent_eval.get("quality_metrics") if isinstance(parent_eval.get("quality_metrics"), Mapping) else {}
+    candidate_metrics = candidate_eval.get("quality_metrics") if isinstance(candidate_eval.get("quality_metrics"), Mapping) else {}
+    parent_quality = float(parent_eval.get("quality_score", 0.0))
+    candidate_quality = float(candidate_eval.get("quality_score", 0.0))
+    parent_temporal = float(parent_metrics.get("temporal", 0.0))
+    candidate_temporal = float(candidate_metrics.get("temporal", 0.0))
+    quality_delta = candidate_quality - parent_quality
+    temporal_delta = candidate_temporal - parent_temporal
+    result["quality_delta"] = quality_delta
+    result["temporal_delta"] = temporal_delta
+    if quality_delta < float(config.get("controller_min_quality_delta", 0.0)):
+        result.update({"accepted": False, "reason": "quality_no_improvement"})
+    elif temporal_delta < -float(config.get("controller_max_temporal_drop", 0.005)):
+        result.update({"accepted": False, "reason": "temporal_regression"})
+    return result
+
+
 def evaluate_checkpoint(config: Mapping[str, Any], checkpoint: Path, output_dir: Path) -> dict[str, Any]:
     """Generate and evaluate all configured prompts/seeds in one Wan process."""
 
     from harness4h3.student.evaluation_manifest import EvaluationManifest
     from harness4h3.student.quality import ClipTemporalQualityBackend
-    from harness4h3.student.wan import load_pretrained_wan, load_wan_spec, write_wan_video
+    from harness4h3.student.wan import generate_wan_clip, load_pretrained_wan, load_wan_spec, write_wan_video
+    from harness4h3.student.video_contract import VideoContractError, VideoOutputSpec, validate_video_output
     from harness4h3.student.wan_long_video import (
         WanLongVideoError,
         WanLongVideoSpec,
@@ -557,38 +912,72 @@ def evaluate_checkpoint(config: Mapping[str, Any], checkpoint: Path, output_dir:
     try:
         manifest = EvaluationManifest.from_path(Path(str(config["evaluation_manifest"])))
         spec = load_wan_spec(Path(str(config["wan_config"])))
-        contract = WanLongVideoSpec(
-            window_frames=spec.num_frames,
-            overlap_latent_frames=int(config["overlap_latent_frames"]),
-            window_count=int(config["window_count"]),
-            native_fps=spec.native_fps,
-            output_fps=spec.output_fps,
-            width=spec.width,
-            height=spec.height,
-            inference_steps=int(config["inference_steps"]),
-            guidance_scale=spec.guidance_scale,
-        )
+        short_contract = str(config.get("continuation_contract", "30s")) == "5s"
+        if short_contract:
+            contract = VideoOutputSpec(
+                # Wan's 81 decoded frames correspond to 24 H3 latent frames
+                # under the authenticated causal VAE geometry.
+                latent_frames=24,
+                decoded_frames_min=spec.num_frames,
+                decoded_frames_max=spec.num_frames,
+                fps=spec.native_fps,
+                width=spec.width,
+                height=spec.height,
+                duration_min_s=5.0,
+                duration_max_s=5.1,
+                fps_tolerance=0.1,
+                window_count=1,
+                overlap_latent_frames=0,
+            )
+        else:
+            contract = WanLongVideoSpec(
+                window_frames=spec.num_frames,
+                overlap_latent_frames=int(config["overlap_latent_frames"]),
+                window_count=int(config["window_count"]),
+                native_fps=spec.native_fps,
+                output_fps=spec.output_fps,
+                width=spec.width,
+                height=spec.height,
+                inference_steps=int(config["inference_steps"]),
+                guidance_scale=spec.guidance_scale,
+            )
         pipeline, device = load_pretrained_wan(spec, device=str(config.get("device", "cuda:3")), local_files_only=True)
         checkpoint_digest = load_wan_transformer_checkpoint(pipeline, checkpoint)
         quality_backend = ClipTemporalQualityBackend(
-            str(config["clip_model_path"]), device="cpu", sample_frames=12, drift_penalty=0.25
+            str(config["clip_model_path"]),
+            device="cpu",
+            sample_frames=12,
+            drift_penalty=0.25,
+            visual_quality_gate=config.get("visual_quality_gate"),
         )
         cases: list[dict[str, Any]] = []
         for case in manifest.cases[: int(config["max_cases"])]:
             for seed in case.seeds[: int(config["seed_count"])]:
                 case_dir = output_dir / "videos" / case.case_id / ("seed_%d" % int(seed))
-                video_path = case_dir / "wan-long.mp4"
+                video_path = case_dir / ("wan-5s.mp4" if short_contract else "wan-long.mp4")
                 started = time.perf_counter()
-                frames, generation = generate_wan_long_video(
-                    pipeline,
-                    spec,
-                    contract,
-                    case.caption,
-                    seed=int(seed),
-                    device=device,
-                )
-                write_wan_video(frames, video_path, contract.output_fps)
-                validity = validate_wan_long_video(video_path, contract)
+                if short_contract:
+                    frames, generation = generate_wan_clip(
+                        pipeline,
+                        spec,
+                        case.caption,
+                        seed=int(seed),
+                        device=device,
+                    )
+                    generation = {**dict(generation), "continuation_verified": True, "offline_simulation": False}
+                    write_wan_video(frames, video_path, spec.native_fps)
+                    validity = validate_video_output(video_path, contract)
+                else:
+                    frames, generation = generate_wan_long_video(
+                        pipeline,
+                        spec,
+                        contract,
+                        case.caption,
+                        seed=int(seed),
+                        device=device,
+                    )
+                    write_wan_video(frames, video_path, contract.output_fps)
+                    validity = validate_wan_long_video(video_path, contract)
                 evidence = quality_backend.evaluate(video_path, case.caption)
                 cases.append(
                     {
@@ -606,6 +995,8 @@ def evaluate_checkpoint(config: Mapping[str, Any], checkpoint: Path, output_dir:
                             "semantic_p10": evidence.semantic_p10,
                             "temporal": evidence.temporal,
                             "motion": evidence.motion,
+                            "visual_metrics": dict(evidence.visual_metrics),
+                            "visual_quality_gate": dict(evidence.visual_quality_gate),
                             "score_type": evidence.backend,
                         },
                     }
@@ -614,10 +1005,25 @@ def evaluate_checkpoint(config: Mapping[str, Any], checkpoint: Path, output_dir:
             raise ValueError("evaluation manifest selected no cases")
         scores = [float(item["quality"]["score"]) for item in cases]
         semantics = [float(item["quality"]["semantic"]) for item in cases]
+        visual_gate_results = [dict(item["quality"].get("visual_quality_gate") or {}) for item in cases]
+        visual_gate_passed = all(
+            not bool(item.get("enabled", False)) or bool(item.get("passed", False))
+            for item in visual_gate_results
+        )
+        visual_failures = [
+            {
+                "case_id": item["case_id"],
+                "seed": item["seed"],
+                "failures": list(item["quality"].get("visual_quality_gate", {}).get("failures", [])),
+            }
+            for item in cases
+            if bool(item["quality"].get("visual_quality_gate", {}).get("enabled", False))
+            and not bool(item["quality"].get("visual_quality_gate", {}).get("passed", False))
+        ]
         result = {
             "status": "success",
-            "valid": True,
-            "promotable": True,
+            "valid": visual_gate_passed,
+            "promotable": visual_gate_passed,
             "offline_simulation": False,
             "continuation_verified": all(bool(item["generation"].get("continuation_verified")) for item in cases),
             "student_checkpoint": str(checkpoint.resolve()),
@@ -630,13 +1036,35 @@ def evaluate_checkpoint(config: Mapping[str, Any], checkpoint: Path, output_dir:
                 "semantic": sum(semantics) / len(semantics),
                 "temporal": sum(float(item["quality"]["temporal"]) for item in cases) / len(cases),
                 "motion": sum(float(item["quality"]["motion"]) for item in cases) / len(cases),
+                "visual_quality_gate": {
+                    "enabled": any(bool(item.get("enabled", False)) for item in visual_gate_results),
+                    "passed": visual_gate_passed,
+                    "failure_count": len(visual_failures),
+                    "version": next(
+                        (str(item.get("version")) for item in visual_gate_results if item.get("version")),
+                        "disabled",
+                    ),
+                },
                 "score_type": "clip_temporal",
+            },
+            "visual_quality_gate": {
+                "enabled": any(bool(item.get("enabled", False)) for item in visual_gate_results),
+                "passed": visual_gate_passed,
+                "failure_count": len(visual_failures),
+                "failures": visual_failures,
+                "version": next(
+                    (str(item.get("version")) for item in visual_gate_results if item.get("version")),
+                    "disabled",
+                ),
             },
             "cases": cases,
         }
+        if not visual_gate_passed:
+            result["failure_code"] = "visual_collapse"
+            result["failure_message"] = "one or more evaluated videos failed the visual information-content gate"
         atomic_write_json(result_path, result)
         return result
-    except (OSError, RuntimeError, TypeError, ValueError, WanLongVideoError) as exc:
+    except (OSError, RuntimeError, TypeError, ValueError, VideoContractError, WanLongVideoError) as exc:
         return _write_failure(result_path, getattr(exc, "code", "wan_evaluation_failed"), str(exc))
     finally:
         if pipeline is not None:
@@ -718,7 +1146,7 @@ def _wan_experiment_fingerprint(
         parent_system_id=str(identity["base_digest"]),
         operator=proposal.training.method,
         operator_args=proposal.to_dict(),
-        target_id="wan-30s-overlap-window-v1",
+        target_id=("wan-5s-native-clip-v1" if str(config.get("continuation_contract", "30s")) == "5s" else "wan-30s-overlap-window-v1"),
         device_id=str(config.get("device")),
         benchmark_recipe={
             "manifest_digest": str(identity["path_digests"]["evaluation_manifest_digest"]),
@@ -781,6 +1209,69 @@ def _append_experience(
     return ExperienceStore(experience_path).append(record)
 
 
+def _memory_lessons(config: Mapping[str, Any], rounds: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Return compact, trusted lessons for the next Controller proposal.
+
+    The Controller sees recipe/result summaries only.  It never receives raw
+    code, evaluator internals, or arbitrary artifact contents.
+    """
+
+    sources: list[Mapping[str, Any]] = []
+    for path_value in config.get("memory_seed_paths", []):
+        path = Path(str(path_value))
+        if not path.is_file():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    value = json.loads(line)
+                    if isinstance(value, Mapping):
+                        sources.append(value)
+        except (OSError, json.JSONDecodeError):
+            continue
+    sources.extend(item for item in rounds if isinstance(item, Mapping))
+    lessons: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in sources:
+        decision = item.get("decision") if isinstance(item.get("decision"), Mapping) else {}
+        evaluation = item.get("evaluation") if isinstance(item.get("evaluation"), Mapping) else {}
+        metrics = evaluation.get("quality_metrics") if isinstance(evaluation.get("quality_metrics"), Mapping) else {}
+        proposal = item.get("proposal") or item.get("operator_args")
+        training = proposal.get("training") if isinstance(proposal, Mapping) and isinstance(proposal.get("training"), Mapping) else {}
+        identity = str(item.get("experience_id") or item.get("round") or item.get("fingerprint") or "memory")
+        if identity in seen:
+            continue
+        seen.add(identity)
+        status = str(item.get("status") or ("accepted" if decision.get("accepted") else "rejected"))
+        reason = str(decision.get("reason") or status)
+        semantic = metrics.get("semantic")
+        quality = evaluation.get("quality_score")
+        temporal = metrics.get("temporal")
+        recipe = {
+            key: training[key]
+            for key in ("learning_rate", "rollout_endpoint_weight", "rollout_clean_weight", "rollout_every", "train_steps")
+            if key in training
+        }
+        lesson = {
+            "id": identity,
+            "status": status,
+            "decision": reason,
+            "semantic": semantic,
+            "quality": quality,
+            "temporal": temporal,
+            "recipe": recipe,
+            "lesson": (
+                "Avoid repeating this recipe because it was rejected: %s"
+                % reason
+                if status in {"rejected", "failed"}
+                else "This recipe was accepted; use it as a positive prior."
+            ),
+        }
+        lessons.append(lesson)
+    limit = int(config.get("controller_memory_limit", 3))
+    return lessons[-limit:]
+
+
 def _campaign_capabilities(config: Mapping[str, Any]) -> dict[str, Any]:
     enabled = {str(item) for item in config.get("algorithm_capabilities", ("progressive_distillation",))}
     return {
@@ -830,7 +1321,11 @@ def _campaign_identity(config: Mapping[str, Any], capabilities: Mapping[str, Any
         "schema_version": int(config.get("proposal_schema_version", 2)),
         "student_family": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         "teacher_identity": "real_h3_teacher",
-        "evaluator_contract": "30s-overlap-window-clip-temporal-v1",
+        "evaluator_contract": (
+            "5s-native-clip-clip-temporal-v1"
+            if str(config.get("continuation_contract", "30s")) == "5s"
+            else "30s-overlap-window-clip-temporal-v1"
+        ),
         "path_digests": path_digests,
         "capability_snapshot": dict(capabilities),
         "fidelity_schedule": list(config.get("fidelity_schedule", ["F1", "F2", "F3"])),
@@ -935,7 +1430,7 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
         {
             "manifest_digest": manifest_digest,
             "clip_model_digest": identity["path_digests"]["clip_model_digest"],
-            "contract": "30s-overlap-window-clip-temporal-v1",
+            "contract": identity["evaluator_contract"],
         }
     )
     code_digest = str(identity["path_digests"]["code_digest"])
@@ -955,34 +1450,111 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
         round_dir = root / ("round-%04d" % round_index)
         round_dir.mkdir(parents=True, exist_ok=True)
         context = {
-            "goal": "Improve Wan Student semantic prompt alignment while preserving continuous 30-second generation.",
+            "goal": (
+                "Improve Wan Student semantic prompt alignment while preserving the native 5-second contract."
+                if str(config.get("continuation_contract", "30s")) == "5s"
+                else "Improve Wan Student semantic prompt alignment while preserving continuous 30-second generation."
+            ),
             "round": round_index,
             "parent_checkpoint_sha256": parent_digest,
             "parent_evaluation": parent_eval,
             "teacher_semantic": teacher_semantic,
             "semantic_floor": teacher_semantic * float(config["semantic_floor_ratio"]),
             "prior_rounds": rounds,
+            "memory_lessons": _memory_lessons(config, rounds),
             "capability_snapshot": capabilities,
             "failed_rounds": sorted(failed_rounds),
             "trusted_constraints": {
                 "offline_simulation": False,
-                "frames": "708-732",
-                "fps": 24,
+                "frames": ("81" if str(config.get("continuation_contract", "30s")) == "5s" else "708-732"),
+                "fps": (16 if str(config.get("continuation_contract", "30s")) == "5s" else 24),
                 "resolution": "256x256",
+                "visual_quality_gate": dict(config.get("visual_quality_gate") or {}),
                 "no_code_edits": True,
+                "max_train_steps": int(config.get("max_train_steps", 100000)),
+                "progressive_source_steps": config.get("progressive_source_steps"),
+                "progressive_target_steps": config.get("progressive_target_steps"),
+                "wan_trainable_scope": config.get("wan_trainable_scope"),
+            },
+            "controller_contract": {
+                "primary_objective": str(config.get("controller_primary_objective", "semantic_alignment")),
+                "secondary_objectives": [str(item) for item in config.get("controller_secondary_objectives", [])],
+                "promotion_gate": {
+                    "min_semantic_delta": float(config.get("min_semantic_delta", 0.005)),
+                    "min_quality_delta": float(config.get("controller_min_quality_delta", 0.0)),
+                    "max_temporal_drop": float(config.get("controller_max_temporal_drop", 0.005)),
+                    "contract_pass_required": True,
+                    "visual_quality_pass_required": bool(
+                        (config.get("visual_quality_gate") or {}).get("enabled", False)
+                    ),
+                    "checkpoint_digest_required": True,
+                },
+                "search_space": dict(config.get("controller_search_space") or {}),
             },
         }
         resuming_round = round_index in resumable_rounds
         if resuming_round:
             raw_proposal = _read_json(round_dir / "proposal.json")
+            proposal = WanTrainingProposal.from_mapping(
+                raw_proposal,
+                expected_parent_sha256=parent_digest,
+                capabilities=capabilities,
+            )
         else:
+            # A real language-model Controller can occasionally emit a one-key
+            # schema typo (for example ``hypo`` instead of ``hypothesis``).
+            # Retry the recipe request with bounded validation feedback; never
+            # mutate the recipe silently or edit code/model state.
             ensure_controller(config)
-            raw_proposal = _request_vllm(config, context)
-        proposal = WanTrainingProposal.from_mapping(
-            raw_proposal,
-            expected_parent_sha256=parent_digest,
-            capabilities=capabilities,
-        )
+            raw_proposal = None
+            proposal = None
+            normalization = {"applied": False}
+            proposal_error: WanProposalError | None = None
+            for attempt in range(1, 6):
+                request_context = dict(context)
+                if proposal_error is not None:
+                    request_context["controller_feedback"] = (
+                        "The previous JSON proposal was rejected by the trusted schema validator: %s. "
+                        "Return the complete corrected object; do not abbreviate or rename fields."
+                        % proposal_error
+                    )
+                raw_proposal = _request_vllm(config, request_context)
+                atomic_write_json(round_dir / ("controller-attempt-%02d.json" % attempt), dict(raw_proposal))
+                candidate_proposal, candidate_repair = _normalize_controller_recipe(raw_proposal)
+                try:
+                    proposal = WanTrainingProposal.from_mapping(
+                        candidate_proposal,
+                        expected_parent_sha256=parent_digest,
+                        capabilities=capabilities,
+                    )
+                    max_train_steps = int(config.get("max_train_steps", 100000))
+                    if proposal.training.train_steps > max_train_steps:
+                        raise WanProposalError(
+                            "training.train_steps=%d exceeds the trusted smoke budget max_train_steps=%d"
+                            % (proposal.training.train_steps, max_train_steps)
+                        )
+                    expected_source = config.get("progressive_source_steps")
+                    expected_target = config.get("progressive_target_steps")
+                    if proposal.training.method == "progressive_distillation" and expected_source is not None and expected_target is not None:
+                        if proposal.training.source_steps != int(expected_source) or proposal.training.target_steps != int(expected_target):
+                            raise WanProposalError(
+                                "progressive_distillation must use source_steps=%d and target_steps=%d"
+                                % (int(expected_source), int(expected_target))
+                            )
+                    expected_scope = config.get("wan_trainable_scope")
+                    if expected_scope is not None and proposal.training.trainable_scope != str(expected_scope):
+                        raise WanProposalError(
+                            "Wan smoke requires trainable_scope=%s" % str(expected_scope)
+                        )
+                    _validate_recipe_search_space(proposal, config)
+                    normalization = candidate_repair
+                    atomic_write_json(round_dir / "controller-normalization.json", normalization)
+                    break
+                except WanProposalError as exc:
+                    proposal = None
+                    proposal_error = exc
+            if proposal is None:
+                raise proposal_error or WanProposalError("Controller did not produce a valid proposal")
         fingerprint = _wan_experiment_fingerprint(
             config,
             identity,
@@ -1004,7 +1576,17 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
         )
         atomic_write_json(round_dir / "proposal.json", proposal.to_dict())
         atomic_write_json(round_dir / "fingerprint.json", {"fingerprint": fingerprint, "duplicate": duplicate})
-        append_event(events_path, {"event": "proposal.validated", "round": round_index, "proposal": proposal.to_dict(), "fingerprint": fingerprint, "duplicate": duplicate})
+        append_event(
+            events_path,
+            {
+                "event": "proposal.validated",
+                "round": round_index,
+                "proposal": proposal.to_dict(),
+                "fingerprint": fingerprint,
+                "duplicate": duplicate,
+                "controller_normalization": normalization if not resuming_round else {"applied": False},
+            },
+        )
         if duplicate:
             decision = {"accepted": False, "reason": "duplicate_fingerprint", "fingerprint": fingerprint}
             atomic_write_json(round_dir / "training-result.json", {"status": "skipped", "reason": "duplicate_fingerprint"})
@@ -1071,6 +1653,15 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
             child = Path(str(training["student_checkpoint"])).resolve()
             evaluation = evaluate_checkpoint(config, child, round_dir / "evaluation")
             atomic_write_json(round_dir / "evaluation-result.json", evaluation)
+            correctness_gate = (
+                correctness_gate_decision(
+                    config,
+                    {**parent_eval, "parent_checkpoint_sha256": parent_digest},
+                    evaluation,
+                )
+                if "correctness_audit_passed" in config or "legacy_r2_promotion_frozen" in config
+                else None
+            )
             decision = candidate_decision(
                 parent_eval,
                 evaluation,
@@ -1078,7 +1669,9 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
                 semantic_floor_ratio=float(config["semantic_floor_ratio"]),
                 quality_floor_ratio=float(config["quality_floor_ratio"]),
                 min_semantic_delta=float(config["min_semantic_delta"]),
+                correctness_gate=correctness_gate,
             )
+            decision = _apply_controller_promotion_gate(parent_eval, evaluation, decision, config)
             atomic_write_json(round_dir / "decision.json", decision)
             round_record = {
                 "round": round_index,

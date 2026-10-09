@@ -129,6 +129,55 @@ def test_candidate_selection_requires_contract_and_semantic_improvement():
     assert rejected["reason"] == "contract_invalid"
 
 
+def test_candidate_selection_rejects_visual_collapse_before_score_comparison():
+    parent = {
+        "status": "success",
+        "valid": True,
+        "promotable": True,
+        "offline_simulation": False,
+        "continuation_verified": True,
+        "quality_score": 0.65,
+        "quality_metrics": {"semantic": 0.61},
+    }
+    candidate = dict(
+        parent,
+        quality_score=0.95,
+        quality_metrics={"semantic": 0.90},
+        visual_quality_gate={"enabled": True, "passed": False, "failures": ["block_variance_mean_below_floor"]},
+    )
+    decision = candidate_decision(
+        parent,
+        candidate,
+        teacher_semantic=0.5,
+        semantic_floor_ratio=0.9,
+        quality_floor_ratio=0.9,
+        min_semantic_delta=0.005,
+    )
+    assert decision["accepted"] is False
+    assert decision["reason"] == "visual_collapse"
+
+
+def test_pending_correctness_gate_rejects_candidate_before_quality_logic():
+    decision = candidate_decision(
+        {"quality_score": 0.1, "quality_metrics": {"semantic": 0.1}},
+        {
+            "status": "success",
+            "valid": True,
+            "offline_simulation": False,
+            "continuation_verified": True,
+            "quality_score": 1.0,
+            "quality_metrics": {"semantic": 1.0},
+        },
+        teacher_semantic=1.0,
+        semantic_floor_ratio=0.1,
+        quality_floor_ratio=0.1,
+        min_semantic_delta=0.0,
+        correctness_gate={"passed": False, "legacy_r2_promotion_frozen": True},
+    )
+    assert decision["accepted"] is False
+    assert decision["reason"] == "correctness_gate_pending"
+
+
 def test_sha256_file_is_stable(tmp_path: Path):
     path = tmp_path / "checkpoint.safetensors"
     path.write_bytes(b"checkpoint")

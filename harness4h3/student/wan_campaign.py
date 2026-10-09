@@ -454,15 +454,28 @@ def candidate_decision(
     semantic_floor_ratio: float,
     quality_floor_ratio: float,
     min_semantic_delta: float,
+    correctness_gate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a deterministic promotion decision for one evaluated child."""
 
+    if correctness_gate is not None:
+        if not bool(correctness_gate.get("passed", False)):
+            return {"accepted": False, "reason": "correctness_gate_pending"}
+        if bool(correctness_gate.get("legacy_r2_frozen", False)):
+            return {"accepted": False, "reason": "legacy_r2_frozen"}
     if candidate.get("status") != "success" or not bool(candidate.get("valid", True)):
         return {"accepted": False, "reason": "evaluation_failed"}
     if candidate.get("offline_simulation") is not False:
         return {"accepted": False, "reason": "offline_simulation"}
     if not bool(candidate.get("continuation_verified")):
         return {"accepted": False, "reason": "contract_invalid"}
+    visual_gate = candidate.get("visual_quality_gate")
+    if isinstance(visual_gate, Mapping) and bool(visual_gate.get("enabled", False)) and not bool(visual_gate.get("passed", False)):
+        return {
+            "accepted": False,
+            "reason": "visual_collapse",
+            "visual_quality_gate": dict(visual_gate),
+        }
     semantic = _metric(candidate, "semantic")
     quality = float(candidate.get("quality_score") or _metric(candidate, "score"))
     if semantic < float(teacher_semantic) * float(semantic_floor_ratio):
