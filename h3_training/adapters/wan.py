@@ -206,7 +206,7 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         if patch_embedding is not None:
             model_dtype = next(patch_embedding.parameters()).dtype
         else:
-            model_dtype = next(self.transformer.parameters()).dtype
+            model_dtype = next(role.model.parameters(), noisy.video).dtype
         hidden_states = noisy.video.to(device=model_device, dtype=model_dtype)
         timestep = model_timestep.to(device=model_device, dtype=torch.float32)
 
