@@ -31,7 +31,11 @@ class WanSigmaSchedule:
         if any(left <= right for left, right in zip(self.sigmas, self.sigmas[1:])):
             raise ValueError("Wan schedule sigmas must be strictly decreasing")
         expected = tuple(float(sigma) * float(self.num_train_timesteps) for sigma in self.sigmas[:-1])
-        if any(not math.isclose(actual, wanted, rel_tol=1e-5, abs_tol=1e-4) for actual, wanted in zip(self.timesteps, expected)):
+        timestep_tolerance = 1.1 if self.mode == "native" else 1e-4
+        if any(
+            not math.isclose(actual, wanted, rel_tol=1e-5, abs_tol=timestep_tolerance)
+            for actual, wanted in zip(self.timesteps, expected)
+        ):
             raise ValueError("Wan schedule timesteps must equal sigma*num_train_timesteps")
 
     @property
@@ -52,7 +56,10 @@ class WanSigmaSchedule:
 
 def _scheduler_config_value(scheduler: Any, name: str, default: Any) -> Any:
     config = getattr(scheduler, "config", None)
-    return getattr(config, name, default)
+    value = getattr(config, name, None)
+    if value is None and name == "shift":
+        value = getattr(config, "flow_shift", None)
+    return default if value is None else value
 
 
 def _schedule_from_sigmas(
@@ -76,7 +83,13 @@ def _schedule_from_sigmas(
 
 
 def native_wan_schedule(scheduler: Any, nfe: int) -> WanSigmaSchedule:
-    """Read the checkpoint scheduler's native grid without mutating it."""
+    """Read the checkpoint scheduler's native grid without mutating it.
+
+    Diffusers' flow-sigma UniPC scheduler may expose integer model timesteps
+    while retaining continuous sigmas.  The native record preserves those
+    scheduler values; the typed contract permits the <=1 timestep
+    quantization while coarsened schedules rebuild exact sigma-derived values.
+    """
 
     count = int(nfe)
     if count <= 0:
