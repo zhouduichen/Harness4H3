@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -221,6 +222,7 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         ("controller_hold_file", ""),
         ("controller_release_file", ""),
         ("controller_worker_lease_file", ""),
+        ("controller_shutdown_on_exit", False),
         ("proposal_schema_version", 2),
         ("algorithm_capabilities", ["progressive_distillation"]),
         ("dmd2_memory_admitted", False),
@@ -499,6 +501,45 @@ def _controller_handoff(config: Mapping[str, Any]) -> tuple[str | None, str | No
         str(config.get("controller_release_file") or "") or None,
         str(config.get("controller_worker_lease_file") or "") or None,
     )
+
+
+def _shutdown_controller_on_exit(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Stop an owned persistent launcher when a one-shot campaign is done.
+
+    The launcher is intentionally reusable during a multi-round campaign, but
+    leaving it alive after a bounded job strands one L40 behind an idle vLLM
+    reservation.  Only a PID whose command line still names the configured
+    launcher is signalled; stale or reused PID files are ignored.
+    """
+
+    if not bool(config.get("controller_shutdown_on_exit", False)):
+        return {"enabled": False, "requested": False, "terminated": False}
+    pid_file = Path(str(config.get("controller_launcher_pid_file", "")))
+    if not pid_file.is_file():
+        return {"enabled": True, "requested": False, "terminated": True, "reason": "pid_file_missing"}
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, TypeError, ValueError):
+        return {"enabled": True, "requested": False, "terminated": True, "reason": "invalid_pid_file"}
+    try:
+        cmdline = Path("/proc/%d/cmdline" % pid).read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+    except OSError:
+        return {"enabled": True, "requested": False, "terminated": True, "reason": "launcher_not_alive", "pid": pid}
+    launcher = Path(str(config.get("controller_launcher", ""))).name
+    if not launcher or launcher not in cmdline or "controller-wait-launch" not in cmdline:
+        return {"enabled": True, "requested": False, "terminated": False, "reason": "pid_not_owned", "pid": pid}
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return {"enabled": True, "requested": True, "terminated": True, "pid": pid, "reason": "already_exited"}
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return {"enabled": True, "requested": True, "terminated": True, "pid": pid}
+        time.sleep(0.5)
+    return {"enabled": True, "requested": True, "terminated": False, "pid": pid, "reason": "shutdown_timeout"}
 
 
 def _controller_is_ready(config: Mapping[str, Any]) -> bool:
@@ -2010,6 +2051,7 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
             no_improvement += 1
         if no_improvement >= int(config["no_improvement_patience"]):
             break
+    controller_shutdown = _shutdown_controller_on_exit(config)
     result = {
         "status": "success",
         "optimization_status": "COMPLETED",
@@ -2021,6 +2063,7 @@ def run_campaign(config: Mapping[str, Any], *, max_rounds: int | None = None) ->
         "semantic_floor": teacher_semantic * float(config["semantic_floor_ratio"]),
         "rounds": rounds,
         "stop_reason": "max_rounds" if len(rounds) >= round_limit else "no_improvement_or_failure",
+        "controller_shutdown": controller_shutdown,
     }
     atomic_write_json(campaign_result_path, result)
     append_event(events_path, {"event": "campaign.finished", "result": result})

@@ -7,7 +7,7 @@ wan_loop:
   clip_model_path: /data/models/clip-vit-large-patch14-336
   teacher_baseline_result: /data/models/MiniMax-H3/harness4h3/wan-teacher-native-5s-20261009/teacher-baseline-result.json
   parent_checkpoint: /data/models/MiniMax-H3/harness4h3/wan-p1-native-timestep-correction-20261010/student.safetensors
-  output_root: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-release-final2-20261009
+  output_root: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-release-final3-20261009
   worker_python: /home/intern/miniconda3/envs/comfy/bin/python
   training_entrypoint: /home/intern/huangjiahao/Harness4H3-long-video-30s/wan_student_train_worker.py
 
@@ -34,17 +34,22 @@ wan_loop:
   controller_release_contract: adaptive_visual_retry
   adaptive_visual_retry_enabled: true
   adaptive_retry_offsets: [1, 2]
+  # This bounded campaign is one-shot; do not strand an idle vLLM reservation
+  # after the final round.
+  controller_shutdown_on_exit: true
   # One strict Wan pipeline per L40; adaptive retries remain charged and run
   # after this parallel strict pass.
   evaluation_parallel_devices: [cuda:0, cuda:1, cuda:2, cuda:3]
 
-  state_path: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-release-final2-20261009/campaign-state.json
-  fingerprint_path: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-release-final2-20261009/fingerprints.jsonl
-  experience_path: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-release-final2-20261009/experiences.jsonl
+  state_path: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-release-final3-20261009/campaign-state.json
+  fingerprint_path: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-release-final3-20261009/fingerprints.jsonl
+  experience_path: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-release-final3-20261009/experiences.jsonl
   memory_seed_paths:
     - /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-native-20261009/experiences.jsonl
     - /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-overnight-20261008/experiences.jsonl
-  checkpoint_every_steps: 2
+  # A one-round smoke never resumes; avoid writing an 11 GB optimizer state
+  # checkpoint that leaves the training GPU idle on the NFS commit.
+  checkpoint_every_steps: 0
   watchdog_restart_limit: 3
   watchdog_backoff_seconds: 30
   offline_simulation: false
