@@ -53,6 +53,7 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         reload_checkpoint: Optional[Callable[[Path], ModelRole]] = None,
         schedule_provider: Optional[Callable[[int], WanSigmaSchedule]] = None,
         model_id: str = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        guidance_scale: float = 1.0,
     ) -> None:
         self.transformer = transformer
         self.scheduler = scheduler
@@ -61,6 +62,9 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         self.save_checkpoint = save_checkpoint
         self.reload_checkpoint = reload_checkpoint
         self.model_id = str(model_id)
+        self.guidance_scale = float(guidance_scale)
+        if not torch.isfinite(torch.tensor(self.guidance_scale)) or self.guidance_scale <= 0:
+            raise ValueError("guidance_scale must be finite and positive")
         self.schedule_provider = schedule_provider or (
             lambda nfe: training_uniform_wan_schedule(int(nfe), int(self._train_timesteps()))
         )
@@ -106,14 +110,28 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         if not torch.isfinite(clean).all():
             raise TrainingFailure("wan_video_nonfinite", "Wan clean latent contains non-finite values")
         text = raw.get("prompt_embeds")
+        negative_text = raw.get("negative_prompt_embeds")
         if text is None:
-            text = self.encode_prompt(str(raw["prompt"]))
+            encoded = self.encode_prompt(str(raw["prompt"]))
+            if isinstance(encoded, (tuple, list)):
+                if len(encoded) != 2:
+                    raise TrainingFailure("wan_conditioning_invalid", "Wan prompt encoder must return text and negative text")
+                text, negative_text = encoded
+            else:
+                text = encoded
         else:
             text = torch.as_tensor(text)
+            if negative_text is not None:
+                negative_text = torch.as_tensor(negative_text)
         if not isinstance(text, torch.Tensor) or text.ndim < 2:
             raise TrainingFailure("wan_conditioning_invalid", "Wan prompt encoder must return [B,S,D]")
         if text.shape[0] != clean.shape[0]:
             raise TrainingFailure("wan_conditioning_invalid", "prompt and latent batch sizes differ")
+        if negative_text is not None:
+            if not isinstance(negative_text, torch.Tensor) or negative_text.ndim < 2:
+                raise TrainingFailure("wan_conditioning_invalid", "Wan negative prompt encoder must return [B,S,D]")
+            if negative_text.shape != text.shape:
+                raise TrainingFailure("wan_conditioning_invalid", "positive and negative prompt shapes differ")
         # TrainerEngine's CPU generator is intentional: sampling on CPU and
         # moving once gives deterministic batches on both CPU and CUDA hosts.
         noise = torch.randn(clean.shape, generator=generator, device="cpu", dtype=torch.float32)
@@ -121,7 +139,11 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         self._active_clean = clean.detach()
         sample_id = str(raw.get("sample_id", raw.get("id", "wan-sample")))
         return PreparedBatch(
-            conditioning=Conditioning(text=text.detach(), metadata={"model_id": self.model_id}),
+            conditioning=Conditioning(
+                text=text.detach(),
+                negative_text=negative_text.detach() if negative_text is not None else None,
+                metadata={"model_id": self.model_id, "guidance_scale": self.guidance_scale},
+            ),
             latents=ModalLatents(video=clean),
             noise=ModalLatents(video=noise),
             sample_ids=(sample_id,),
@@ -159,13 +181,23 @@ class WanTrainingAdapter(DenoisingModelAdapter):
             model_dtype = next(patch_embedding.parameters()).dtype
         else:
             model_dtype = next(self.transformer.parameters()).dtype
-        output = role.model(
-            hidden_states=noisy.video.to(device=model_device, dtype=model_dtype),
-            timestep=model_timestep.to(device=model_device, dtype=torch.float32),
-            encoder_hidden_states=conditioning.text.to(device=model_device, dtype=model_dtype),
-            return_dict=False,
-        )
-        prediction = self._prediction_tensor(output)
+        hidden_states = noisy.video.to(device=model_device, dtype=model_dtype)
+        timestep = model_timestep.to(device=model_device, dtype=torch.float32)
+
+        def forward(text: torch.Tensor) -> torch.Tensor:
+            output = role.model(
+                hidden_states=hidden_states,
+                timestep=timestep,
+                encoder_hidden_states=text.to(device=model_device, dtype=model_dtype),
+                return_dict=False,
+            )
+            return self._prediction_tensor(output)
+
+        prediction = forward(conditioning.text)
+        negative_text = conditioning.negative_text
+        if negative_text is not None and self.guidance_scale != 1.0:
+            unconditional = forward(negative_text)
+            prediction = unconditional + self.guidance_scale * (prediction - unconditional)
         if prediction.shape != noisy.video.shape:
             raise TrainingFailure(
                 "wan_adapter_forward_failed",

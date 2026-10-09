@@ -25,6 +25,16 @@ class FakeTransformer(torch.nn.Module):
         return (result,)
 
 
+class CFGTransformer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def forward(self, hidden_states, timestep, encoder_hidden_states, return_dict=False):
+        self.calls.append(float(encoder_hidden_states.mean()))
+        return (torch.ones_like(hidden_states) * encoder_hidden_states.mean(),)
+
+
 def make_adapter():
     transformer = FakeTransformer()
     return WanTrainingAdapter(
@@ -79,6 +89,29 @@ def test_wan_adapter_forward_uses_native_transformer_role():
         batch.conditioning,
     )
     assert prediction.video.shape == batch.latents.video.shape
+
+
+def test_wan_adapter_matches_runtime_cfg_formula():
+    transformer = CFGTransformer()
+    adapter = WanTrainingAdapter(
+        transformer=transformer,
+        scheduler=FakeScheduler(),
+        encode_frames=lambda frames: torch.as_tensor(frames).permute(3, 0, 1, 2).unsqueeze(0).contiguous(),
+        encode_prompt=lambda prompt: (torch.full((1, 2, 4), 3.0), torch.full((1, 2, 4), 1.0)),
+        guidance_scale=5.0,
+    )
+    batch = adapter.prepare_batch(
+        {"sample_id": "s0", "prompt": "red train", "frames": torch.zeros(2, 2, 2, 3)},
+        torch.Generator().manual_seed(7),
+    )
+    prediction = adapter.predict(
+        ModelRole("student", transformer, adapter, True),
+        batch.latents,
+        ModalTimesteps(video=torch.tensor([0.5])),
+        batch.conditioning,
+    )
+    assert transformer.calls == [3.0, 1.0]
+    assert torch.allclose(prediction.video, torch.full_like(prediction.video, 11.0))
 
 
 def test_wan_adapter_endpoint_teacher_is_role_type_not_role_name():

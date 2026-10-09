@@ -31,6 +31,7 @@ class WanTrainingSpec:
     num_frames: int = 81
     native_fps: float = 16.0
     dtype: str = "bf16"
+    guidance_scale: float = 5.0
     max_sequence_length: int = 512
     learning_rate: float = 1.0e-6
     standard_loss_weight: float = 1.0
@@ -68,7 +69,7 @@ class WanTrainingSpec:
             value = getattr(self, name)
             if isinstance(value, bool) or int(value) <= 0:
                 raise ValueError("%s must be positive" % name)
-        for name in ("learning_rate", "standard_loss_weight", "distill_loss_weight"):
+        for name in ("guidance_scale", "learning_rate", "standard_loss_weight", "distill_loss_weight"):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("%s must be finite and positive" % name)

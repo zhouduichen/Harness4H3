@@ -87,6 +87,7 @@ def _training_spec(raw: Mapping[str, Any], wan_config: Path) -> WanTrainingSpec:
             "num_frames",
             "native_fps",
             "dtype",
+            "guidance_scale",
         )
     }
     for name in (
@@ -196,7 +197,9 @@ def _release_h3_vae() -> None:
         torch.cuda.empty_cache()
 
 
-def _encode_training_prompt(pipeline: Any, prompt: str, spec: WanTrainingSpec, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+def _encode_training_prompt(
+    pipeline: Any, prompt: str, spec: WanTrainingSpec, device: torch.device, dtype: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Encode frozen text without creating inference-mode tensors.
 
     The returned embeddings are consumed by the trainable Wan Transformer.
@@ -205,15 +208,22 @@ def _encode_training_prompt(pipeline: Any, prompt: str, spec: WanTrainingSpec, d
     """
 
     with torch.no_grad():
-        prompt_embeds, _ = pipeline.encode_prompt(
+        prompt_embeds, negative_prompt_embeds = pipeline.encode_prompt(
             prompt,
-            do_classifier_free_guidance=False,
+            do_classifier_free_guidance=float(spec.guidance_scale) != 1.0,
             num_videos_per_prompt=1,
             max_sequence_length=spec.max_sequence_length,
             device=device,
             dtype=dtype,
         )
-    return prompt_embeds.detach().clone()
+    if float(spec.guidance_scale) != 1.0 and negative_prompt_embeds is None:
+        raise WanStudentError("wan_cfg_conditioning_missing", "Wan CFG requires negative prompt embeddings")
+    return (
+        prompt_embeds.detach().clone(),
+        negative_prompt_embeds.detach().clone()
+        if negative_prompt_embeds is not None
+        else torch.empty_like(prompt_embeds),
+    )
 
 
 def _configure_trainable_scope(transformer: Any, scope: str | None) -> str:
@@ -635,7 +645,7 @@ def run(
     for group_index, (frames, metadata) in enumerate(teacher_samples):
         clean_latent = encode_wan_video(components.vae, frames, spec, components.device)
         prompt = str(metadata.get("caption", "")).strip() or "A natural cinematic video with coherent motion."
-        prompt_embeds = _encode_training_prompt(
+        prompt_embeds, negative_prompt_embeds = _encode_training_prompt(
             components.pipeline,
             prompt,
             spec,
@@ -649,9 +659,10 @@ def run(
                 "prompt": prompt,
                 "wan_latent": clean_latent,
                 "prompt_embeds": prompt_embeds,
+                "negative_prompt_embeds": negative_prompt_embeds,
             }
         )
-        del clean_latent, prompt_embeds
+        del clean_latent, prompt_embeds, negative_prompt_embeds
     teacher_samples.clear()
     adapter = WanTrainingAdapter(
         transformer=components.transformer,
@@ -662,6 +673,7 @@ def run(
         ),
         schedule_provider=_wan_schedule_provider(components.scheduler, source_steps=policy.source_steps),
         model_id=spec.model_id,
+        guidance_scale=spec.guidance_scale,
     )
     source_schedule = adapter.schedule_provider(policy.source_steps)
     source_schedule_digest = _digest(source_schedule.to_dict())
