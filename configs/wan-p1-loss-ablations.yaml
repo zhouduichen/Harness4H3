@@ -19,6 +19,12 @@ base:
   method: progressive_distillation
   source_steps: 32
   target_steps: 16
+  h3_sampling_steps: 4
+  h3_latent_frames: 24
+  h3_latent_height: 16
+  h3_latent_width: 16
+  h3_latent_channels: 24
+  max_sequence_length: 512
   learning_rate: 0.000001
   trainable_scope: all
   fp32_optimizer_state: false
