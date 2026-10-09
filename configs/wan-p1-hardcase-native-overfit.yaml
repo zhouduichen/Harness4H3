@@ -10,8 +10,8 @@ wan_training:
   teacher_devices: [cuda:0, cuda:1, cuda:2]
   student_device: cuda:3
   seed: 20261009
-  train_steps: 128
-  teacher_reuse_steps: 128
+  train_steps: 64
+  teacher_reuse_steps: 64
   teacher_target_groups: 1
   teacher_target_mode: cache_rgb
   wan_teacher_mode: wan_base_trajectory
@@ -30,4 +30,6 @@ wan_training:
   rollout_endpoint_weight: 0.0
   rollout_clean_weight: 0.0
   trainable_scope: all
-  checkpoint_every_steps: 8
+  # A Wan optimizer checkpoint is ~11 GiB.  Save once at the end of this
+  # probe; frequent snapshots obscure the learning result with disk I/O.
+  checkpoint_every_steps: 64

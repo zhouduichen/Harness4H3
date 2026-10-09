@@ -243,6 +243,13 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         ("correctness_evidence_sha256", ""),
         ("legacy_r2_promotion_frozen", True),
         ("legacy_r2_checkpoint_digests", []),
+        ("controller_release_required", False),
+        ("controller_release_evidence_path", ""),
+        ("controller_release_evidence_sha256", ""),
+        ("controller_release_contract", ""),
+        ("adaptive_visual_retry_enabled", False),
+        ("adaptive_retry_offsets", [1, 2]),
+        ("evaluation_parallel_devices", []),
         ("controller_primary_objective", "semantic_alignment"),
         ("controller_secondary_objectives", ["temporal_consistency", "visual_quality", "motion_quality"]),
         ("controller_min_quality_delta", 0.0),
@@ -301,6 +308,7 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         "watchdog_lock_file",
         "watchdog_child_pid_file",
         "watchdog_log",
+        "controller_release_evidence_path",
     ):
         if loop[name] and not Path(str(loop[name])).is_absolute():
             raise ValueError("%s must be absolute" % name)
@@ -342,6 +350,21 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         raise ValueError("controller_memory_limit must be positive")
     if not isinstance(loop["controller_search_space"], Mapping):
         raise ValueError("controller_search_space must be a mapping")
+    if bool(loop["controller_release_required"]):
+        if not str(loop["controller_release_evidence_path"]).strip():
+            raise ValueError("controller release evidence is required when release gate is enabled")
+        if not str(loop["controller_release_evidence_sha256"]).strip():
+            raise ValueError("controller release evidence digest is required when release gate is enabled")
+        if str(loop["controller_release_contract"]).strip() != "adaptive_visual_retry":
+            raise ValueError("controller release contract must be adaptive_visual_retry")
+    offsets = loop["adaptive_retry_offsets"]
+    if not isinstance(offsets, list) or not offsets or any(isinstance(item, bool) or int(item) <= 0 for item in offsets):
+        raise ValueError("adaptive_retry_offsets must contain positive integers")
+    evaluation_devices = loop["evaluation_parallel_devices"]
+    if not isinstance(evaluation_devices, list) or any(
+        not str(item).strip() or not str(item).strip().startswith("cuda:") for item in evaluation_devices
+    ):
+        raise ValueError("evaluation_parallel_devices must contain explicit cuda:N device names")
     if not isinstance(loop["memory_seed_paths"], list):
         raise ValueError("memory_seed_paths must be a list")
     for seed_path in loop["memory_seed_paths"]:
@@ -377,6 +400,7 @@ def load_loop_config(path: Path) -> dict[str, Any]:
             raise ValueError("visual_quality_gate.max_low_texture_frame_ratio must be in [0, 1)")
     loop["visual_quality_gate"] = visual_gate
     validate_correctness_gate(loop)
+    validate_controller_release_gate(loop)
     return loop
 
 
@@ -404,6 +428,38 @@ def validate_correctness_gate(config: Mapping[str, Any]) -> None:
         raise ValueError("correctness evidence must be a JSON object with status=passed")
     if sha256_file(evidence_path) != expected_digest:
         raise ValueError("correctness evidence SHA-256 does not match configured digest")
+
+
+def validate_controller_release_gate(config: Mapping[str, Any]) -> None:
+    """Require immutable P0 + adaptive evidence before recipe search starts."""
+
+    if not bool(config.get("controller_release_required", False)):
+        return
+    evidence_path = Path(str(config.get("controller_release_evidence_path", ""))).resolve()
+    expected_digest = str(config.get("controller_release_evidence_sha256", "")).strip()
+    if not evidence_path.is_file() or not expected_digest:
+        raise ValueError("controller release evidence path and digest are required")
+    if re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
+        raise ValueError("controller release evidence digest must be a lowercase SHA-256")
+    if sha256_file(evidence_path) != expected_digest:
+        raise ValueError("controller release evidence SHA-256 does not match configured digest")
+    try:
+        payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("controller release evidence is not readable JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("controller release evidence must be a JSON object")
+    if payload.get("status") != "passed" or payload.get("controller_search_authorized") is not True:
+        raise ValueError("controller release evidence does not authorize recipe search")
+    if payload.get("release_contract") != "adaptive_visual_retry":
+        raise ValueError("controller release evidence contract mismatch")
+    if payload.get("legacy_r2_promotion_frozen") is not True:
+        raise ValueError("Controller release must keep legacy R2 promotion frozen")
+    if payload.get("fixed_seed_promotion_authorized") is not False:
+        raise ValueError("Controller release must keep fixed-seed promotion distinct")
+    checks = payload.get("checks")
+    if not isinstance(checks, list) or not checks or any(not isinstance(item, Mapping) or item.get("passed") is not True for item in checks):
+        raise ValueError("controller release evidence contains a failed or malformed check")
 
 
 def correctness_gate_decision(
@@ -843,6 +899,8 @@ def _validate_recipe_search_space(proposal: WanTrainingProposal, config: Mapping
         "rollout_steps": proposal.training.rollout_steps,
         "train_steps": proposal.training.train_steps,
         "teacher_reuse_steps": proposal.teacher_reuse_steps,
+        "velocity_weight": proposal.training.velocity_weight,
+        "clean_anchor_weight": proposal.training.clean_anchor_weight,
     }
     for key, allowed in search_space.items():
         if key not in values:
@@ -888,10 +946,46 @@ def _apply_controller_promotion_gate(
         result.update({"accepted": False, "reason": "quality_no_improvement"})
     elif temporal_delta < -float(config.get("controller_max_temporal_drop", 0.005)):
         result.update({"accepted": False, "reason": "temporal_regression"})
+    required_contract = str(config.get("controller_release_contract", "")).strip()
+    if required_contract and candidate_eval.get("contract_mode") != required_contract:
+        result.update({"accepted": False, "reason": "release_contract_mismatch"})
+    if required_contract and candidate_eval.get("adaptive_retry_verified") is not True:
+        result.update({"accepted": False, "reason": "adaptive_retry_not_verified"})
     return result
 
 
-def evaluate_checkpoint(config: Mapping[str, Any], checkpoint: Path, output_dir: Path) -> dict[str, Any]:
+def _run_adaptive_visual_retry(
+    config: Mapping[str, Any],
+    strict_result_path: Path,
+    checkpoint: Path,
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Run the explicit retry contract after strict evaluation completes."""
+
+    try:
+        from wan_visual_retry import run_config as run_visual_retry_config
+    except ModuleNotFoundError:
+        from tools.wan_visual_retry import run_config as run_visual_retry_config
+    retry_config = {
+        "evaluation_manifest": str(config["evaluation_manifest"]),
+        "wan_config": str(config["wan_config"]),
+        "clip_model_path": str(config["clip_model_path"]),
+        "max_cases": int(config["max_cases"]),
+        "seed_count": int(config["seed_count"]),
+        "device": str(config.get("device", "cuda:0")),
+        "visual_quality_gate": dict(config.get("visual_quality_gate") or {}),
+    }
+    offsets = tuple(int(value) for value in config.get("adaptive_retry_offsets", [1, 2]))
+    return run_visual_retry_config(
+        retry_config,
+        strict_result_path,
+        checkpoint,
+        output_dir / "adaptive",
+        offsets,
+    )
+
+
+def _evaluate_checkpoint_strict_single(config: Mapping[str, Any], checkpoint: Path, output_dir: Path) -> dict[str, Any]:
     """Generate and evaluate all configured prompts/seeds in one Wan process."""
 
     from harness4h3.student.evaluation_manifest import EvaluationManifest
@@ -1098,6 +1192,184 @@ def evaluate_checkpoint(config: Mapping[str, Any], checkpoint: Path, output_dir:
                 torch.cuda.empty_cache()
         except Exception:
             pass
+
+
+def _merge_parallel_strict_results(
+    config: Mapping[str, Any],
+    checkpoint: Path,
+    output_dir: Path,
+    manifest_digest: str,
+    results: list[Mapping[str, Any]],
+    devices: list[str],
+) -> dict[str, Any]:
+    """Merge independent one-GPU strict evaluations without changing metrics."""
+
+    cases: list[dict[str, Any]] = []
+    for result in results:
+        cases.extend(dict(item) for item in result.get("cases", []))
+    if not cases:
+        raise ValueError("parallel evaluation produced no cases")
+    cases.sort(key=lambda item: (str(item.get("case_id", "")), int(item.get("seed", 0))))
+    gate_results = [dict(item.get("quality", {}).get("visual_quality_gate") or {}) for item in cases]
+    visual_gate_passed = all(
+        not bool(item.get("enabled", False)) or bool(item.get("passed", False)) for item in gate_results
+    )
+    visual_failures = [
+        {
+            "case_id": item["case_id"],
+            "seed": item["seed"],
+            "failures": list(item.get("quality", {}).get("visual_quality_gate", {}).get("failures", [])),
+        }
+        for item in cases
+        if bool(item.get("quality", {}).get("visual_quality_gate", {}).get("enabled", False))
+        and not bool(item.get("quality", {}).get("visual_quality_gate", {}).get("passed", False))
+    ]
+    scores = [float(item["quality"]["score"]) for item in cases]
+    semantics = [float(item["quality"]["semantic"]) for item in cases]
+    hardware = [item.get("hardware_metrics") for item in results if isinstance(item.get("hardware_metrics"), Mapping)]
+    first = results[0]
+    total_wall = sum(float(item.get("generation_wall_time_s_total", 0.0)) for item in hardware)
+    peak_vram = max((float(item.get("peak_memory_gb_max", 0.0)) for item in hardware), default=0.0)
+    total_nfe = sum(int(item.get("inference_steps_total", 0)) for item in hardware)
+    result = {
+        "status": "success",
+        "valid": visual_gate_passed,
+        "promotable": visual_gate_passed,
+        "offline_simulation": False,
+        "continuation_verified": all(bool(item.get("generation", {}).get("continuation_verified")) for item in cases),
+        "student_checkpoint": str(checkpoint.resolve()),
+        "student_checkpoint_sha256": first.get("student_checkpoint_sha256"),
+        "evaluation_manifest_digest": manifest_digest,
+        "contract": first.get("contract"),
+        "case_count": len(cases),
+        "quality_score": sum(scores) / len(scores),
+        "quality_metrics": {
+            "semantic": sum(semantics) / len(semantics),
+            "temporal": sum(float(item["quality"]["temporal"]) for item in cases) / len(cases),
+            "motion": sum(float(item["quality"]["motion"]) for item in cases) / len(cases),
+            "visual_quality_gate": {
+                "enabled": any(bool(item.get("enabled", False)) for item in gate_results),
+                "passed": visual_gate_passed,
+                "failure_count": len(visual_failures),
+                "version": next((str(item.get("version")) for item in gate_results if item.get("version")), "disabled"),
+            },
+            "score_type": "clip_temporal",
+        },
+        "hardware_metrics": {
+            "generation_wall_time_s_total": total_wall,
+            "generation_wall_time_s_mean": total_wall / len(cases),
+            "peak_memory_gb_max": peak_vram,
+            "inference_steps_total": total_nfe,
+            "transformer_nfe_proxy": total_nfe,
+        },
+        "visual_quality_gate": {
+            "enabled": any(bool(item.get("enabled", False)) for item in gate_results),
+            "passed": visual_gate_passed,
+            "failure_count": len(visual_failures),
+            "failures": visual_failures,
+            "version": next((str(item.get("version")) for item in gate_results if item.get("version")), "disabled"),
+        },
+        "parallel_evaluation": {"enabled": True, "devices": list(devices), "worker_count": len(results)},
+        "cases": cases,
+    }
+    if not visual_gate_passed:
+        result["failure_code"] = "visual_collapse"
+        result["failure_message"] = "one or more evaluated videos failed the visual information-content gate"
+    atomic_write_json(output_dir / "evaluation-result.json", result)
+    return result
+
+
+def _evaluate_checkpoint_parallel_strict(
+    config: Mapping[str, Any], checkpoint: Path, output_dir: Path, devices: list[str]
+) -> dict[str, Any]:
+    """Evaluate prompt shards concurrently, one full Wan pipeline per GPU."""
+
+    from harness4h3.student.evaluation_manifest import EvaluationManifest
+
+    manifest = EvaluationManifest.from_path(Path(str(config["evaluation_manifest"])))
+    selected_cases = list(manifest.cases[: int(config["max_cases"])])
+    if len(devices) <= 1 or len(selected_cases) <= 1:
+        return _evaluate_checkpoint_strict_single(config, checkpoint, output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    parallel_dir = output_dir / "parallel"
+    parallel_dir.mkdir(parents=True, exist_ok=True)
+    worker_config = dict(config)
+    worker_config["evaluation_parallel_devices"] = []
+    worker_config["adaptive_visual_retry_enabled"] = False
+    worker_config["max_cases"] = 1
+    worker_config["seed_count"] = int(config["seed_count"])
+    config_path = parallel_dir / "campaign-worker.yaml"
+    config_path.write_text(yaml.safe_dump({"wan_loop": worker_config}, sort_keys=False), encoding="utf-8")
+    worker_script = Path(__file__).resolve().with_name("wan_parallel_evaluate_worker.py")
+    processes: list[tuple[subprocess.Popen[str], Path, str]] = []
+    for index, case in enumerate(selected_cases):
+        shard_manifest = EvaluationManifest(
+            cases=(case,),
+            unique_cache_items=1,
+            source_cache_dir=manifest.source_cache_dir,
+            digest=EvaluationManifest._digest_for(
+                manifest.version,
+                manifest.source_cache_dir,
+                1,
+                (case,),
+                cache_contract=manifest.cache_contract,
+            ),
+            version=manifest.version,
+            cache_contract=manifest.cache_contract,
+        )
+        shard_manifest_path = parallel_dir / ("manifest-%02d.json" % index)
+        shard_manifest.write(shard_manifest_path)
+        shard_output = parallel_dir / ("worker-%02d" % index)
+        log_path = parallel_dir / ("worker-%02d.log" % index)
+        log = log_path.open("w", encoding="utf-8")
+        command = [
+            str(config["worker_python"]),
+            str(worker_script),
+            "--config", str(config_path),
+            "--manifest", str(shard_manifest_path),
+            "--checkpoint", str(checkpoint),
+            "--output", str(shard_output),
+            "--device", str(devices[index % len(devices)]),
+        ]
+        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, text=True)
+        processes.append((process, log_path, str(devices[index % len(devices)])))
+        log.close()
+    results: list[Mapping[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for index, (process, log_path, device) in enumerate(processes):
+        return_code = process.wait(timeout=float(config["training_timeout_s"]))
+        result_path = parallel_dir / ("worker-%02d" % index) / "evaluation-result.json"
+        if return_code != 0 or not result_path.is_file():
+            failures.append({"worker": index, "device": device, "return_code": return_code, "log": str(log_path)})
+            continue
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        if result.get("status") != "success":
+            failures.append({"worker": index, "device": device, "result": result, "log": str(log_path)})
+            continue
+        results.append(result)
+    if failures:
+        return _write_failure(
+            output_dir / "evaluation-result.json",
+            "parallel_evaluation_failed",
+            json.dumps(failures, ensure_ascii=False, sort_keys=True),
+        )
+    return _merge_parallel_strict_results(config, checkpoint, output_dir, manifest.digest, results, devices)
+
+
+def evaluate_checkpoint(config: Mapping[str, Any], checkpoint: Path, output_dir: Path) -> dict[str, Any]:
+    """Run strict evaluation, optionally using all configured GPUs, then retry failures."""
+
+    devices = [str(item) for item in config.get("evaluation_parallel_devices", []) if str(item).strip()]
+    if len(devices) > 1:
+        strict = _evaluate_checkpoint_parallel_strict(config, checkpoint, output_dir, devices)
+    else:
+        strict = _evaluate_checkpoint_strict_single(config, checkpoint, output_dir)
+    if strict.get("status") != "success" or not bool(config.get("adaptive_visual_retry_enabled", False)):
+        return strict
+    adaptive = _run_adaptive_visual_retry(config, output_dir / "evaluation-result.json", checkpoint, output_dir)
+    adaptive["strict_evaluation_result"] = str((output_dir / "evaluation-result.json").resolve())
+    adaptive["strict_evaluation"] = strict
+    return adaptive
 
 
 def run_training(config: Mapping[str, Any], proposal: WanTrainingProposal, parent: Path, round_dir: Path) -> dict[str, Any]:

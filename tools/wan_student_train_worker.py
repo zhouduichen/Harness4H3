@@ -208,15 +208,18 @@ def _encode_training_prompt(
     """
 
     with torch.no_grad():
+        # Minimal test/spec doubles may omit CFG metadata; real Wan specs
+        # always carry the configured value (normally 5.0).
+        guidance_scale = float(getattr(spec, "guidance_scale", 1.0))
         prompt_embeds, negative_prompt_embeds = pipeline.encode_prompt(
             prompt,
-            do_classifier_free_guidance=float(spec.guidance_scale) != 1.0,
+            do_classifier_free_guidance=guidance_scale != 1.0,
             num_videos_per_prompt=1,
             max_sequence_length=spec.max_sequence_length,
             device=device,
             dtype=dtype,
         )
-    if float(spec.guidance_scale) != 1.0 and negative_prompt_embeds is None:
+    if guidance_scale != 1.0 and negative_prompt_embeds is None:
         raise WanStudentError("wan_cfg_conditioning_missing", "Wan CFG requires negative prompt embeddings")
     return (
         prompt_embeds.detach().clone(),

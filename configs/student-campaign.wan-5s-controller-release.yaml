@@ -1,0 +1,95 @@
+schema_version: 1
+
+wan_loop:
+  training_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-5s-native-train.yaml
+  wan_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-1.3b-paper16.remote.yaml
+  evaluation_manifest: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/evaluation-manifest.wan-5s-native-paper.json
+  clip_model_path: /data/models/clip-vit-large-patch14-336
+  teacher_baseline_result: /data/models/MiniMax-H3/harness4h3/wan-teacher-native-5s-20261009/teacher-baseline-result.json
+  parent_checkpoint: /data/models/MiniMax-H3/harness4h3/wan-p1-native-timestep-correction-20261010/student.safetensors
+  output_root: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-release-final2-20261009
+  worker_python: /home/intern/miniconda3/envs/comfy/bin/python
+  training_entrypoint: /home/intern/huangjiahao/Harness4H3-long-video-30s/wan_student_train_worker.py
+
+  vllm_base_url: http://127.0.0.1:8000/v1
+  vllm_model: qwen3.5-controller
+  controller_launcher: /home/intern/huangjiahao/Harness4H3-long-video-30s/tools/controller-wait-launch-tp1.sh
+  proposal_schema_version: 2
+  algorithm_capabilities: [progressive_distillation]
+  dmd2_memory_admitted: false
+  wan_dmd2_adapter_ready: false
+  fidelity_schedule: [F1, F2, F3]
+  continuation_contract: 5s
+
+  correctness_audit_passed: true
+  correctness_evidence_path: /data/models/MiniMax-H3/harness4h3/wan-p0-correctness-20261009/p0-correctness.json
+  correctness_evidence_sha256: 328a782bf05719c2ee8e2a67ffb3cd849128dcbafdb252bd19696b7b7a7033b7
+  legacy_r2_promotion_frozen: true
+  legacy_r2_checkpoint_digests:
+    - a06eaca14a0a864c1c45210d7aa2dd037bcc87319b98e71a05c705b71e969729
+
+  controller_release_required: true
+  controller_release_evidence_path: /data/models/MiniMax-H3/harness4h3/wan-p1-native-timestep-correction-20261010/adaptive/controller-release-gate.json
+  controller_release_evidence_sha256: 86eb28ff6fda05e56a540d9c55f8b1a42b435c266976e7329fa3dfe16fd7b750
+  controller_release_contract: adaptive_visual_retry
+  adaptive_visual_retry_enabled: true
+  adaptive_retry_offsets: [1, 2]
+  # One strict Wan pipeline per L40; adaptive retries remain charged and run
+  # after this parallel strict pass.
+  evaluation_parallel_devices: [cuda:0, cuda:1, cuda:2, cuda:3]
+
+  state_path: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-release-final2-20261009/campaign-state.json
+  fingerprint_path: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-release-final2-20261009/fingerprints.jsonl
+  experience_path: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-release-final2-20261009/experiences.jsonl
+  memory_seed_paths:
+    - /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-native-20261009/experiences.jsonl
+    - /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-overnight-20261008/experiences.jsonl
+  checkpoint_every_steps: 2
+  watchdog_restart_limit: 3
+  watchdog_backoff_seconds: 30
+  offline_simulation: false
+
+  device: cuda:3
+  gpu_count: 4
+  min_free_memory_gb: 35
+  gpu_wait_s: 3600
+  max_rounds: 1
+  max_train_steps: 2
+  progressive_source_steps: 32
+  progressive_target_steps: 16
+  wan_trainable_scope: all
+  max_cases: 4
+  seed_count: 3
+  window_count: 1
+  overlap_latent_frames: 0
+  inference_steps: 16
+  vllm_timeout_s: 900
+  training_timeout_s: 86400
+  semantic_floor_ratio: 0.90
+  quality_floor_ratio: 0.99
+  min_semantic_delta: 0.005
+  controller_primary_objective: semantic_alignment
+  controller_secondary_objectives: [temporal_consistency, visual_quality, motion_quality]
+  controller_min_quality_delta: 0.0
+  controller_max_temporal_drop: 0.005
+  controller_memory_limit: 3
+  controller_search_space:
+    learning_rate: [0.0000001, 0.0000002]
+    critic_learning_rate: [0.000001]
+    rollout_endpoint_weight: [0.0]
+    rollout_clean_weight: [0.0]
+    rollout_every: [1]
+    rollout_steps: [0]
+    train_steps: [2]
+    teacher_reuse_steps: [1, 64]
+    velocity_weight: [1.0]
+    clean_anchor_weight: [0.5]
+  visual_quality_gate:
+    enabled: true
+    version: visual-structure-v1
+    min_spatial_gradient: 0.30
+    min_laplacian_std: 1.8
+    min_block_variance: 12.0
+    min_frame_difference: 0.01
+    max_low_texture_frame_ratio: 0.25
+  no_improvement_patience: 1

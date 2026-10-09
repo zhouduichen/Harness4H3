@@ -12,6 +12,11 @@ wan_training:
   student_device: cuda:3
   seed: 20261009
   train_steps: 1
+  # P0/P1 correctness contract: reuse the authenticated native H3 RGB cache
+  # and supervise against the real Wan 32-step trajectory.
+  teacher_target_mode: cache_rgb
+  wan_teacher_mode: wan_base_trajectory
+  teacher_target_groups: 1
   h3_sampling_steps: 4
   h3_latent_frames: 24
   h3_latent_height: 16

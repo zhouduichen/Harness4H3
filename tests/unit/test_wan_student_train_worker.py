@@ -71,9 +71,13 @@ def test_training_prompt_is_normal_autograd_tensor():
     class Spec:
         max_sequence_length = 512
 
-    result = _encode_training_prompt(FakePipeline(), "test", Spec(), torch.device("cpu"), torch.float32)
-    assert not result.is_inference()
-    assert result.requires_grad is False
+    prompt_embeds, negative_prompt_embeds = _encode_training_prompt(
+        FakePipeline(), "test", Spec(), torch.device("cpu"), torch.float32
+    )
+    assert not prompt_embeds.is_inference()
+    assert not negative_prompt_embeds.is_inference()
+    assert prompt_embeds.requires_grad is False
+    assert negative_prompt_embeds.requires_grad is False
 
 
 def test_training_cache_paths_select_unique_captions(tmp_path: Path):

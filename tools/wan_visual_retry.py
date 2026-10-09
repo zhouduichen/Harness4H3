@@ -97,8 +97,14 @@ def _quality_record(
     }
 
 
-def run(config_path: Path, strict_result_path: Path, checkpoint: Path, output_dir: Path, offsets: tuple[int, ...]) -> dict[str, Any]:
-    config = _load_config(config_path)
+def run_config(
+    config: Mapping[str, Any],
+    strict_result_path: Path,
+    checkpoint: Path,
+    output_dir: Path,
+    offsets: tuple[int, ...],
+) -> dict[str, Any]:
+    config = dict(config)
     strict = json.loads(Path(strict_result_path).read_text(encoding="utf-8"))
     if strict.get("status") != "success":
         raise ValueError("strict evaluation must complete successfully before retry")
@@ -251,6 +257,10 @@ def run(config_path: Path, strict_result_path: Path, checkpoint: Path, output_di
         "status": "success",
         "valid": passed,
         "promotable": passed,
+        # Preserve the strict evaluator's output-contract evidence at the
+        # top level.  The Controller's deterministic promotion gate consumes
+        # this field before it inspects quality metrics.
+        "continuation_verified": bool(strict.get("continuation_verified", False)),
         "fixed_seed_promotable": bool(strict.get("promotable", False)),
         "adaptive_retry_verified": True,
         "contract_mode": "adaptive_visual_retry",
@@ -288,7 +298,24 @@ def run(config_path: Path, strict_result_path: Path, checkpoint: Path, output_di
     if not passed:
         result["failure_code"] = "visual_collapse"
     (output_dir / "adaptive-evaluation-result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # This function runs inside the campaign parent process.  Release the
+    # full Wan pipeline before Controller handoff; otherwise GPU3 stays
+    # reserved by PyTorch's allocator while the launcher waits for quiet.
+    del pipeline
+    try:
+        import gc
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
     return result
+
+
+def run(config_path: Path, strict_result_path: Path, checkpoint: Path, output_dir: Path, offsets: tuple[int, ...]) -> dict[str, Any]:
+    return run_config(_load_config(config_path), strict_result_path, checkpoint, output_dir, offsets)
 
 
 def main(argv: list[str] | None = None) -> int:
