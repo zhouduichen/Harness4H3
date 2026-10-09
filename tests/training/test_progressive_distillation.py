@@ -102,7 +102,7 @@ def test_p1_loss_components_are_separately_observable_and_rollout_is_additive():
     batch = method.prepare_batch(batches[0], torch.Generator().manual_seed(13))
     output = method.training_step(batch, iteration=1)
     expected = (
-        output.losses["endpoint_loss"]
+        method.config.endpoint_weight * output.losses["endpoint_loss"]
         + method.config.velocity_weight * output.losses["flow_loss"]
         + method.config.clean_anchor_weight * output.losses["clean_loss"]
         + method.config.rollout_endpoint_weight * output.losses["rollout_endpoint_loss"]
@@ -113,6 +113,39 @@ def test_p1_loss_components_are_separately_observable_and_rollout_is_additive():
     assert output.losses["clean_loss"].dtype == torch.float32
     assert output.losses["rollout_endpoint_loss"].requires_grad
     assert output.losses["rollout_clean_loss"].requires_grad
+
+
+@pytest.mark.parametrize(
+    ("name", "weights"),
+    [
+        ("endpoint", {"endpoint_weight": 1.0}),
+        ("flow", {"endpoint_weight": 0.0, "velocity_weight": 1.0, "clean_anchor_weight": 0.0}),
+        ("clean", {"endpoint_weight": 0.0, "velocity_weight": 0.0, "clean_anchor_weight": 1.0}),
+        (
+            "rollout",
+            {
+                "endpoint_weight": 0.0,
+                "velocity_weight": 0.0,
+                "clean_anchor_weight": 0.0,
+                "rollout_steps": 2,
+                "rollout_endpoint_weight": 1.0,
+            },
+        ),
+    ],
+)
+def test_loss_ablation_can_isolate_one_signal(name, weights):
+    method, batches = fixture()
+    method.config = replace(method.config, **weights)
+    method.prepare()
+    batch = method.prepare_batch(batches[0], torch.Generator().manual_seed(13))
+    output = method.training_step(batch, iteration=1)
+    expected = {
+        "endpoint": output.losses["endpoint_loss"],
+        "flow": output.losses["flow_loss"],
+        "clean": output.losses["clean_loss"],
+        "rollout": output.losses["rollout_endpoint_loss"],
+    }[name]
+    assert torch.allclose(output.losses["total_loss"], expected)
 
 
 def test_rollout_config_rejects_invalid_values():

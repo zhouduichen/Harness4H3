@@ -385,6 +385,7 @@ def run(
     rollout_every_override: int | None = None,
     rollout_endpoint_weight_override: float | None = None,
     rollout_clean_weight_override: float | None = None,
+    endpoint_weight_override: float | None = None,
     velocity_weight_override: float | None = None,
     clean_anchor_weight_override: float | None = None,
     fp32_optimizer_state_override: bool | None = None,
@@ -421,6 +422,9 @@ def run(
         rollout_clean_weight_override
         if rollout_clean_weight_override is not None
         else raw.get("rollout_clean_weight", 0.0)
+    )
+    endpoint_weight = float(
+        endpoint_weight_override if endpoint_weight_override is not None else raw.get("endpoint_weight", 1.0)
     )
     velocity_weight = float(
         velocity_weight_override if velocity_weight_override is not None else raw.get("velocity_weight", 1.0)
@@ -460,6 +464,7 @@ def run(
             "train_steps": steps,
             "learning_rate": learning_rate,
             "critic_learning_rate": float(raw.get("critic_learning_rate", learning_rate)),
+            "endpoint_weight": endpoint_weight,
             "velocity_weight": velocity_weight,
             "clean_anchor_weight": clean_anchor_weight,
             "rollout_steps": rollout_steps,
@@ -599,6 +604,7 @@ def run(
                     learning_rate=policy.learning_rate,
                     trainable_scope=policy.trainable_scope,
                     audio_weight=0.0,
+                    endpoint_weight=policy.endpoint_weight,
                     velocity_weight=policy.velocity_weight,
                     clean_anchor_weight=policy.clean_anchor_weight,
                     rollout_steps=policy.rollout_steps,
@@ -672,6 +678,13 @@ def run(
                     "wan_schedule_source_nfe": stage_schedule.source_nfe or stage_schedule.nfe,
                     "wan_schedule_digest": stage_schedule_digest,
                     "loss_trace": [dict(item) for item in result.loss_trace],
+                    "loss_weights": {
+                        "endpoint": policy.endpoint_weight,
+                        "flow": policy.velocity_weight,
+                        "clean": policy.clean_anchor_weight,
+                        "rollout_endpoint": policy.rollout_endpoint_weight,
+                        "rollout_clean": policy.rollout_clean_weight,
+                    },
                 }
             )
         if stages:
@@ -816,6 +829,13 @@ def run(
             "rollout_endpoint_weight": policy.rollout_endpoint_weight,
             "rollout_clean_weight": policy.rollout_clean_weight,
         },
+        "loss_weights": {
+            "endpoint": policy.endpoint_weight,
+            "flow": policy.velocity_weight,
+            "clean": policy.clean_anchor_weight,
+            "rollout_endpoint": policy.rollout_endpoint_weight,
+            "rollout_clean": policy.rollout_clean_weight,
+        },
         "loss_reduction": "fp32",
         "fp32_optimizer_state": policy.fp32_optimizer_state,
         "initialization_mode": initialization_mode,
@@ -879,6 +899,7 @@ def main(argv=None) -> int:
     parser.add_argument("--rollout-every", type=int, default=None)
     parser.add_argument("--rollout-endpoint-weight", type=float, default=None)
     parser.add_argument("--rollout-clean-weight", type=float, default=None)
+    parser.add_argument("--endpoint-weight", type=float, default=None)
     parser.add_argument("--velocity-weight", type=float, default=None)
     parser.add_argument("--clean-anchor-weight", type=float, default=None)
     parser.add_argument("--fp32-optimizer-state", action=argparse.BooleanOptionalAction, default=None)
@@ -911,6 +932,7 @@ def main(argv=None) -> int:
             rollout_every_override=args.rollout_every,
             rollout_endpoint_weight_override=args.rollout_endpoint_weight,
             rollout_clean_weight_override=args.rollout_clean_weight,
+            endpoint_weight_override=args.endpoint_weight,
             velocity_weight_override=args.velocity_weight,
             clean_anchor_weight_override=args.clean_anchor_weight,
             fp32_optimizer_state_override=args.fp32_optimizer_state,

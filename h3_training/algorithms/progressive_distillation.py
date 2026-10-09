@@ -103,6 +103,7 @@ class ProgressiveDistillationConfig:
     trainable_scope: str = "all"
     video_weight: float = 1.0
     audio_weight: float = 1.0
+    endpoint_weight: float = 1.0
     velocity_weight: float = 1.0
     clean_anchor_weight: float = 1.0
     rollout_steps: int = 0
@@ -117,6 +118,7 @@ class ProgressiveDistillationConfig:
         if (
             self.video_weight < 0
             or self.audio_weight < 0
+            or self.endpoint_weight < 0
             or self.video_weight + self.audio_weight <= 0
             or self.velocity_weight < 0
             or self.clean_anchor_weight < 0
@@ -136,6 +138,15 @@ class ProgressiveDistillationConfig:
             self.rollout_endpoint_weight + self.rollout_clean_weight <= 0
         ):
             raise ValueError("active rollout requires a positive rollout weight")
+        if (
+            self.endpoint_weight
+            + self.velocity_weight
+            + self.clean_anchor_weight
+            + self.rollout_endpoint_weight
+            + self.rollout_clean_weight
+            <= 0
+        ):
+            raise ValueError("at least one distillation loss weight must be positive")
 
 
 class ProgressiveDistillation(TrainingMethod):
@@ -455,7 +466,7 @@ class ProgressiveDistillation(TrainingMethod):
             iteration,
         )
         total = (
-            sum(losses)
+            self.config.endpoint_weight * sum(losses)
             + self.config.velocity_weight * velocity_loss
             + self.config.clean_anchor_weight * clean_anchor_loss
             + self.config.rollout_endpoint_weight * rollout_endpoint_loss

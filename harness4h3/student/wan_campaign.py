@@ -116,6 +116,7 @@ class WanTrainingPolicy:
     train_steps: int
     learning_rate: float
     critic_learning_rate: float
+    endpoint_weight: float = 1.0
     velocity_weight: float = 1.0
     clean_anchor_weight: float = 0.5
     rollout_steps: int = 0
@@ -130,7 +131,7 @@ class WanTrainingPolicy:
         raw = _mapping(raw, "training")
         allowed = {
             "method", "source_steps", "target_steps", "train_steps", "learning_rate", "critic_learning_rate",
-            "velocity_weight", "clean_anchor_weight", "rollout_steps", "rollout_every",
+            "endpoint_weight", "velocity_weight", "clean_anchor_weight", "rollout_steps", "rollout_every",
             "rollout_endpoint_weight", "rollout_clean_weight", "trainable_scope", "fp32_optimizer_state",
         }
         _unknown(raw, allowed, "training")
@@ -154,6 +155,7 @@ class WanTrainingPolicy:
                 current //= 2
         learning_rate = _number(raw["learning_rate"], "training.learning_rate", minimum=0.0, maximum=0.01)
         critic_learning_rate = _number(raw["critic_learning_rate"], "training.critic_learning_rate", minimum=0.0, maximum=0.01)
+        endpoint_weight = _number(raw.get("endpoint_weight", 1.0), "training.endpoint_weight", minimum=-1e-12)
         velocity_weight = _number(raw.get("velocity_weight", 1.0), "training.velocity_weight", minimum=-1e-12)
         clean_anchor_weight = _number(raw.get("clean_anchor_weight", 0.5), "training.clean_anchor_weight", minimum=-1e-12)
         rollout_steps = _integer(raw.get("rollout_steps", 0), "training.rollout_steps", minimum=0, maximum=4)
@@ -179,6 +181,7 @@ class WanTrainingPolicy:
             train_steps=train_steps,
             learning_rate=learning_rate,
             critic_learning_rate=critic_learning_rate,
+            endpoint_weight=endpoint_weight,
             velocity_weight=velocity_weight,
             clean_anchor_weight=clean_anchor_weight,
             rollout_steps=rollout_steps,
