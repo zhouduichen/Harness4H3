@@ -1,0 +1,22 @@
+{
+  "cache_contract": {
+    "decoded_frames": 81,
+    "height": 256,
+    "latent_frames": 24,
+    "name": "native_5s",
+    "require_real_teacher": true,
+    "width": 256
+  },
+  "cases": [
+    {
+      "cache_path": "/data/models/MiniMax-H3/harness4h3/cache-native-5s-24x1/00000000.pt",
+      "caption": "A red paper airplane glides slowly through a sunlit blue sky, smooth natural motion, cinematic.",
+      "case_id": "case_0001",
+      "seeds": [20261008, 20261009, 20261010]
+    }
+  ],
+  "digest": "c575a35df30a6f6d3d96b7a70640acb8632eb1b950b9d3de301cdcc9f9c0bd6f",
+  "source_cache_dir": "/data/models/MiniMax-H3/harness4h3/cache-native-5s-24x1",
+  "unique_cache_items": 1,
+  "version": 1
+}
