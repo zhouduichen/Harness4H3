@@ -24,7 +24,8 @@ wan_loop:
   correctness_evidence_path: ""
   correctness_evidence_sha256: ""
   legacy_r2_promotion_frozen: true
-  legacy_r2_checkpoint_digests: []
+  legacy_r2_checkpoint_digests:
+    - a06eaca14a0a864c1c45210d7aa2dd037bcc87319b98e71a05c705b71e969729
 
   state_path: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-native-20261009/campaign-state.json
   fingerprint_path: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-native-20261009/fingerprints.jsonl
