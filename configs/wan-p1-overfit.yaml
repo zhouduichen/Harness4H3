@@ -1,0 +1,40 @@
+schema_version: 1
+
+# Deliberate one-Teacher-video overfit probe. It reuses one native 5s cache
+# item for every optimizer step; this is a learnability diagnostic, not a
+# generalization claim.
+wan_training:
+  wan_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-1.3b-paper16.remote.yaml
+  teacher_checkpoint: /data/models/MiniMax-H3/diffusion_models/minimax_h3_fl2va_bf16.safetensors
+  h3_cache_dir: /data/models/MiniMax-H3/harness4h3/cache-native-5s-24x1
+  cache_contract: native_5s
+  comfyui_root: /home/intern/huangjiahao/ComfyUI
+  vae_name: minimax_h3_video_vae_fp16.safetensors
+  teacher_devices: [cuda:0, cuda:1, cuda:2]
+  student_device: cuda:3
+  seed: 20261009
+  teacher_target_groups: 1
+  teacher_reuse_steps: 32
+  train_steps: 32
+  method: progressive_distillation
+  source_steps: 32
+  target_steps: 16
+  h3_sampling_steps: 4
+  h3_latent_frames: 24
+  h3_latent_height: 16
+  h3_latent_width: 16
+  h3_latent_channels: 24
+  max_sequence_length: 512
+  learning_rate: 0.000001
+  endpoint_weight: 1.0
+  velocity_weight: 1.0
+  clean_anchor_weight: 0.5
+  rollout_steps: 0
+  rollout_every: 1
+  rollout_endpoint_weight: 0.0
+  rollout_clean_weight: 0.0
+  trainable_scope: all
+  fp32_optimizer_state: false
+  initialization_mode: inherit
+  checkpoint_every_steps: 0
+  parent_checkpoint: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-paper-r1-continuation/round-0002/training/student.safetensors
