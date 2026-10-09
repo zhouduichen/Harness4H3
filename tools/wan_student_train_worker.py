@@ -289,14 +289,65 @@ def _teacher_video(
         latent_width=spec.h3_latent_width,
         condition_dim=5120,
     )
+    target_mode = str(raw.get("teacher_target_mode", "online_h3")).strip()
+    if target_mode not in {"online_h3", "cache_rgb"}:
+        raise ValueError("unsupported teacher_target_mode: %s" % target_mode)
+    cache_contract = _cache_contract(raw)
+    cache_metadata: Mapping[str, Any] = {}
+    if target_mode == "cache_rgb":
+        if cache_contract is None or cache_path is None:
+            raise ValueError("teacher_target_mode=cache_rgb requires the native H3 cache contract and cache item")
+        cache_metadata = validate_h3_cache_item(cache_path, cache_contract)
     cache_item = load_h3_cache_item(
         cache_dir,
         target,
         teacher_device,
         torch.bfloat16,
         cache_path=cache_path,
-        cache_contract=_cache_contract(raw),
+        cache_contract=cache_contract,
     )
+    if target_mode == "cache_rgb":
+        # The native cache already contains an authenticated real H3 Teacher
+        # video latent.  Decode that fixed target directly; do not silently
+        # replace the requested single-Teacher video with a fresh random H3
+        # sample.  This also makes cache RGB finite-ness a training invariant.
+        latent = cache_item["latent"].to(device=decode_device, dtype=torch.bfloat16)
+        if not torch.isfinite(latent).all():
+            raise WanStudentError(
+                "wan_cache_latent_nonfinite",
+                "native H3 cache latent is non-finite for cache item %s" % cache_path,
+            )
+        frames = decode_video_latent(comfyui_root, spec.vae_name, latent)
+        _release_h3_vae()
+        if not torch.isfinite(frames).all():
+            raise WanStudentError(
+                "wan_cache_video_nonfinite",
+                "native H3 cache decoded non-finite RGB frames for cache item %s" % cache_path,
+            )
+        frames = resample_video_frames(frames, num_frames=spec.num_frames, height=spec.height, width=spec.width)
+        if not torch.isfinite(frames).all():
+            raise WanStudentError(
+                "wan_cache_video_nonfinite",
+                "native H3 cache RGB resampling produced non-finite frames for cache item %s" % cache_path,
+            )
+        teacher_digest = sha256_path(teacher_checkpoint)
+        cached_teacher_digest = str(cache_metadata.get("teacher_checkpoint_sha256", "")).strip()
+        if cached_teacher_digest and cached_teacher_digest != teacher_digest:
+            raise WanStudentError(
+                "wan_cache_teacher_mismatch",
+                "native H3 cache Teacher digest does not match configured Teacher for cache item %s" % cache_path,
+            )
+        metadata = {
+            "teacher_sampling_steps": int(cache_metadata.get("teacher_sampling_steps", 0)),
+            "teacher_forward_count": 0,
+            "teacher_source": "native_h3_cache_rgb",
+            "teacher_cache_generated": bool(cache_metadata.get("teacher_generated", False)),
+            "teacher_wall_time_s": 0.0,
+            "teacher_checkpoint_sha256": teacher_digest,
+            "caption": str(cache_item.get("caption", "")).strip(),
+            "cache_item": str(cache_item["path"]),
+        }
+        return frames, 0, teacher_digest, metadata
     prompt = cache_item["prompt"]
     h3_latent = cache_item["latent"]
     h3_audio = cache_item.get("audio_latent")
@@ -509,6 +560,7 @@ def run(
         )
     requested_teacher_groups = int(math.ceil(float(steps) / float(max(1, teacher_reuse_steps))))
     teacher_groups = max(1, min(requested_teacher_groups, int(raw.get("teacher_target_groups", 4))))
+    teacher_target_mode = str(raw.get("teacher_target_mode", "online_h3")).strip()
     teacher_devices = _parse_devices(raw["teacher_devices"])
     student_device = torch.device(str(raw.get("student_device", "cuda:3")))
     teacher_device = torch.device(teacher_devices[0])
@@ -688,7 +740,7 @@ def run(
                     "stage_child": str(stage_path),
                     "stage_child_sha256": stage_digest,
                     "teacher_checkpoint_sha256": teacher_digest,
-                    "teacher_kind": "h3_rgb_boundary_endpoint",
+                    "teacher_kind": "native_h3_cache_rgb" if teacher_target_mode == "cache_rgb" else "h3_rgb_boundary_endpoint",
                     "wan_schedule_mode": stage_schedule.mode,
                     "wan_schedule_shift": stage_schedule.shift,
                     "wan_schedule_source_nfe": stage_schedule.source_nfe or stage_schedule.nfe,
@@ -786,6 +838,7 @@ def run(
             "parent_checkpoint_sha256": parent_checkpoint_digest or "",
             "teacher_checkpoint_sha256": teacher_digest,
             "teacher_forward_count": teacher_forward_count,
+            "teacher_target_mode": teacher_target_mode,
             "offline_simulation": "false",
             "frame_contract": "81@16fps@256x256",
             "train_steps": steps,
@@ -857,6 +910,7 @@ def run(
         "initialization_mode": initialization_mode,
         "stage_lineage": stage_lineage,
         "teacher_forward_count": teacher_forward_count,
+        "teacher_target_mode": teacher_target_mode,
         "offline_simulation": False,
         "frame_contract": {
             "frames": spec.num_frames,

@@ -9,6 +9,7 @@ wan_training:
   teacher_checkpoint: /data/models/MiniMax-H3/diffusion_models/minimax_h3_fl2va_bf16.safetensors
   h3_cache_dir: /data/models/MiniMax-H3/harness4h3/cache-native-5s-24x1
   cache_contract: native_5s
+  teacher_target_mode: cache_rgb
   comfyui_root: /home/intern/huangjiahao/ComfyUI
   vae_name: minimax_h3_video_vae_fp16.safetensors
   teacher_devices: [cuda:0, cuda:2, cuda:3]
