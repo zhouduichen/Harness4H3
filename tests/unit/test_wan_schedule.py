@@ -24,7 +24,7 @@ def test_coarsened_native_32_schedule_is_exactly_binary_aligned():
     target = coarsen_wan_schedule(source, 2)
     assert target.sigmas == source.sigmas[::2]
     assert target.nfe == 16
-    assert target.timesteps == tuple(sigma * 1000.0 for sigma in target.sigmas[:-1])
+    assert target.timesteps == source.timesteps[::2]
 
 
 def test_training_uniform_schedule_is_not_h3_shifted():

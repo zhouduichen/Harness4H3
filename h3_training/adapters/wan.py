@@ -68,6 +68,12 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         self.schedule_provider = schedule_provider or (
             lambda nfe: training_uniform_wan_schedule(int(nfe), int(self._train_timesteps()))
         )
+        # The shared algorithm transports sigma values, while Wan's native
+        # Transformer consumes scheduler timesteps.  Keep the exact sigma ->
+        # timestep tables from every schedule requested by the algorithm so
+        # native integer timestep quantization is not lost at the adapter
+        # boundary.
+        self._model_timestep_tables: list[tuple[tuple[float, ...], tuple[float, ...]]] = []
         self._active_clean: Optional[torch.Tensor] = None
 
     @staticmethod
@@ -80,6 +86,26 @@ class WanTrainingAdapter(DenoisingModelAdapter):
     def _train_timesteps(self) -> float:
         config = getattr(self.scheduler, "config", None)
         return float(getattr(config, "num_train_timesteps", 1000.0))
+
+    def _model_timestep(self, sigma: torch.Tensor) -> torch.Tensor:
+        """Map algorithm sigma values to the exact native Wan timesteps."""
+
+        fallback = sigma.float() * self._train_timesteps()
+        if not self._model_timestep_tables:
+            return fallback
+        values = sigma.float().reshape(-1)
+        best_distance = torch.full_like(values, float("inf"))
+        best_timestep = fallback.reshape(-1)
+        for sigmas, timesteps in self._model_timestep_tables:
+            schedule_sigmas = torch.as_tensor(sigmas, device=values.device, dtype=torch.float32)
+            schedule_timesteps = torch.as_tensor(timesteps, device=values.device, dtype=torch.float32)
+            distance = (values[:, None] - schedule_sigmas[None, :]).abs()
+            local_distance, local_index = distance.min(dim=1)
+            local_timestep = schedule_timesteps[local_index]
+            selected = local_distance < best_distance
+            best_distance = torch.where(selected, local_distance, best_distance)
+            best_timestep = torch.where(selected, local_timestep, best_timestep)
+        return best_timestep.reshape_as(sigma)
 
     @staticmethod
     def _prediction_tensor(output: Any) -> torch.Tensor:
@@ -174,7 +200,7 @@ class WanTrainingAdapter(DenoisingModelAdapter):
             denominator = sigma.float().clamp_min(torch.finfo(torch.float32).eps)
             velocity = (noisy.video.float() - clean.float()) / denominator.view(-1, 1, 1, 1, 1)
             return ModalPrediction(video=velocity.to(dtype=noisy.video.dtype).detach())
-        model_timestep = sigma.float() * self._train_timesteps()
+        model_timestep = self._model_timestep(sigma)
         model_device = noisy.video.device
         patch_embedding = getattr(role.model, "patch_embedding", None)
         if patch_embedding is not None:
@@ -235,6 +261,9 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         if isinstance(num_model_evaluations, bool) or int(num_model_evaluations) <= 0:
             raise ValueError("number of model evaluations must be positive")
         schedule = self.schedule_provider(int(num_model_evaluations))
+        table = (tuple(schedule.sigmas[:-1]), tuple(schedule.timesteps))
+        if table not in self._model_timestep_tables:
+            self._model_timestep_tables.append(table)
         return ModalSchedule(video_sigmas=schedule.sigmas)
 
     def save_role(self, role: ModelRole, path: Path) -> Mapping[str, Any]:

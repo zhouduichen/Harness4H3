@@ -5,6 +5,7 @@ from h3_training.adapters.wan import WanEndpointTeacher, WanTrainingAdapter
 from h3_training.algorithms.base import ModelRole
 from h3_training.data.schema import ModalInterval, ModalLatents, ModalPrediction, ModalTimesteps
 from h3_training.engine.state import TrainingFailure
+from harness4h3.student.wan_schedule import WanSigmaSchedule
 
 
 class FakeScheduler:
@@ -33,6 +34,17 @@ class CFGTransformer(torch.nn.Module):
     def forward(self, hidden_states, timestep, encoder_hidden_states, return_dict=False):
         self.calls.append(float(encoder_hidden_states.mean()))
         return (torch.ones_like(hidden_states) * encoder_hidden_states.mean(),)
+
+
+class TimestepTransformer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.output_head = torch.nn.Linear(1, 1)
+        self.timesteps = []
+
+    def forward(self, hidden_states, timestep, encoder_hidden_states, return_dict=False):
+        self.timesteps.append(float(timestep.reshape(-1)[0]))
+        return (torch.zeros_like(hidden_states),)
 
 
 def make_adapter():
@@ -112,6 +124,36 @@ def test_wan_adapter_matches_runtime_cfg_formula():
     )
     assert transformer.calls == [3.0, 1.0]
     assert torch.allclose(prediction.video, torch.full_like(prediction.video, 11.0))
+
+
+def test_wan_adapter_passes_native_quantized_timestep_to_transformer():
+    transformer = TimestepTransformer()
+    schedule = WanSigmaSchedule(
+        mode="native",
+        sigmas=(0.9999989867210386, 0.0),
+        timesteps=(999.0,),
+        num_train_timesteps=1000,
+        shift=3.0,
+    )
+    adapter = WanTrainingAdapter(
+        transformer=transformer,
+        scheduler=FakeScheduler(),
+        encode_frames=lambda frames: torch.as_tensor(frames).permute(3, 0, 1, 2).unsqueeze(0).contiguous(),
+        encode_prompt=lambda prompt: torch.ones(1, 2, 4),
+        schedule_provider=lambda _: schedule,
+    )
+    adapter.schedule(1)
+    batch = adapter.prepare_batch(
+        {"sample_id": "s0", "prompt": "red train", "frames": torch.zeros(2, 2, 2, 3)},
+        torch.Generator().manual_seed(7),
+    )
+    adapter.predict(
+        ModelRole("student", transformer, adapter, True),
+        batch.latents,
+        ModalTimesteps(video=torch.tensor([0.9999989867210386])),
+        batch.conditioning,
+    )
+    assert transformer.timesteps == [999.0]
 
 
 def test_wan_adapter_endpoint_teacher_is_role_type_not_role_name():

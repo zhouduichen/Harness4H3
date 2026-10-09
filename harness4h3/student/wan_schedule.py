@@ -125,6 +125,10 @@ def coarsen_wan_schedule(source: WanSigmaSchedule, factor: int) -> WanSigmaSched
         num_train_timesteps=source.num_train_timesteps,
         shift=source.shift,
         source_nfe=source.nfe,
+        # Preserve the checkpoint scheduler's native timestep quantization.
+        # Recomputing sigma*1000 here turns e.g. 999 into 999.998..., which
+        # is not the value passed by Diffusers' native inference loop.
+        timesteps=source.timesteps[::divisor],
     )
 
 
