@@ -87,6 +87,29 @@ def test_training_cache_paths_select_unique_captions(tmp_path: Path):
     assert [path.name for path in selected] == ["00000000.pt", "00000002.pt", "00000003.pt"]
 
 
+def test_training_cache_paths_enforces_native_5s_contract(tmp_path: Path):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    torch.save(
+        {
+            "prompt": torch.zeros(2, 5120),
+            "video": torch.zeros(24 * 64, 96),
+            "audio": torch.zeros(404, 32),
+            "caption": "native",
+            "latent_frames": 24,
+            "num_frames": 81,
+            "height": 256,
+            "width": 256,
+            "teacher_generated": True,
+            "synthetic_latent": False,
+            "offline_simulation": False,
+        },
+        cache_dir / "00000000.pt",
+    )
+    selected = _training_cache_paths({"h3_cache_dir": str(cache_dir), "cache_contract": "native_5s"}, limit=1)
+    assert [path.name for path in selected] == ["00000000.pt"]
+
+
 def test_trainable_scope_can_keep_only_text_conditioning_paths():
     class FakeTransformer(torch.nn.Module):
         def __init__(self):

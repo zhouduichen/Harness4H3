@@ -21,6 +21,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from harness4h3.student.inference import decode_video_latent, load_h3_cache_item
+from harness4h3.student.evaluation_manifest import CacheContract, validate_h3_cache_item
 from harness4h3.student.proposal import StudentTarget
 from harness4h3.student.schedule import h3_video_sigmas
 from harness4h3.student.teacher_service import TeacherService
@@ -137,6 +138,15 @@ def _parse_devices(raw: Any) -> tuple[str, ...]:
     return values
 
 
+def _cache_contract(raw: Mapping[str, Any]) -> CacheContract | None:
+    selected = str(raw.get("cache_contract", raw.get("continuation_contract", ""))).strip()
+    if not selected:
+        return None
+    if selected == "native_5s":
+        return CacheContract.native_5s()
+    raise ValueError("unsupported H3 cache contract: %s" % selected)
+
+
 def _training_cache_paths(raw: Mapping[str, Any], *, limit: int) -> list[Path]:
     """Select one real H3 cache item per caption for prompt-diverse training."""
 
@@ -146,8 +156,11 @@ def _training_cache_paths(raw: Mapping[str, Any], *, limit: int) -> list[Path]:
         raise FileNotFoundError("no H3 cache items under %s" % cache_dir)
     selected: list[Path] = []
     captions: set[str] = set()
+    contract = _cache_contract(raw)
     for path in paths:
-        item = torch.load(path, map_location="cpu", weights_only=False)
+        item = validate_h3_cache_item(path, contract) if contract is not None else torch.load(
+            path, map_location="cpu", weights_only=False
+        )
         caption = str(item.get("caption", "")).strip() if isinstance(item, Mapping) else ""
         del item
         key = caption or path.name
@@ -276,7 +289,14 @@ def _teacher_video(
         latent_width=spec.h3_latent_width,
         condition_dim=5120,
     )
-    cache_item = load_h3_cache_item(cache_dir, target, teacher_device, torch.bfloat16, cache_path=cache_path)
+    cache_item = load_h3_cache_item(
+        cache_dir,
+        target,
+        teacher_device,
+        torch.bfloat16,
+        cache_path=cache_path,
+        cache_contract=_cache_contract(raw),
+    )
     prompt = cache_item["prompt"]
     h3_latent = cache_item["latent"]
     h3_audio = cache_item.get("audio_latent")

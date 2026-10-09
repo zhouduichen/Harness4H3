@@ -1,0 +1,23 @@
+schema_version: 1
+
+wan_training:
+  # Native Wan short-clip contract: H3 z=24 decodes to 81 frames.
+  wan_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-1.3b-paper16.remote.yaml
+  teacher_checkpoint: /data/models/MiniMax-H3/diffusion_models/minimax_h3_fl2va_bf16.safetensors
+  h3_cache_dir: /data/models/MiniMax-H3/harness4h3/cache-native-5s-24x1
+  cache_contract: native_5s
+  comfyui_root: /home/intern/huangjiahao/ComfyUI
+  vae_name: minimax_h3_video_vae_fp16.safetensors
+  teacher_devices: [cuda:0, cuda:1, cuda:2]
+  student_device: cuda:3
+  seed: 20261009
+  train_steps: 1
+  h3_sampling_steps: 4
+  h3_latent_frames: 24
+  h3_latent_height: 16
+  h3_latent_width: 16
+  h3_latent_channels: 24
+  max_sequence_length: 512
+  learning_rate: 0.000001
+  standard_loss_weight: 1.0
+  distill_loss_weight: 0.5

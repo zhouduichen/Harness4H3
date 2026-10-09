@@ -17,6 +17,8 @@ from h3_training.data.schema import Conditioning, ModalInterval, ModalLatents, M
 from .model import build_student
 from .proposal import StudentProposal, StudentTarget
 from .quantization import load_student_state
+from .schedule import h3_video_sigmas
+from .evaluation_manifest import CacheContract, validate_h3_cache_item
 
 
 class StudentGenerationError(RuntimeError):
@@ -28,6 +30,18 @@ class StudentGenerationError(RuntimeError):
 
 _VAE_CACHE: dict[tuple[str, str, str], Any] = {}
 _COMFY_INITIALIZED: set[str] = set()
+
+
+def student_video_sigmas(steps: int, *, shift: float = 12.0) -> tuple[float, ...]:
+    """Return the H3 video sigma schedule used by Student training.
+
+    Real H3 does not integrate over an unshifted linear sigma grid.  The
+    training adapter applies the same video time shift as the Teacher sampler;
+    keeping that schedule at inference is required for a distilled Student to
+    see the intervals it was trained to predict.
+    """
+
+    return h3_video_sigmas(steps, shift=shift)
 
 
 def _resolve_cache_path(cache_dir: Path, cache_path: Optional[Path]) -> Path:
@@ -49,8 +63,14 @@ def load_h3_cache_item(
     dtype: torch.dtype,
     *,
     cache_path: Optional[Path] = None,
+    cache_contract: Optional[CacheContract] = None,
 ) -> Mapping[str, Any]:
     selected = _resolve_cache_path(cache_dir, cache_path)
+    if cache_contract is not None:
+        try:
+            validate_h3_cache_item(selected, cache_contract)
+        except ValueError as exc:
+            raise StudentGenerationError("invalid_h3_cache_contract", str(exc)) from exc
     try:
         raw = torch.load(selected, map_location="cpu", weights_only=False)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -81,6 +101,11 @@ def load_h3_cache_item(
                 torch.as_tensor(raw["audio"]).float(), device=torch.device("cpu"), dtype=torch.float32
             )
             if "audio" in raw else None
+        ),
+        "text_token_tags": (
+            torch.as_tensor(raw["text_token_tags"]).detach().cpu()
+            if raw.get("text_token_tags") is not None
+            else None
         ),
         "caption": str(raw.get("caption", "")).strip(),
     }
@@ -129,6 +154,8 @@ def sample_student_latent(
     device: torch.device,
     *,
     seed: int = 20260920,
+    continuation_latent: Optional[torch.Tensor] = None,
+    continuation_overlap_latent_frames: int = 0,
 ) -> torch.Tensor:
     dtype = next(model.parameters()).dtype
     generator = torch.Generator(device="cpu").manual_seed(int(seed))
@@ -138,10 +165,28 @@ def sample_student_latent(
         device="cpu",
         dtype=torch.float32,
     ).to(device=device, dtype=dtype)
+    if continuation_latent is not None:
+        if continuation_latent.ndim != 5 or tuple(continuation_latent.shape[:2]) != tuple(latent.shape[:2]) or tuple(continuation_latent.shape[-2:]) != tuple(latent.shape[-2:]):
+            raise StudentGenerationError("invalid_continuation_latent", "continuation latent shape does not match Student window")
+        overlap = int(continuation_overlap_latent_frames)
+        if overlap <= 0 or overlap >= target.latent_frames or continuation_latent.shape[-3] < overlap:
+            raise StudentGenerationError("invalid_continuation_overlap", "continuation overlap is outside the Student window")
+    else:
+        overlap = 0
     steps = int(proposal.training.target_steps)
+    sigmas = student_video_sigmas(steps)
     for index in range(steps):
-        sigma = 1.0 - index / float(steps)
-        next_sigma = 1.0 - (index + 1) / float(steps)
+        if continuation_latent is not None:
+            from .long_video import anchor_latent_prefix
+
+            latent = anchor_latent_prefix(
+                latent,
+                continuation_latent,
+                overlap,
+                float(index) / float(max(1, steps)),
+            )
+        sigma = sigmas[index]
+        next_sigma = sigmas[index + 1]
         timestep = torch.tensor([sigma], device=device, dtype=torch.float32)
         with torch.inference_mode():
             velocity = model(latent, prompt, timestep)
@@ -150,6 +195,10 @@ def sample_student_latent(
         # The trained target is clean-minus-noise. Integrating from sigma=1
         # to sigma=0 therefore subtracts the negative sigma delta.
         latent = latent - (next_sigma - sigma) * velocity
+        if continuation_latent is not None:
+            from .long_video import anchor_latent_prefix
+
+            latent = anchor_latent_prefix(latent, continuation_latent, overlap, float(index + 1) / float(steps))
     return latent
 
 
@@ -164,6 +213,7 @@ def sample_h3_latent(
     sampling_steps: int,
     seed: int,
     dtype: torch.dtype = torch.bfloat16,
+    conditioning_metadata: Optional[Mapping[str, Any]] = None,
 ) -> tuple[torch.Tensor, float]:
     """Run the authentic H3 teacher forward/scheduler loop for one case."""
 
@@ -181,6 +231,7 @@ def sample_h3_latent(
         sampling_steps=sampling_steps,
         seed=seed,
         dtype=dtype,
+        conditioning_metadata=conditioning_metadata,
     )
 
 
@@ -195,6 +246,9 @@ def sample_h3_latent_with_role(
     sampling_steps: int,
     seed: int,
     dtype: torch.dtype = torch.bfloat16,
+    conditioning_metadata: Optional[Mapping[str, Any]] = None,
+    continuation_latent: Optional[torch.Tensor] = None,
+    continuation_overlap_latent_frames: int = 0,
 ) -> tuple[torch.Tensor, float]:
     """Sample with an already-loaded H3 role so a manifest reuses one model."""
 
@@ -204,10 +258,20 @@ def sample_h3_latent_with_role(
     video = torch.randn(video_shape, generator=generator, device="cpu", dtype=torch.float32).to(device=device, dtype=dtype)
     audio = torch.randn(audio_shape, generator=generator, device="cpu", dtype=torch.float32).to(device=device, dtype=dtype)
     schedule = adapter.schedule(int(sampling_steps))
-    conditioning = Conditioning(prompt.to(device=device, dtype=dtype))
+    conditioning = Conditioning(prompt.to(device=device, dtype=dtype), metadata=dict(conditioning_metadata or {}))
+    if continuation_latent is not None:
+        overlap = int(continuation_overlap_latent_frames)
+        if overlap <= 0 or overlap >= int(video_shape[-3]) or continuation_latent.shape[-3] < overlap:
+            raise StudentGenerationError("invalid_continuation_overlap", "continuation overlap is outside the H3 window")
+    else:
+        overlap = 0
     started = time.perf_counter()
     with torch.inference_mode():
         for index in range(int(sampling_steps)):
+            if continuation_latent is not None:
+                from .long_video import anchor_latent_prefix
+
+                video = anchor_latent_prefix(video, continuation_latent, overlap, float(index) / float(sampling_steps))
             timestep = ModalTimesteps(
                 video=torch.full((video.shape[0],), float(schedule.video_sigmas[index]), device=device, dtype=torch.float32),
                 audio=torch.full((audio.shape[0],), float(schedule.audio_sigmas[index]), device=device, dtype=torch.float32),
@@ -221,6 +285,10 @@ def sample_h3_latent_with_role(
             if updated.video is None or updated.audio is None:
                 raise StudentGenerationError("h3_teacher_output_missing", "H3 teacher returned incomplete latent output")
             video, audio = updated.video, updated.audio
+            if continuation_latent is not None:
+                from .long_video import anchor_latent_prefix
+
+                video = anchor_latent_prefix(video, continuation_latent, overlap, float(index + 1) / float(sampling_steps))
     return video, time.perf_counter() - started
 
 
@@ -234,6 +302,10 @@ def sample_h3_latent_with_predictor(
     sampling_steps: int,
     seed: int,
     dtype: torch.dtype = torch.bfloat16,
+    conditioning_metadata: Optional[Mapping[str, Any]] = None,
+    return_audio: bool = False,
+    continuation_latent: Optional[torch.Tensor] = None,
+    continuation_overlap_latent_frames: int = 0,
 ) -> tuple[torch.Tensor, float]:
     """Sample with the collective online Teacher request boundary.
 
@@ -254,10 +326,20 @@ def sample_h3_latent_with_predictor(
     generator = torch.Generator(device="cpu").manual_seed(int(seed))
     video = torch.randn(video_shape, generator=generator, device="cpu", dtype=torch.float32).to(device=device, dtype=dtype)
     audio = torch.randn(audio_shape, generator=generator, device="cpu", dtype=torch.float32).to(device=device, dtype=dtype)
-    conditioning = Conditioning(prompt.to(device=device, dtype=dtype))
+    conditioning = Conditioning(prompt.to(device=device, dtype=dtype), metadata=dict(conditioning_metadata or {}))
+    if continuation_latent is not None:
+        overlap = int(continuation_overlap_latent_frames)
+        if overlap <= 0 or overlap >= int(video_shape[-3]) or continuation_latent.shape[-3] < overlap:
+            raise StudentGenerationError("invalid_continuation_overlap", "continuation overlap is outside the H3 window")
+    else:
+        overlap = 0
     started = time.perf_counter()
     with torch.inference_mode():
         for index in range(int(sampling_steps)):
+            if continuation_latent is not None:
+                from .long_video import anchor_latent_prefix
+
+                video = anchor_latent_prefix(video, continuation_latent, overlap, float(index) / float(sampling_steps))
             timestep = ModalTimesteps(
                 video=torch.full((video.shape[0],), float(video_sigmas[index]), device=device, dtype=torch.float32),
                 audio=torch.full((audio.shape[0],), float(audio_sigmas[index]), device=device, dtype=torch.float32),
@@ -269,7 +351,14 @@ def sample_h3_latent_with_predictor(
                 raise StudentGenerationError("h3_teacher_output_missing", "online H3 Teacher returned incomplete output")
             video = video + (video_sigmas[index] - video_sigmas[index + 1]) * prediction.video.to(device=device, dtype=dtype)
             audio = audio + (audio_sigmas[index] - audio_sigmas[index + 1]) * prediction.audio.to(device=device, dtype=dtype)
-    return video, time.perf_counter() - started
+            if continuation_latent is not None:
+                from .long_video import anchor_latent_prefix
+
+                video = anchor_latent_prefix(video, continuation_latent, overlap, float(index + 1) / float(sampling_steps))
+    elapsed = time.perf_counter() - started
+    if return_audio:
+        return video, audio, elapsed
+    return video, elapsed
 
 
 def decode_video_latent(comfyui_root: Path, vae_name: str, latent: torch.Tensor) -> torch.Tensor:
@@ -334,6 +423,8 @@ def write_video(frames: torch.Tensor, path: Path, *, fps: float = 24.0) -> None:
         import numpy as np
     except ImportError as exc:
         raise StudentGenerationError("video_writer_unavailable", str(exc)) from exc
+    if not torch.isfinite(torch.as_tensor(fps)) or float(fps) <= 0:
+        raise StudentGenerationError("invalid_video_fps", "video FPS must be finite and positive")
     if frames.ndim != 4 or frames.shape[-1] not in (3, 4) or frames.shape[0] <= 0:
         raise StudentGenerationError("student_video_empty", "decoded frames have invalid shape %s" % (tuple(frames.shape),))
     value = frames[..., :3]
@@ -369,6 +460,7 @@ def generate_video(
     device: Optional[str] = None,
     cache_path: Optional[Path] = None,
     seed: int = 20260920,
+    output_fps: float = 24.0,
 ) -> Mapping[str, Any]:
     selected = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     if selected.type == "cuda" and not torch.cuda.is_available():
@@ -390,7 +482,7 @@ def generate_video(
         torch.cuda.empty_cache()
     decode_started = time.perf_counter()
     frames = decode_video_latent(comfyui_root, vae_name, latent)
-    write_video(frames, output_path)
+    write_video(frames, output_path, fps=output_fps)
     decode_latency = time.perf_counter() - decode_started
     peak = torch.cuda.max_memory_allocated(selected) / float(1024**3) if selected.type == "cuda" else 0.0
     return {
@@ -402,8 +494,96 @@ def generate_video(
         "peak_memory_gb": float(peak),
         "frame_count": int(frames.shape[0]),
         "resolution": [int(frames.shape[2]), int(frames.shape[1])],
+        "fps": float(output_fps),
         "checkpoint_bytes": int(Path(checkpoint).stat().st_size),
         "device": str(selected),
+    }
+
+
+def generate_long_video(
+    proposal: StudentProposal,
+    checkpoint: Path,
+    target: StudentTarget,
+    comfyui_root: Path,
+    cache_dir: Path,
+    vae_name: str,
+    output_path: Path,
+    video_spec: Any,
+    *,
+    device: Optional[str] = None,
+    cache_path: Optional[Path] = None,
+    seed: int = 20260920,
+) -> Mapping[str, Any]:
+    """Generate one continuous video from authenticated overlap windows."""
+
+    from .long_video import LongVideoWindowSpec, compose_decoded_windows, sample_student_long_latents
+
+    if not hasattr(video_spec, "window_count") or int(video_spec.window_count) <= 1:
+        raise StudentGenerationError("invalid_long_video_contract", "generate_long_video requires a multi-window VideoOutputSpec")
+    try:
+        video_spec.validate_window_geometry()
+    except (TypeError, ValueError) as exc:
+        raise StudentGenerationError("invalid_long_video_contract", str(exc)) from exc
+    selected = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    if selected.type == "cuda" and not torch.cuda.is_available():
+        raise StudentGenerationError("device_unavailable", "CUDA is not available")
+    if selected.type == "cuda":
+        torch.cuda.set_device(selected)
+        torch.cuda.reset_peak_memory_stats(selected)
+    dtype = torch.bfloat16 if proposal.deployment.precision == "bf16" else torch.float16
+    prompt = _load_prompt(cache_dir, target, selected, dtype, cache_path=cache_path)
+    model = load_student_model(proposal, checkpoint, target, selected)
+    window_spec = LongVideoWindowSpec.from_video_spec(video_spec)
+    started = time.perf_counter()
+    latents, trace = sample_student_long_latents(
+        model,
+        prompt,
+        proposal,
+        target,
+        selected,
+        window_spec,
+        seed=seed,
+    )
+    sampling_latency = time.perf_counter() - started
+    del model
+    if selected.type == "cuda":
+        torch.cuda.empty_cache()
+    decoded_windows: list[torch.Tensor] = []
+    decode_started = time.perf_counter()
+    try:
+        for latent in latents:
+            decoded_windows.append(decode_video_latent(comfyui_root, vae_name, latent))
+    finally:
+        del latents
+    frames, composition = compose_decoded_windows(decoded_windows, window_spec.decoded_overlap_frames)
+    write_video(frames, output_path, fps=float(video_spec.fps))
+    decode_latency = time.perf_counter() - decode_started
+    peak = torch.cuda.max_memory_allocated(selected) / float(1024**3) if selected.type == "cuda" else 0.0
+    trace = {
+        **trace,
+        "contract_digest": video_spec.digest,
+        "composition": composition,
+        "expected_composed_frames": video_spec.expected_composed_frames,
+        "offline_simulation": False,
+    }
+    return {
+        "video_path": str(Path(output_path).resolve()),
+        "latency_s": float(sampling_latency + decode_latency),
+        "sampling_latency_s": float(sampling_latency),
+        "decode_latency_s": float(decode_latency),
+        "generation_latency_s": float(sampling_latency + decode_latency),
+        "peak_memory_gb": float(peak),
+        "frame_count": int(frames.shape[0]),
+        "resolution": [int(frames.shape[2]), int(frames.shape[1])],
+        "fps": float(video_spec.fps),
+        "checkpoint_bytes": int(Path(checkpoint).stat().st_size),
+        "device": str(selected),
+        "long_video": True,
+        "continuation_verified": bool(trace["continuation_verified"]),
+        "offline_simulation": False,
+        "video_contract": video_spec.to_dict(),
+        "video_contract_digest": video_spec.digest,
+        "window_trace": trace,
     }
 
 
@@ -411,6 +591,7 @@ __all__ = [
     "StudentGenerationError",
     "decode_video_latent",
     "generate_video",
+    "generate_long_video",
     "load_h3_cache_item",
     "load_student_model",
     "sample_student_latent",
