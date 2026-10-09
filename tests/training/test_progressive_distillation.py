@@ -53,6 +53,8 @@ def test_progressive_distillation_updates_student_not_teacher():
     assert equal(clone(method.teacher_model), teacher_before)
     assert not equal(clone(method.student_model), student_before)
     assert result.optimizer_steps == {"student": 4}
+    assert len(result.loss_trace) == 4
+    assert all("total_loss" in item and "flow_loss" in item for item in result.loss_trace)
 
 
 def test_progressive_distillation_can_keep_optimizer_state_in_fp32():

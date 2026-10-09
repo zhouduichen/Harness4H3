@@ -1,7 +1,7 @@
 """Stable engine state and failure taxonomy."""
 
 from dataclasses import dataclass, field
-from typing import Dict, Mapping
+from typing import Dict, Mapping, Tuple
 
 
 class TrainingFailure(RuntimeError):
@@ -31,3 +31,4 @@ class TrainingRunResult:
     optimizer_steps: Mapping[str, int]
     wall_time_s: float
     peak_memory_bytes: int
+    loss_trace: Tuple[Mapping[str, float], ...] = ()

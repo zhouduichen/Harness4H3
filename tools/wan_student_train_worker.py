@@ -671,6 +671,7 @@ def run(
                     "wan_schedule_shift": stage_schedule.shift,
                     "wan_schedule_source_nfe": stage_schedule.source_nfe or stage_schedule.nfe,
                     "wan_schedule_digest": stage_schedule_digest,
+                    "loss_trace": [dict(item) for item in result.loss_trace],
                 }
             )
         if stages:
@@ -851,6 +852,11 @@ def run(
         "wan_dmd2_adapter_ready": wan_dmd2_adapter_ready,
         "wan_schedule": source_schedule.to_dict(),
         "wan_schedule_digest": source_schedule_digest,
+        "loss_trace": (
+            list(stage_lineage[-1].get("loss_trace", []))
+            if stage_lineage and policy.method == "progressive_distillation"
+            else []
+        ),
     }
     _write(result_path, result)
     return result

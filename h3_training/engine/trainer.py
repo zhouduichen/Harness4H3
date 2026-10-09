@@ -178,6 +178,7 @@ class TrainerEngine:
         initial_loss = None
         final_loss = float("nan")
         maximum_gradient_norm = 0.0
+        loss_trace: list[dict[str, float]] = []
         started = time.perf_counter()
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
@@ -216,6 +217,13 @@ class TrainerEngine:
             state.global_step = iteration
             state.accumulation_position = 0
             final_loss = accumulated / self.config.gradient_accumulation_steps
+            loss_trace.append(
+                {
+                    "iteration": float(iteration),
+                    **step_metrics,
+                    **{name: float(value.detach()) for name, value in output.losses.items()},
+                }
+            )
             if checkpoint_path is not None and checkpoint_every_steps and iteration % checkpoint_every_steps == 0:
                 self.save_checkpoint(method, state, Path(checkpoint_path))
         peak = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
@@ -227,6 +235,7 @@ class TrainerEngine:
             optimizer_steps=dict(state.optimizer_steps),
             wall_time_s=time.perf_counter() - started,
             peak_memory_bytes=peak,
+            loss_trace=tuple(loss_trace),
         )
 
     def save_checkpoint(self, method: TrainingMethod, loop_state: LoopState, path: Path) -> Path:
