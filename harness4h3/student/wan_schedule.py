@@ -31,7 +31,9 @@ class WanSigmaSchedule:
         if any(left <= right for left, right in zip(self.sigmas, self.sigmas[1:])):
             raise ValueError("Wan schedule sigmas must be strictly decreasing")
         expected = tuple(float(sigma) * float(self.num_train_timesteps) for sigma in self.sigmas[:-1])
-        timestep_tolerance = 1.1 if self.mode == "native" else 1e-4
+        # Native and binary-coarsened schedules preserve Diffusers' integer
+        # timestep quantization; training-only fallback schedules are exact.
+        timestep_tolerance = 1.1 if self.mode in {"native", "coarsened_from_source"} else 1e-4
         if any(
             not math.isclose(actual, wanted, rel_tol=1e-5, abs_tol=timestep_tolerance)
             for actual, wanted in zip(self.timesteps, expected)
