@@ -745,6 +745,7 @@ def run(
                 stage_path,
                 {
                     "model_id": spec.model_id,
+                    "guidance_scale": spec.guidance_scale,
                     "algorithm_name": policy.method,
                     "teacher_nfe": stage.teacher_nfe,
                     "student_nfe": stage.student_nfe,
@@ -918,6 +919,7 @@ def run(
     result = {
         "status": "success",
         "model_id": spec.model_id,
+        "guidance_scale": spec.guidance_scale,
         "pretrained": True,
         "lineage_root": spec.lineage_root,
         "parent_model_digest": parent_digest,
