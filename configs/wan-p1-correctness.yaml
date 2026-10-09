@@ -1,0 +1,11 @@
+schema_version: 1
+
+wan_p0:
+  wan_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-1.3b-paper16.remote.yaml
+  evaluation_manifest: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/evaluation-manifest.wan-5s-p0.json
+  h3_cache_dir: /data/models/MiniMax-H3/harness4h3/cache-native-5s-24x1
+  comfyui_root: /home/intern/huangjiahao/ComfyUI
+  vae_name: minimax_h3_video_vae_fp16.safetensors
+  r2_checkpoint: /data/models/MiniMax-H3/harness4h3/wan-p1-single-sample-20261009/student.safetensors
+  device: cuda:3
+  seed: 20261009
