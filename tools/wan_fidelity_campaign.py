@@ -65,6 +65,7 @@ def run(
     evaluator_path: Path,
     evaluation_config: Path,
     skip_evaluation: bool = False,
+    continue_after_gate_failure: bool = False,
 ) -> dict[str, Any]:
     raw = _load(config_path)
     base = dict(raw["base"])
@@ -78,6 +79,7 @@ def run(
         "config_sha256": hashlib.sha256(Path(config_path).read_bytes()).hexdigest(),
         "evaluation_config": str(Path(evaluation_config).resolve()),
         "controller_search": False,
+        "continue_after_gate_failure": continue_after_gate_failure,
         "stages": [],
     }
     _write_json(output_root / "fidelity-manifest.json", manifest)
@@ -185,12 +187,18 @@ def run(
                 "student_checkpoint_sha256": evaluation.get("student_checkpoint_sha256"),
                 "failure_code": evaluation.get("failure_code"),
             }
-            if evaluation.get("status") != "success" or not evaluation.get("promotable", False):
+            gate_passed = evaluation.get("status") == "success" and evaluation.get("promotable", False)
+            record["promotion_gate_passed"] = bool(gate_passed)
+            if not gate_passed:
                 record["status"] = "failed_promotion_gate"
-                manifest["stages"].append(record)
-                _write_json(output_root / "fidelity-manifest.json", manifest)
-                break
-        record["status"] = "passed"
+                if not continue_after_gate_failure:
+                    manifest["stages"].append(record)
+                    _write_json(output_root / "fidelity-manifest.json", manifest)
+                    break
+                record["status"] = "completed_with_gate_failure"
+                record["lineage_continued_for_diagnostics"] = True
+        if record.get("status") != "completed_with_gate_failure":
+            record["status"] = "passed"
         manifest["stages"].append(record)
         _write_json(output_root / "fidelity-manifest.json", manifest)
         parent = checkpoint
@@ -214,6 +222,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evaluator", type=Path, default=Path(__file__).with_name("wan_native_evaluate.py"))
     parser.add_argument("--evaluation-config", required=True, type=Path)
     parser.add_argument("--skip-evaluation", action="store_true")
+    parser.add_argument(
+        "--continue-after-gate-failure",
+        action="store_true",
+        help="record a failed quality gate and continue F1/F2/F3 lineage for diagnostics; never marks the campaign passed",
+    )
     args = parser.parse_args(argv)
     result = run(
         args.config,
@@ -223,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         evaluator_path=args.evaluator,
         evaluation_config=args.evaluation_config,
         skip_evaluation=args.skip_evaluation,
+        continue_after_gate_failure=args.continue_after_gate_failure,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result["status"] == "passed" else 1
