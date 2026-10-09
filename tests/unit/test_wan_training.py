@@ -1,5 +1,7 @@
 import torch
 
+from h3_training.data.schema import ModalInterval
+
 from harness4h3.student.wan_training import (
     WanTrainingSpec,
     flow_match_batch,
@@ -50,6 +52,25 @@ def test_wan_velocity_loss_has_clean_anchor_term():
     assert standard.item() == 1.0
     assert distill.item() == 0.0625
     assert total.item() == 1.03125
+
+
+def test_wan_velocity_loss_is_zero_for_exact_flow_prediction():
+    clean = torch.full((1, 1, 1, 1, 1), 2.0)
+    noise = torch.full_like(clean, 1.0)
+    noisy = torch.full_like(clean, 1.5)
+    prediction = noise - clean
+    total, standard, distill = wan_velocity_loss(
+        prediction,
+        prediction,
+        noisy,
+        clean,
+        torch.tensor([0.5]),
+        standard_weight=1.0,
+        distill_weight=0.5,
+    )
+    assert total.item() == 0.0
+    assert standard.item() == 0.0
+    assert distill.item() == 0.0
 
 
 def test_resample_video_frames_to_wan_contract():

@@ -3,7 +3,7 @@ import torch
 
 from h3_training.adapters.wan import WanEndpointTeacher, WanTrainingAdapter
 from h3_training.algorithms.base import ModelRole
-from h3_training.data.schema import ModalLatents, ModalPrediction, ModalTimesteps
+from h3_training.data.schema import ModalInterval, ModalLatents, ModalPrediction, ModalTimesteps
 from h3_training.engine.state import TrainingFailure
 
 
@@ -95,6 +95,40 @@ def test_wan_adapter_endpoint_teacher_is_role_type_not_role_name():
         batch.conditioning,
     )
     assert torch.allclose(prediction.video, batch.latents.video / 0.5)
+
+
+def test_wan_adapter_scheduler_step_moves_down_sigma_with_noise_minus_clean_velocity():
+    adapter = make_adapter()
+    latent = ModalLatents(video=torch.full((1, 1, 1, 1, 1), 0.5))
+    prediction = ModalPrediction(video=torch.ones_like(latent.video))
+    updated = adapter.scheduler_step(
+        ModelRole("student", adapter.transformer, adapter, True),
+        latent,
+        prediction,
+        ModalInterval(video=(0.75, 0.25)),
+    )
+    assert torch.equal(updated.video, torch.zeros_like(latent.video))
+
+
+def test_wan_endpoint_teacher_matches_noise_minus_clean_for_nonzero_clean():
+    adapter = make_adapter()
+    clean = torch.full((1, 1, 1, 1, 1), 2.0)
+    batch = adapter.prepare_batch(
+        {"sample_id": "s0", "prompt": "test", "wan_latent": clean, "frames": torch.zeros(1, 1, 1, 3)},
+        torch.Generator().manual_seed(7),
+    )
+    noisy = ModalLatents(video=torch.full_like(clean, 1.5))
+    endpoint = ModelRole("critic", WanEndpointTeacher(), adapter, False)
+    prediction = adapter.predict(endpoint, noisy, ModalTimesteps(video=torch.tensor([0.5])), batch.conditioning)
+    assert torch.equal(prediction.video, torch.full_like(clean, -1.0))
+
+
+def test_wan_prediction_to_clean_is_exact_for_endpoint_velocity():
+    adapter = make_adapter()
+    noisy = ModalLatents(video=torch.full((1, 1, 1, 1, 1), 1.5))
+    prediction = ModalPrediction(video=torch.full_like(noisy.video, -1.0))
+    clean = adapter.prediction_to_clean(noisy, prediction, ModalTimesteps(video=torch.tensor([0.5])))
+    assert torch.equal(clean.video, torch.full_like(noisy.video, 2.0))
 
 
 def test_wan_adapter_scope_rejects_empty_selection():

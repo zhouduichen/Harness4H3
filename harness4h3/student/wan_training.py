@@ -229,9 +229,9 @@ def flow_match_batch(
     else:
         train_timesteps = 1000.0
     timestep = sigma * train_timesteps
-    broadcast = sigma.to(dtype=clean.dtype).view(-1, 1, 1, 1, 1)
-    noisy = (1.0 - broadcast) * clean + broadcast * noise
-    target = noise - clean
+    broadcast = sigma.to(dtype=torch.float32).view(-1, 1, 1, 1, 1)
+    noisy = ((1.0 - broadcast) * clean.float() + broadcast * noise.float()).to(dtype=clean.dtype)
+    target = (noise.float() - clean.float()).to(dtype=clean.dtype)
     return noisy, timestep, target, sigma
 
 
@@ -248,8 +248,8 @@ def wan_velocity_loss(
     """Return total, standard velocity, and clean-anchor distillation losses."""
 
     standard = F.mse_loss(prediction.float(), target.float())
-    sigma_value = sigma.to(device=noisy.device, dtype=noisy.dtype).view(-1, 1, 1, 1, 1)
-    predicted_clean = noisy - sigma_value * prediction
+    sigma_value = sigma.to(device=noisy.device, dtype=torch.float32).view(-1, 1, 1, 1, 1)
+    predicted_clean = noisy.float() - sigma_value * prediction.float()
     distill = F.mse_loss(predicted_clean.float(), clean.float())
     total = float(standard_weight) * standard + float(distill_weight) * distill
     return total, standard.detach(), distill.detach()

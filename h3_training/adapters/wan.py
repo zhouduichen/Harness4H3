@@ -27,6 +27,7 @@ from h3_training.data.schema import (
     PreparedBatch,
 )
 from h3_training.engine.state import TrainingFailure
+from harness4h3.student.wan_schedule import WanSigmaSchedule, training_uniform_wan_schedule
 
 
 class WanEndpointTeacher(nn.Module):
@@ -50,6 +51,7 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         encode_prompt: Callable[[str], torch.Tensor],
         save_checkpoint: Optional[Callable[[nn.Module, Path, Mapping[str, Any]], str]] = None,
         reload_checkpoint: Optional[Callable[[Path], ModelRole]] = None,
+        schedule_provider: Optional[Callable[[int], WanSigmaSchedule]] = None,
         model_id: str = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
     ) -> None:
         self.transformer = transformer
@@ -59,6 +61,9 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         self.save_checkpoint = save_checkpoint
         self.reload_checkpoint = reload_checkpoint
         self.model_id = str(model_id)
+        self.schedule_provider = schedule_provider or (
+            lambda nfe: training_uniform_wan_schedule(int(nfe), int(self._train_timesteps()))
+        )
         self._active_clean: Optional[torch.Tensor] = None
 
     @staticmethod
@@ -126,8 +131,9 @@ class WanTrainingAdapter(DenoisingModelAdapter):
     def add_noise(self, clean: ModalLatents, noise: ModalLatents, timestep: ModalTimesteps) -> ModalLatents:
         if clean.video is None or noise.video is None or timestep.video is None:
             raise TrainingFailure("invalid_training_config", "Wan adapter requires video clean/noise/timestep")
-        sigma = self._sigma(timestep.video, clean.video)
-        return ModalLatents(video=(1.0 - sigma) * clean.video + sigma * noise.video)
+        sigma = self._sigma(timestep.video, clean.video).float()
+        value = (1.0 - sigma) * clean.video.float() + sigma * noise.video.float()
+        return ModalLatents(video=value.to(dtype=clean.video.dtype))
 
     def predict(
         self,
@@ -143,12 +149,16 @@ class WanTrainingAdapter(DenoisingModelAdapter):
             if self._active_clean is None:
                 raise TrainingFailure("wan_teacher_target_missing", "H3 RGB-boundary target was not prepared")
             clean = self._active_clean.to(device=noisy.video.device, dtype=noisy.video.dtype)
-            denominator = sigma.clamp_min(torch.finfo(noisy.video.dtype).eps)
-            velocity = (noisy.video - clean) / denominator.view(-1, 1, 1, 1, 1)
-            return ModalPrediction(video=velocity.detach())
+            denominator = sigma.float().clamp_min(torch.finfo(torch.float32).eps)
+            velocity = (noisy.video.float() - clean.float()) / denominator.view(-1, 1, 1, 1, 1)
+            return ModalPrediction(video=velocity.to(dtype=noisy.video.dtype).detach())
         model_timestep = sigma.float() * self._train_timesteps()
         model_device = noisy.video.device
-        model_dtype = next(self.transformer.parameters()).dtype
+        patch_embedding = getattr(role.model, "patch_embedding", None)
+        if patch_embedding is not None:
+            model_dtype = next(patch_embedding.parameters()).dtype
+        else:
+            model_dtype = next(self.transformer.parameters()).dtype
         output = role.model(
             hidden_states=noisy.video.to(device=model_device, dtype=model_dtype),
             timestep=model_timestep.to(device=model_device, dtype=torch.float32),
@@ -171,8 +181,9 @@ class WanTrainingAdapter(DenoisingModelAdapter):
     ) -> ModalLatents:
         if noisy.video is None or prediction.video is None or timestep.video is None:
             raise TrainingFailure("invalid_training_config", "Wan adapter requires video clean reconstruction inputs")
-        sigma = self._sigma(timestep.video, noisy.video)
-        return ModalLatents(video=noisy.video - sigma * prediction.video)
+        sigma = self._sigma(timestep.video, noisy.video).float()
+        value = noisy.video.float() - sigma * prediction.video.float()
+        return ModalLatents(video=value.to(dtype=noisy.video.dtype))
 
     def scheduler_step(
         self,
@@ -183,14 +194,16 @@ class WanTrainingAdapter(DenoisingModelAdapter):
     ) -> ModalLatents:
         if latent.video is None or prediction.video is None or interval.video is None:
             raise TrainingFailure("invalid_training_config", "Wan adapter requires video scheduler inputs")
-        return ModalLatents(video=latent.video + (interval.video[0] - interval.video[1]) * prediction.video)
+        current_sigma, next_sigma = interval.video
+        delta = float(next_sigma) - float(current_sigma)
+        value = latent.video.float() + delta * prediction.video.float()
+        return ModalLatents(video=value.to(dtype=latent.video.dtype))
 
     def schedule(self, num_model_evaluations: int) -> ModalSchedule:
         if isinstance(num_model_evaluations, bool) or int(num_model_evaluations) <= 0:
             raise ValueError("number of model evaluations must be positive")
-        nfe = int(num_model_evaluations)
-        values = tuple(1.0 - index / float(nfe) for index in range(nfe + 1))
-        return ModalSchedule(video_sigmas=values)
+        schedule = self.schedule_provider(int(num_model_evaluations))
+        return ModalSchedule(video_sigmas=schedule.sigmas)
 
     def save_role(self, role: ModelRole, path: Path) -> Mapping[str, Any]:
         metadata = dict(role.scheduler_state)
