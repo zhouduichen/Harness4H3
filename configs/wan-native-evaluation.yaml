@@ -5,7 +5,7 @@ wan_eval:
   evaluation_manifest: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/evaluation-manifest.wan-5s-native-paper.json
   clip_model_path: /data/models/clip-vit-large-patch14-336
   continuation_contract: 5s
-  device: cuda:3
+  device: cuda:0
   max_cases: 4
   seed_count: 3
   visual_quality_gate:

@@ -10,8 +10,8 @@ base:
   cache_contract: native_5s
   comfyui_root: /home/intern/huangjiahao/ComfyUI
   vae_name: minimax_h3_video_vae_fp16.safetensors
-  teacher_devices: [cuda:0, cuda:1, cuda:2]
-  student_device: cuda:3
+  teacher_devices: [cuda:1, cuda:2, cuda:3]
+  student_device: cuda:0
   seed: 20261009
   teacher_target_groups: 1
   teacher_reuse_steps: 4
