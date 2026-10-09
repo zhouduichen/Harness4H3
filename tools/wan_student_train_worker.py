@@ -26,6 +26,7 @@ from harness4h3.student.schedule import h3_video_sigmas
 from harness4h3.student.teacher_service import TeacherService
 from harness4h3.student.wan import WanStudentError, load_wan_spec
 from harness4h3.student.wan_long_video import load_wan_transformer_checkpoint
+from harness4h3.student.wan_schedule import WanSigmaSchedule, coarsen_wan_schedule, native_wan_schedule
 from harness4h3.student.wan_training import (
     WanTrainingSpec,
     encode_wan_video,
@@ -102,6 +103,24 @@ def _training_spec(raw: Mapping[str, Any], wan_config: Path) -> WanTrainingSpec:
         if name in raw:
             values[name] = raw[name]
     return WanTrainingSpec(**values)
+
+
+def _wan_schedule_provider(scheduler: Any, *, source_steps: int):
+    """Bind every progressive stage to the native Wan source grid."""
+
+    source = native_wan_schedule(scheduler, int(source_steps))
+
+    def provide(nfe: int) -> WanSigmaSchedule:
+        requested = int(nfe)
+        if requested <= 0:
+            raise ValueError("Wan distillation schedule nfe must be positive")
+        if requested == source.nfe:
+            return source
+        if source.nfe % requested:
+            raise ValueError("Wan distillation schedule requires a divisor of source_steps")
+        return coarsen_wan_schedule(source, source.nfe // requested)
+
+    return provide
 
 
 def _parse_devices(raw: Any) -> tuple[str, ...]:
@@ -204,6 +223,15 @@ def _configure_trainable_scope(transformer: Any, scope: str | None) -> str:
     return ",".join(patterns)
 
 
+def _trainable_parameter_probe(transformer: Any) -> tuple[str, torch.Tensor]:
+    """Capture one actual trainable parameter for the post-step change gate."""
+
+    for name, parameter in transformer.named_parameters():
+        if parameter.requires_grad:
+            return name, parameter.detach().float().clone()
+    raise ValueError("transformer has no trainable parameters")
+
+
 def _apply_initialization_mode(transformer: Any, mode: str | None) -> str:
     selected = str(mode or "inherit").strip()
     if selected == "inherit":
@@ -271,7 +299,19 @@ def _teacher_video(
             / (1.0 + 2.0 * (1.0 - index / float(spec.h3_sampling_steps)))
             for index in range(int(spec.h3_sampling_steps) + 1)
         )
-        conditioning = Conditioning(prompt.to(device=teacher_device, dtype=torch.bfloat16))
+        # Keep the authenticated MiniMax-H3 token-routing metadata from the
+        # cache.  The baseline worker already sends these tags; omitting them
+        # here makes the native z=24 short-clip path numerically unstable even
+        # though the same Teacher/cache pair decodes to a valid 81-frame video.
+        conditioning_metadata = (
+            {"text_token_tags": cache_item["text_token_tags"]}
+            if cache_item.get("text_token_tags") is not None
+            else {}
+        )
+        conditioning = Conditioning(
+            prompt.to(device=teacher_device, dtype=torch.bfloat16),
+            metadata=conditioning_metadata,
+        )
         with torch.inference_mode():
             for index in range(int(spec.h3_sampling_steps)):
                 timestep = ModalTimesteps(
@@ -478,8 +518,7 @@ def run(
         components.transformer,
         trainable_scope_override if trainable_scope_override is not None else raw.get("trainable_scope"),
     )
-    trainable_parameters = [parameter for parameter in components.transformer.parameters() if parameter.requires_grad]
-    initial_probe = next(parameter for parameter in trainable_parameters).detach().float().clone()
+    probe_name, initial_probe = _trainable_parameter_probe(components.transformer)
     generator = torch.Generator(device="cpu").manual_seed(int(raw.get("seed", 20261008)) + 1)
     training_batches: list[dict[str, Any]] = []
     for group_index, (frames, metadata) in enumerate(teacher_samples):
@@ -510,8 +549,11 @@ def run(
         encode_prompt=lambda value: _encode_training_prompt(
             components.pipeline, value, spec, components.device, components.dtype
         ),
+        schedule_provider=_wan_schedule_provider(components.scheduler, source_steps=policy.source_steps),
         model_id=spec.model_id,
     )
+    source_schedule = adapter.schedule_provider(policy.source_steps)
+    source_schedule_digest = _digest(source_schedule.to_dict())
     endpoint_teacher = WanEndpointTeacher()
     stage_lineage: list[dict[str, Any]] = []
     total_optimizer_steps = 0
@@ -570,6 +612,8 @@ def run(
             trainer.save_checkpoint(stage_method, result.loop_state, stage_checkpoint)
             stage_path = output / ("student-stage-%02d.safetensors" % (stage_index + 1))
             stage_path.parent.mkdir(parents=True, exist_ok=True)
+            stage_schedule = adapter.schedule_provider(stage.student_nfe)
+            stage_schedule_digest = _digest(stage_schedule.to_dict())
             stage_digest = save_wan_checkpoint(
                 components.transformer,
                 stage_path,
@@ -580,6 +624,10 @@ def run(
                     "student_nfe": stage.student_nfe,
                     "stage_index": stage_index,
                     "teacher_checkpoint_sha256": teacher_digest or "",
+                    "wan_schedule_mode": stage_schedule.mode,
+                    "wan_schedule_shift": stage_schedule.shift,
+                    "wan_schedule_source_nfe": stage_schedule.source_nfe or stage_schedule.nfe,
+                    "wan_schedule_digest": stage_schedule_digest,
                     "offline_simulation": "false",
                 },
             )
@@ -599,6 +647,10 @@ def run(
                     "stage_child_sha256": stage_digest,
                     "teacher_checkpoint_sha256": teacher_digest,
                     "teacher_kind": "h3_rgb_boundary_endpoint",
+                    "wan_schedule_mode": stage_schedule.mode,
+                    "wan_schedule_shift": stage_schedule.shift,
+                    "wan_schedule_source_nfe": stage_schedule.source_nfe or stage_schedule.nfe,
+                    "wan_schedule_digest": stage_schedule_digest,
                 }
             )
         if stages:
@@ -659,7 +711,9 @@ def run(
                 "sampler_samples_drawn": dmd2_method.sampler.samples_drawn,
             }
         )
-    final_probe = next(components.transformer.parameters()).detach().float()
+    final_probe = next(
+        parameter for name, parameter in components.transformer.named_parameters() if name == probe_name
+    ).detach().float()
     changed = not torch.equal(initial_probe.cpu(), final_probe.cpu())
     if not changed:
         raise RuntimeError("Wan Transformer parameters did not change")
@@ -710,6 +764,10 @@ def run(
             "resume_config_digest": resume_config_digest or "",
             "dmd2_memory_admitted": dmd2_memory_admitted,
             "wan_dmd2_adapter_ready": wan_dmd2_adapter_ready,
+            "wan_schedule_mode": source_schedule.mode,
+            "wan_schedule_shift": source_schedule.shift,
+            "wan_schedule_source_nfe": source_schedule.nfe,
+            "wan_schedule_digest": source_schedule_digest,
         },
     )
     result = {
@@ -771,6 +829,8 @@ def run(
         "resume_config_digest": resume_config_digest or "",
         "dmd2_memory_admitted": dmd2_memory_admitted,
         "wan_dmd2_adapter_ready": wan_dmd2_adapter_ready,
+        "wan_schedule": source_schedule.to_dict(),
+        "wan_schedule_digest": source_schedule_digest,
     }
     _write(result_path, result)
     return result

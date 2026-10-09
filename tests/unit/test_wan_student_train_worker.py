@@ -9,9 +9,24 @@ from tools.wan_student_train_worker import (
     _configure_trainable_scope,
     _encode_training_prompt,
     _parse_devices,
+    _trainable_parameter_probe,
     _training_cache_paths,
     _training_spec,
 )
+
+
+def test_worker_schedule_provider_uses_native_32_and_coarsened_16():
+    from diffusers import FlowMatchEulerDiscreteScheduler
+    from tools.wan_student_train_worker import _wan_schedule_provider
+
+    provider = _wan_schedule_provider(
+        FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=3.0), source_steps=32
+    )
+    source = provider(32)
+    target = provider(16)
+    assert source.mode == "native"
+    assert target.mode == "coarsened_from_source"
+    assert target.sigmas == source.sigmas[::2]
 
 
 def test_parse_devices_requires_three_distinct_cuda_devices():
@@ -93,6 +108,19 @@ def test_trainable_scope_can_keep_only_text_conditioning_paths():
     assert transformer.blocks[0].attn2.to_k.weight.requires_grad
     assert not transformer.blocks[0].attn2.to_q.weight.requires_grad
     assert transformer.condition_embedder.text_embedder.weight.requires_grad
+
+
+def test_trainable_parameter_probe_ignores_frozen_prefix_parameters():
+    transformer = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
+    list(transformer.parameters())[0].requires_grad_(False)
+    list(transformer.parameters())[1].requires_grad_(False)
+    list(transformer.parameters())[2].requires_grad_(True)
+
+    name, snapshot = _trainable_parameter_probe(transformer)
+
+    assert name == "1.weight"
+    assert snapshot.dtype == torch.float32
+    assert snapshot.shape == transformer[1].weight.shape
 
 
 def test_initialization_mode_resets_wan_output_projection():
