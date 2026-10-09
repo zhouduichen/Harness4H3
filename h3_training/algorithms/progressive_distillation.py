@@ -8,8 +8,65 @@ from torch import nn
 
 from h3_training.adapters.base import DenoisingModelAdapter
 from h3_training.algorithms.base import ModelRole, StepOutput, TrainingMethod
-from h3_training.data.schema import ModalInterval, ModalLatents, ModalTimesteps, PreparedBatch
+from h3_training.data.schema import (
+    ModalInterval,
+    ModalLatents,
+    ModalPrediction,
+    ModalTimesteps,
+    PreparedBatch,
+)
 from h3_training.engine.state import TrainingFailure
+
+
+class _FP32StateAdamW(torch.optim.Optimizer):
+    """AdamW with FP32 moments while keeping Student parameters in BF16."""
+
+    def __init__(self, parameters, *, lr: float, weight_decay: float = 0.0):
+        if lr <= 0 or weight_decay < 0:
+            raise ValueError("optimizer values are invalid")
+        super().__init__(
+            parameters,
+            {
+                "lr": float(lr),
+                "betas": (0.9, 0.999),
+                "eps": 1e-8,
+                "weight_decay": float(weight_decay),
+            },
+        )
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = closure() if closure is not None else None
+        for group in self.param_groups:
+            lr = float(group["lr"])
+            beta1, beta2 = group["betas"]
+            eps = float(group["eps"])
+            weight_decay = float(group["weight_decay"])
+            for parameter in group["params"]:
+                if parameter.grad is None:
+                    continue
+                gradient = parameter.grad.detach()
+                if gradient.is_sparse:
+                    raise RuntimeError("_FP32StateAdamW does not support sparse gradients")
+                state = self.state[parameter]
+                if not state:
+                    state["step"] = 0
+                    state["exp_avg"] = torch.zeros_like(parameter, dtype=torch.float32)
+                    state["exp_avg_sq"] = torch.zeros_like(parameter, dtype=torch.float32)
+                state["step"] += 1
+                step = int(state["step"])
+                gradient = gradient.float()
+                exp_avg = state["exp_avg"]
+                exp_avg_sq = state["exp_avg_sq"]
+                exp_avg.mul_(beta1).add_(gradient, alpha=1.0 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(gradient, gradient, value=1.0 - beta2)
+                bias_correction1 = 1.0 - beta1**step
+                bias_correction2 = 1.0 - beta2**step
+                update = exp_avg / (exp_avg_sq.sqrt() / bias_correction2**0.5 + eps)
+                if weight_decay:
+                    parameter.mul_(1.0 - lr * weight_decay)
+                parameter.add_(update.to(dtype=parameter.dtype), alpha=-lr / bias_correction1)
+        return loss
 
 
 @dataclass(frozen=True)
@@ -46,12 +103,39 @@ class ProgressiveDistillationConfig:
     trainable_scope: str = "all"
     video_weight: float = 1.0
     audio_weight: float = 1.0
+    velocity_weight: float = 1.0
+    clean_anchor_weight: float = 1.0
+    rollout_steps: int = 0
+    rollout_every: int = 1
+    rollout_endpoint_weight: float = 0.0
+    rollout_clean_weight: float = 0.0
+    fp32_optimizer_state: bool = False
 
     def __post_init__(self) -> None:
         if self.learning_rate <= 0 or self.weight_decay < 0:
             raise ValueError("optimizer values are invalid")
-        if self.video_weight < 0 or self.audio_weight < 0 or self.video_weight + self.audio_weight <= 0:
+        if (
+            self.video_weight < 0
+            or self.audio_weight < 0
+            or self.video_weight + self.audio_weight <= 0
+            or self.velocity_weight < 0
+            or self.clean_anchor_weight < 0
+        ):
             raise ValueError("at least one modality weight must be positive")
+        if self.rollout_steps < 0:
+            raise ValueError("rollout_steps must be non-negative")
+        if self.rollout_every <= 0:
+            raise ValueError("rollout_every must be positive")
+        if self.rollout_endpoint_weight < 0 or self.rollout_clean_weight < 0:
+            raise ValueError("rollout weights must be non-negative")
+        if self.rollout_steps == 0 and (
+            self.rollout_endpoint_weight != 0 or self.rollout_clean_weight != 0
+        ):
+            raise ValueError("disabled rollout must have zero rollout weights")
+        if self.rollout_steps > 0 and (
+            self.rollout_endpoint_weight + self.rollout_clean_weight <= 0
+        ):
+            raise ValueError("active rollout requires a positive rollout weight")
 
 
 class ProgressiveDistillation(TrainingMethod):
@@ -103,12 +187,35 @@ class ProgressiveDistillation(TrainingMethod):
         for parameter in self.teacher_model.parameters():
             parameter.requires_grad_(False)
         if self._optimizer is None:
-            self._optimizer = torch.optim.AdamW(
+            optimizer_type = _FP32StateAdamW if self.config.fp32_optimizer_state else torch.optim.AdamW
+            self._optimizer = optimizer_type(
                 parameters, lr=self.config.learning_rate, weight_decay=self.config.weight_decay
             )
 
     def prepare_batch(self, raw, generator: torch.Generator) -> PreparedBatch:
         return self.adapter.prepare_batch(raw, generator)
+
+    @staticmethod
+    def _mse(actual: ModalLatents, expected: ModalLatents, video_weight: float, audio_weight: float):
+        terms = []
+        if actual.video is not None:
+            if expected.video is None:
+                raise TrainingFailure("invalid_training_config", "video velocity target is missing")
+            # Student and real H3 tensors are normally BF16.  Accumulating
+            # the reduction in BF16 quantizes the loss (and its gradient
+            # scale) too aggressively for a billion-parameter Student.
+            terms.append(
+                video_weight
+                * torch.mean((actual.video.float() - expected.video.float()) ** 2)
+            )
+        if actual.audio is not None:
+            if expected.audio is None:
+                raise TrainingFailure("invalid_training_config", "audio velocity target is missing")
+            terms.append(
+                audio_weight
+                * torch.mean((actual.audio.float() - expected.audio.float()) ** 2)
+            )
+        return sum(terms)
 
     @staticmethod
     def _times(batch_size: int, video_sigma, audio_sigma, device) -> ModalTimesteps:
@@ -118,9 +225,12 @@ class ProgressiveDistillation(TrainingMethod):
         # the configured audio loss weight still controls whether audio is
         # optimized or merely transported.
         effective_audio_sigma = audio_sigma if audio_sigma is not None else video_sigma
+        # Adapter schedules are H3 sigmas: 1 is noise and 0 is clean.  Do
+        # not convert them to the legacy TinyH3 time convention here; the
+        # real Teacher and Student production adapter consume sigma directly.
         return ModalTimesteps(
-            video=torch.full((batch_size,), 1.0 - video_sigma, device=device) if video_sigma is not None else None,
-            audio=torch.full((batch_size,), 1.0 - effective_audio_sigma, device=device)
+            video=torch.full((batch_size,), video_sigma, device=device) if video_sigma is not None else None,
+            audio=torch.full((batch_size,), effective_audio_sigma, device=device)
             if effective_audio_sigma is not None
             else None,
         )
@@ -131,6 +241,121 @@ class ProgressiveDistillation(TrainingMethod):
             video=(video[index], video[index + stride]) if video is not None else None,
             audio=(audio[index], audio[index + stride]) if audio is not None else None,
         )
+
+    def _integrate_rollout(
+        self,
+        role: ModelRole,
+        latent: ModalLatents,
+        conditioning,
+        schedule,
+        start_index: int,
+        steps: int,
+    ) -> Tuple[ModalLatents, Optional[ModalPrediction]]:
+        """Integrate one role continuously over adjacent schedule intervals."""
+
+        state = latent
+        last_prediction: Optional[ModalPrediction] = None
+        for offset in range(int(steps)):
+            index = int(start_index) + offset
+            sample = state.video if state.video is not None else state.audio
+            assert sample is not None
+            timestep = self._times(
+                sample.shape[0],
+                schedule.video_sigmas[index] if schedule.video_sigmas else None,
+                schedule.audio_sigmas[index] if schedule.audio_sigmas else None,
+                sample.device,
+            )
+            last_prediction = self.adapter.predict(role, state, timestep, conditioning)
+            state = self.adapter.scheduler_step(
+                role,
+                state,
+                last_prediction,
+                self._interval(schedule.video_sigmas, schedule.audio_sigmas, index),
+            )
+        return state, last_prediction
+
+    def _rollout_losses(
+        self,
+        batch: PreparedBatch,
+        start: ModalLatents,
+        outer: int,
+        iteration: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, int]:
+        """Match a continuous Student rollout to a continuous Teacher rollout."""
+
+        sample = start.video if start.video is not None else start.audio
+        assert sample is not None
+        zero = sample.new_zeros(())
+        if self.config.rollout_steps <= 0 or ((iteration - 1) % self.config.rollout_every) != 0:
+            return zero, zero, 0
+        if self._student_schedule is None or self._teacher_schedule is None:
+            raise TrainingFailure("invalid_training_config", "rollout schedules are unavailable")
+        remaining = self.config.stage.student_nfe - outer
+        steps = min(self.config.rollout_steps, remaining)
+        if steps <= 0:
+            raise TrainingFailure("invalid_training_config", "rollout has no remaining student interval")
+
+        # The Teacher starts from exactly the same noisy state as the Student.
+        # Only the Teacher trajectory is detached; the Student trajectory must
+        # retain its graph so rollout errors train the Student parameters.
+        with torch.no_grad():
+            teacher_endpoint, _ = self._integrate_rollout(
+                self.teacher,
+                start,
+                batch.conditioning,
+                self._teacher_schedule,
+                2 * outer,
+                2 * steps,
+            )
+        student_endpoint, _ = self._integrate_rollout(
+            self.student,
+            start,
+            batch.conditioning,
+            self._student_schedule,
+            outer,
+            steps,
+        )
+        endpoint_loss = self._mse(
+            student_endpoint,
+            teacher_endpoint,
+            self.config.video_weight,
+            self.config.audio_weight,
+        )
+
+        endpoint_index = outer + steps
+        endpoint_sample = student_endpoint.video if student_endpoint.video is not None else student_endpoint.audio
+        assert endpoint_sample is not None
+        endpoint_time = self._times(
+            endpoint_sample.shape[0],
+            self._student_schedule.video_sigmas[endpoint_index]
+            if self._student_schedule.video_sigmas
+            else None,
+            self._student_schedule.audio_sigmas[endpoint_index]
+            if self._student_schedule.audio_sigmas
+            else None,
+            endpoint_sample.device,
+        )
+        if endpoint_index == self.config.stage.student_nfe:
+            clean_hat = student_endpoint
+        else:
+            endpoint_prediction = self.adapter.predict(
+                self.student,
+                student_endpoint,
+                endpoint_time,
+                batch.conditioning,
+            )
+            clean_hat = self.adapter.prediction_to_clean(
+                student_endpoint,
+                endpoint_prediction,
+                endpoint_time,
+            )
+        clean_loss = self._mse(
+            clean_hat,
+            batch.latents,
+            self.config.video_weight,
+            self.config.audio_weight,
+        )
+        return endpoint_loss, clean_loss, steps
 
     def training_step(self, batch: PreparedBatch, iteration: int) -> StepOutput:
         if batch.latents is None or batch.noise is None:
@@ -199,13 +424,55 @@ class ProgressiveDistillation(TrainingMethod):
                 continue
             if weight <= 0:
                 raise TrainingFailure("invalid_training_config", f"present {name} modality has zero weight")
-            value = torch.mean((actual - expected) ** 2)
+            value = torch.mean((actual.float() - expected.float()) ** 2)
             modality_losses[f"{name}_loss"] = value
             losses.append(weight * value)
-        total = sum(losses)
+        velocity_loss = self._mse(
+            student_prediction,
+            ModalLatents(video=first_prediction.video, audio=first_prediction.audio),
+            self.config.video_weight,
+            self.config.audio_weight,
+        )
+        modality_losses["velocity_loss"] = velocity_loss
+        clean_anchor = self.adapter.prediction_to_clean(start, student_prediction, start_timestep)
+        clean_anchor_loss = self._mse(
+            clean_anchor,
+            ModalLatents(video=batch.latents.video, audio=batch.latents.audio),
+            self.config.video_weight,
+            self.config.audio_weight,
+        )
+        modality_losses["clean_anchor_loss"] = clean_anchor_loss
+        endpoint_loss = sum(losses)
+        # Stable names make the four learnability signals auditable without
+        # changing the historical per-modality loss keys.
+        modality_losses["endpoint_loss"] = endpoint_loss
+        modality_losses["flow_loss"] = velocity_loss
+        modality_losses["clean_loss"] = clean_anchor_loss
+        rollout_endpoint_loss, rollout_clean_loss, effective_rollout_steps = self._rollout_losses(
+            batch,
+            start,
+            outer,
+            iteration,
+        )
+        total = (
+            sum(losses)
+            + self.config.velocity_weight * velocity_loss
+            + self.config.clean_anchor_weight * clean_anchor_loss
+            + self.config.rollout_endpoint_weight * rollout_endpoint_loss
+            + self.config.rollout_clean_weight * rollout_clean_loss
+        )
         return StepOutput(
-            losses={"total_loss": total, **modality_losses},
-            metrics={"interval_index": float(outer)},
+            losses={
+                "total_loss": total,
+                **modality_losses,
+                "rollout_endpoint_loss": rollout_endpoint_loss,
+                "rollout_clean_loss": rollout_clean_loss,
+            },
+            metrics={
+                "interval_index": float(outer),
+                "rollout_steps": float(effective_rollout_steps),
+                "rollout_index": float(outer) if effective_rollout_steps else -1.0,
+            },
             detached={"teacher_endpoint": target},
         )
 

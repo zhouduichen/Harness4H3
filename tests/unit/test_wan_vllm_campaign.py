@@ -5,6 +5,7 @@ import pytest
 
 from tools.wan_vllm_campaign import (
     _campaign_capabilities,
+    _memory_lessons,
     build_training_command,
     extract_json_content,
     load_loop_config,
@@ -86,6 +87,31 @@ def test_wan_loop_config_exposes_unattended_service_defaults():
     assert str(config["watchdog_lock_file"]).startswith(str(config["output_root"]))
     assert str(config["watchdog_child_pid_file"]).startswith(str(config["output_root"]))
     assert str(config["watchdog_log"]).startswith(str(config["output_root"]))
+
+
+def test_native_5s_config_enables_visual_information_gate():
+    config = load_loop_config(Path("configs/student-campaign.wan-5s-native-20261009.yaml"))
+    gate = config["visual_quality_gate"]
+    assert gate["enabled"] is True
+    assert gate["version"] == "visual-structure-v1"
+    assert gate["min_spatial_gradient"] > 0
+    assert gate["max_low_texture_frame_ratio"] < 1
+
+
+def test_visual_collapse_is_persisted_as_a_negative_memory_lesson():
+    lessons = _memory_lessons(
+        {"controller_memory_limit": 3, "memory_seed_paths": []},
+        [
+            {
+                "round": 1,
+                "decision": {"accepted": False, "reason": "visual_collapse"},
+                "evaluation": {"quality_metrics": {"semantic": 0.2}, "quality_score": 0.3},
+                "proposal": {"training": {"train_steps": 1}},
+            }
+        ],
+    )
+    assert lessons[-1]["decision"] == "visual_collapse"
+    assert "Avoid repeating" in lessons[-1]["lesson"]
 
 
 def test_proposal_schema_disallows_code_and_paths():

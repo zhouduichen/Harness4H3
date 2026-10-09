@@ -55,6 +55,158 @@ def test_progressive_distillation_updates_student_not_teacher():
     assert result.optimizer_steps == {"student": 4}
 
 
+def test_progressive_distillation_can_keep_optimizer_state_in_fp32():
+    torch.manual_seed(7)
+    teacher = TinyH3Model()
+    student = copy.deepcopy(teacher)
+    config = ProgressiveDistillationConfig(
+        DistillationStage(4, 2), learning_rate=2e-3, fp32_optimizer_state=True
+    )
+    method = ProgressiveDistillation(student, teacher, TinyH3Adapter(), config)
+    batches = [[SyntheticH3Dataset(1, 91)[0]]]
+    result = TrainerEngine(TrainerConfig(seed=13)).run(method, batches, max_steps=1)
+    assert result.optimizer_steps == {"student": 1}
+    state = next(iter(method._optimizer.state.values()))
+    assert state["exp_avg"].dtype == torch.float32
+    assert state["exp_avg_sq"].dtype == torch.float32
+
+
+def test_progressive_distillation_exposes_direct_velocity_alignment_loss():
+    method, batches = fixture()
+    method.prepare()
+    batch = method.prepare_batch(batches[0], torch.Generator().manual_seed(13))
+    output = method.training_step(batch, iteration=1)
+    assert "velocity_loss" in output.losses
+    assert "clean_anchor_loss" in output.losses
+    assert torch.isfinite(output.losses["velocity_loss"])
+    assert torch.isfinite(output.losses["clean_anchor_loss"])
+    assert output.losses["velocity_loss"].dtype == torch.float32
+    assert output.losses["clean_anchor_loss"].dtype == torch.float32
+    for name in ("endpoint_loss", "flow_loss", "clean_loss"):
+        assert name in output.losses
+        assert torch.isfinite(output.losses[name])
+
+
+def test_p1_loss_components_are_separately_observable_and_rollout_is_additive():
+    method, batches = fixture()
+    method.config = replace(
+        method.config,
+        rollout_steps=2,
+        rollout_every=1,
+        rollout_endpoint_weight=1.0,
+        rollout_clean_weight=0.5,
+    )
+    method.prepare()
+    batch = method.prepare_batch(batches[0], torch.Generator().manual_seed(13))
+    output = method.training_step(batch, iteration=1)
+    expected = (
+        output.losses["endpoint_loss"]
+        + method.config.velocity_weight * output.losses["flow_loss"]
+        + method.config.clean_anchor_weight * output.losses["clean_loss"]
+        + method.config.rollout_endpoint_weight * output.losses["rollout_endpoint_loss"]
+        + method.config.rollout_clean_weight * output.losses["rollout_clean_loss"]
+    )
+    assert torch.allclose(output.losses["total_loss"], expected)
+    assert output.losses["flow_loss"].dtype == torch.float32
+    assert output.losses["clean_loss"].dtype == torch.float32
+    assert output.losses["rollout_endpoint_loss"].requires_grad
+    assert output.losses["rollout_clean_loss"].requires_grad
+
+
+def test_rollout_config_rejects_invalid_values():
+    stage = DistillationStage(4, 2)
+    with pytest.raises(ValueError, match="rollout_steps"):
+        ProgressiveDistillationConfig(stage, rollout_steps=-1)
+    with pytest.raises(ValueError, match="rollout_every"):
+        ProgressiveDistillationConfig(stage, rollout_steps=2, rollout_every=0)
+    with pytest.raises(ValueError, match="rollout weight"):
+        ProgressiveDistillationConfig(
+            stage,
+            rollout_steps=2,
+            rollout_endpoint_weight=0.0,
+            rollout_clean_weight=0.0,
+        )
+    with pytest.raises(ValueError, match="disabled"):
+        ProgressiveDistillationConfig(stage, rollout_endpoint_weight=1.0)
+
+
+def test_rollout_config_accepts_active_policy():
+    config = ProgressiveDistillationConfig(
+        DistillationStage(8, 4),
+        rollout_steps=4,
+        rollout_every=2,
+        rollout_endpoint_weight=1.0,
+        rollout_clean_weight=0.5,
+    )
+    assert config.rollout_steps == 4
+    assert config.rollout_every == 2
+
+
+def test_progressive_rollout_adds_finite_losses_and_metrics():
+    method, batches = fixture()
+    method.config = replace(
+        method.config,
+        rollout_steps=2,
+        rollout_every=1,
+        rollout_endpoint_weight=1.0,
+        rollout_clean_weight=0.5,
+    )
+    method.prepare()
+    batch = method.prepare_batch(batches[0], torch.Generator().manual_seed(13))
+    output = method.training_step(batch, iteration=1)
+    assert output.metrics["rollout_steps"] == 2.0
+    assert output.metrics["rollout_index"] == 0.0
+    assert torch.isfinite(output.losses["rollout_endpoint_loss"])
+    assert torch.isfinite(output.losses["rollout_clean_loss"])
+    assert output.losses["rollout_endpoint_loss"].requires_grad
+    assert output.losses["rollout_clean_loss"].requires_grad
+    assert output.losses["total_loss"].requires_grad
+
+
+def test_progressive_rollout_is_disabled_without_changing_existing_path():
+    method, batches = fixture()
+    method.prepare()
+    batch = method.prepare_batch(batches[0], torch.Generator().manual_seed(13))
+    output = method.training_step(batch, iteration=1)
+    assert output.metrics["rollout_steps"] == 0.0
+    assert output.metrics["rollout_index"] == -1.0
+    assert output.losses["rollout_endpoint_loss"].item() == 0.0
+    assert output.losses["rollout_clean_loss"].item() == 0.0
+
+
+def test_progressive_rollout_clamps_at_final_student_interval():
+    method, batches = fixture()
+    method.config = replace(
+        method.config,
+        rollout_steps=4,
+        rollout_every=1,
+        rollout_endpoint_weight=1.0,
+        rollout_clean_weight=0.5,
+    )
+    method.prepare()
+    batch = method.prepare_batch(batches[0], torch.Generator().manual_seed(13))
+    output = method.training_step(batch, iteration=2)
+    assert output.metrics["interval_index"] == 1.0
+    assert output.metrics["rollout_steps"] == 1.0
+
+
+def test_progressive_rollout_frequency_uses_training_iteration():
+    method, batches = fixture()
+    method.config = replace(
+        method.config,
+        rollout_steps=2,
+        rollout_every=2,
+        rollout_endpoint_weight=1.0,
+        rollout_clean_weight=0.5,
+    )
+    method.prepare()
+    batch = method.prepare_batch(batches[0], torch.Generator().manual_seed(13))
+    first = method.training_step(batch, iteration=1)
+    second = method.training_step(batch, iteration=2)
+    assert first.metrics["rollout_steps"] == 2.0
+    assert second.metrics["rollout_steps"] == 0.0
+
+
 def test_progressive_resume_matches_uninterrupted(tmp_path):
     full_method, batches = fixture()
     full_engine = TrainerEngine(TrainerConfig(seed=13))
