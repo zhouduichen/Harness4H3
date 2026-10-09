@@ -68,6 +68,16 @@ def test_wan_adapter_flow_match_and_clean_equation():
     assert torch.allclose(recovered.video, torch.zeros_like(clean.video))
 
 
+def test_wan_adapter_keeps_sigma_fp32_for_flow_match_math():
+    adapter = make_adapter()
+    clean = ModalLatents(video=torch.zeros(1, 1, 1, 1, 1, dtype=torch.bfloat16))
+    noise = ModalLatents(video=torch.ones_like(clean.video))
+    sigma = torch.tensor([0.1234567], dtype=torch.float32)
+    noisy = adapter.add_noise(clean, noise, ModalTimesteps(video=sigma))
+    expected = torch.tensor(0.1234567, dtype=torch.float32).to(dtype=torch.bfloat16)
+    assert torch.equal(noisy.video, expected.reshape(1, 1, 1, 1, 1))
+
+
 def test_wan_adapter_schedule_is_binary_aligned():
     adapter = make_adapter()
     teacher = adapter.schedule(8).video_sigmas

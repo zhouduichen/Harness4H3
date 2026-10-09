@@ -78,7 +78,11 @@ class WanTrainingAdapter(DenoisingModelAdapter):
 
     @staticmethod
     def _sigma(timestep: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
-        value = timestep.to(device=reference.device, dtype=reference.dtype)
+        # Sigma is a scheduler coordinate, not a model activation.  Keeping
+        # it in FP32 is required for the Flow-Match equations and for exact
+        # native-timestep lookup; casting it to the BF16 latent dtype first
+        # perturbs the low-noise endpoint used by 16-step inference.
+        value = timestep.to(device=reference.device, dtype=torch.float32)
         while value.ndim < reference.ndim:
             value = value.unsqueeze(-1)
         return value
@@ -192,7 +196,9 @@ class WanTrainingAdapter(DenoisingModelAdapter):
     ) -> ModalPrediction:
         if noisy.video is None or timestep.video is None:
             raise TrainingFailure("invalid_training_config", "Wan adapter requires video prediction inputs")
-        sigma = timestep.video.to(device=noisy.video.device, dtype=noisy.video.dtype)
+        # Preserve the scheduler coordinate in FP32.  Only hidden states and
+        # conditioning are converted to the Transformer dtype below.
+        sigma = timestep.video.to(device=noisy.video.device, dtype=torch.float32)
         if isinstance(role.model, WanEndpointTeacher):
             if self._active_clean is None:
                 raise TrainingFailure("wan_teacher_target_missing", "H3 RGB-boundary target was not prepared")
