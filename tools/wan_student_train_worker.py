@@ -347,6 +347,12 @@ def _teacher_video(
                 audio = audio + (audio_sigmas[index] - audio_sigmas[index + 1]) * prediction.audio.to(
                     device=teacher_device, dtype=torch.bfloat16
                 )
+                if not torch.isfinite(video).all() or not torch.isfinite(audio).all():
+                    raise WanStudentError(
+                        "wan_teacher_latent_nonfinite",
+                        "H3 Teacher produced non-finite latent values for cache item %s at step %d"
+                        % (cache_path, index),
+                    )
         forward_count = int(service.forward_count)
         if forward_count <= 0:
             raise RuntimeError("real H3 Teacher completed without a forward")
@@ -356,7 +362,17 @@ def _teacher_video(
         service.close()
     frames = decode_video_latent(comfyui_root, spec.vae_name, video.to(device=decode_device, dtype=torch.bfloat16))
     _release_h3_vae()
+    if not torch.isfinite(frames).all():
+        raise WanStudentError(
+            "wan_teacher_video_nonfinite",
+            "H3 VAE decoded non-finite RGB frames for cache item %s" % cache_path,
+        )
     frames = resample_video_frames(frames, num_frames=spec.num_frames, height=spec.height, width=spec.width)
+    if not torch.isfinite(frames).all():
+        raise WanStudentError(
+            "wan_teacher_video_nonfinite",
+            "H3 RGB resampling produced non-finite frames for cache item %s" % cache_path,
+        )
     metadata = {
         "teacher_sampling_steps": int(spec.h3_sampling_steps),
         "teacher_forward_count": int(forward_count),
