@@ -24,7 +24,7 @@ base:
   fp32_optimizer_state: false
   initialization_mode: inherit
   checkpoint_every_steps: 0
-  parent_checkpoint: /data/models/MiniMax-H3/harness4h3/wan-p1-single-sample-20261009/student.safetensors
+  parent_checkpoint: /data/models/MiniMax-H3/harness4h3/wan-student-5s-controller-paper-r1-continuation/round-0002/training/student.safetensors
 
 variants:
   endpoint:
