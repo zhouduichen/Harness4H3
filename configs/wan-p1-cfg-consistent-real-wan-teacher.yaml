@@ -1,0 +1,41 @@
+schema_version: 1
+
+# Correctness-first 32 -> 16 distillation.  This starts from official Wan
+# W0000 so the run is not contaminated by the previous unguided-training /
+# CFG=5 evaluation mismatch.
+wan_training:
+  wan_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-1.3b-paper16.remote.yaml
+  teacher_checkpoint: /data/models/MiniMax-H3/diffusion_models/minimax_h3_fl2va_bf16.safetensors
+  h3_cache_dir: /data/models/MiniMax-H3/harness4h3/cache-native-5s-24x1
+  cache_contract: native_5s
+  teacher_target_mode: cache_rgb
+  wan_teacher_mode: wan_base_trajectory
+  comfyui_root: /home/intern/huangjiahao/ComfyUI
+  vae_name: minimax_h3_video_vae_fp16.safetensors
+  teacher_devices: [cuda:0, cuda:2, cuda:3]
+  student_device: cuda:1
+  seed: 20261009
+  teacher_target_groups: 4
+  teacher_reuse_steps: 64
+  train_steps: 256
+  method: progressive_distillation
+  source_steps: 32
+  target_steps: 16
+  h3_sampling_steps: 4
+  h3_latent_frames: 24
+  h3_latent_height: 16
+  h3_latent_width: 16
+  h3_latent_channels: 24
+  max_sequence_length: 512
+  learning_rate: 0.000001
+  endpoint_weight: 1.0
+  velocity_weight: 1.0
+  clean_anchor_weight: 0.5
+  rollout_steps: 0
+  rollout_every: 1
+  rollout_endpoint_weight: 0.0
+  rollout_clean_weight: 0.0
+  trainable_scope: all
+  fp32_optimizer_state: false
+  initialization_mode: inherit
+  checkpoint_every_steps: 0
