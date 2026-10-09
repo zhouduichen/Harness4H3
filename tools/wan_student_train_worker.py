@@ -558,7 +558,7 @@ def run(
         if training_checkpoint_override is not None
         else Path(output).resolve() / "training-checkpoint.pt"
     )
-    checkpoint_evidence_path = training_checkpoint
+    checkpoint_evidence_path: Optional[Path] = None
     policy_digest = _digest({"policy": asdict(policy), "initialization_mode": initialization_mode_override or raw.get("initialization_mode", "inherit")})
     resumed_from_step = 0
     if policy.method == "dmd2" and (
@@ -733,7 +733,9 @@ def run(
                 checkpoint_path=stage_checkpoint,
                 checkpoint_every_steps=checkpoint_every_steps,
             )
-            trainer.save_checkpoint(stage_method, result.loop_state, stage_checkpoint)
+            if checkpoint_every_steps > 0:
+                trainer.save_checkpoint(stage_method, result.loop_state, stage_checkpoint)
+                checkpoint_evidence_path = stage_checkpoint
             stage_path = output / ("student-stage-%02d.safetensors" % (stage_index + 1))
             stage_path.parent.mkdir(parents=True, exist_ok=True)
             stage_schedule = adapter.schedule_provider(stage.student_nfe)
@@ -791,7 +793,7 @@ def run(
                     },
                 }
             )
-        if stages:
+        if stages and checkpoint_every_steps > 0:
             checkpoint_evidence_path = _stage_checkpoint_path(training_checkpoint, len(stages) - 1)
     else:
         try:
@@ -834,7 +836,9 @@ def run(
             checkpoint_path=training_checkpoint,
             checkpoint_every_steps=checkpoint_every_steps,
         )
-        trainer.save_checkpoint(dmd2_method, result.loop_state, training_checkpoint)
+        if checkpoint_every_steps > 0:
+            trainer.save_checkpoint(dmd2_method, result.loop_state, training_checkpoint)
+            checkpoint_evidence_path = training_checkpoint
         total_optimizer_steps = sum(int(value) for value in result.optimizer_steps.values())
         initial_loss = result.initial_loss
         final_loss = result.final_loss
@@ -898,7 +902,7 @@ def run(
             "initialization_mode": initialization_mode,
             "stage_lineage": json.dumps(stage_lineage, sort_keys=True),
             "training_checkpoint": str(training_checkpoint),
-            "training_checkpoint_evidence": str(checkpoint_evidence_path),
+            "training_checkpoint_evidence": str(checkpoint_evidence_path) if checkpoint_evidence_path else "",
             "checkpoint_every_steps": checkpoint_every_steps,
             "policy_digest": policy_digest,
             "resumed_from_step": resumed_from_step,
@@ -972,8 +976,8 @@ def run(
         "training_cache_items": [str(path) for path in cache_paths],
         "wall_time_s": float(time.perf_counter() - started),
         "training_checkpoint": str(training_checkpoint),
-        "training_checkpoint_evidence": str(checkpoint_evidence_path),
-        "training_checkpoint_sha256": sha256_path(checkpoint_evidence_path),
+        "training_checkpoint_evidence": str(checkpoint_evidence_path) if checkpoint_evidence_path else "",
+        "training_checkpoint_sha256": sha256_path(checkpoint_evidence_path) if checkpoint_evidence_path else "",
         "checkpoint_every_steps": checkpoint_every_steps,
         "policy_digest": policy_digest,
         "resumed_from_step": resumed_from_step,
