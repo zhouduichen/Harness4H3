@@ -123,6 +123,20 @@ def run(config_path: Path, output_root: Path, *, worker_python: str, worker_path
         manifest["variants"].append(entry)
         manifest["status"] = "running"
         _write_json(output_root / "ablation-manifest.json", manifest)
+        if not dry_run and entry.get("status") != "success":
+            current_index = _VARIANT_ORDER.index(name)
+            for remaining in _VARIANT_ORDER[current_index + 1 :]:
+                if remaining not in variants:
+                    continue
+                manifest["variants"].append(
+                    {
+                        "name": remaining,
+                        "status": "skipped_after_failure",
+                        "reason": "previous_loss_ablation_failed",
+                    }
+                )
+            _write_json(output_root / "ablation-manifest.json", manifest)
+            break
     manifest["status"] = "dry_run" if dry_run else (
         "passed" if all(item.get("status") == "success" for item in manifest["variants"]) else "partial_failed"
     )
