@@ -16,6 +16,7 @@ from h3_training.data.schema import (
     PreparedBatch,
 )
 from h3_training.engine.state import TrainingFailure
+from h3_training.wan_trajectory import LoadedWanTrajectory
 
 
 class _FP32StateAdamW(torch.optim.Optimizer):
@@ -98,6 +99,8 @@ def plan_binary_stages(source_nfe: int, target_nfe: int) -> Tuple[DistillationSt
 @dataclass(frozen=True)
 class ProgressiveDistillationConfig:
     stage: DistillationStage
+    mode: str = "legacy"
+    teacher_forced_intervals: int = 0
     learning_rate: float = 1e-3
     weight_decay: float = 0.0
     trainable_scope: str = "all"
@@ -113,6 +116,10 @@ class ProgressiveDistillationConfig:
     fp32_optimizer_state: bool = False
 
     def __post_init__(self) -> None:
+        if self.mode not in {"legacy", "native_rollout_state"}:
+            raise ValueError("unsupported progressive distillation mode")
+        if self.teacher_forced_intervals < 0:
+            raise ValueError("teacher_forced_intervals must be non-negative")
         if self.learning_rate <= 0 or self.weight_decay < 0:
             raise ValueError("optimizer values are invalid")
         if (
@@ -172,6 +179,13 @@ class ProgressiveDistillation(TrainingMethod):
         self.frozen_parameter_names = frozenset()
         self._student_schedule = None
         self._teacher_schedule = None
+        self.native_trajectory_record: Optional[LoadedWanTrajectory] = None
+
+    def set_trajectory_record(self, record: LoadedWanTrajectory) -> None:
+        """Attach one immutable native record before the first optimizer step."""
+
+        record.validate()
+        self.native_trajectory_record = record
 
     def prepare(self) -> None:
         self._student_schedule = self.adapter.schedule(self.config.stage.student_nfe)
@@ -371,9 +385,144 @@ class ProgressiveDistillation(TrainingMethod):
         )
         return endpoint_loss, clean_loss, steps
 
+    def native_rollout_state_training_step(
+        self,
+        batch: PreparedBatch,
+        iteration: int,
+        record: LoadedWanTrajectory,
+    ) -> StepOutput:
+        """Train on Teacher states while rebuilding current Student history."""
+
+        if batch.latents is None:
+            raise TrainingFailure("invalid_training_config", "native rollout-state training requires clean latent")
+        student_schedule = self._student_schedule
+        teacher_schedule = self._teacher_schedule
+        if student_schedule is None or teacher_schedule is None:
+            raise TrainingFailure("invalid_training_config", "method was not prepared")
+        if not getattr(self.adapter, "native_trajectory_training", False):
+            raise TrainingFailure(
+                "invalid_training_config",
+                "native_rollout_state requires an adapter with a native scheduler",
+            )
+        if self.config.rollout_steps > 0:
+            raise TrainingFailure(
+                "invalid_training_config",
+                "native rollout-state free-running supervision is enabled in the next stage",
+            )
+        record.validate()
+        if record.metadata.target_nfe != self.config.stage.student_nfe:
+            raise TrainingFailure("invalid_training_config", "trajectory target NFE does not match Student stage")
+        if record.metadata.source_nfe != self.config.stage.teacher_nfe:
+            raise TrainingFailure("invalid_training_config", "trajectory source NFE does not match Teacher stage")
+        if student_schedule.video_sigmas is None or teacher_schedule.video_sigmas is None:
+            raise TrainingFailure("invalid_training_config", "native rollout-state requires video schedules")
+        if any(
+            abs(float(left) - float(right)) > 5e-5
+            for left, right in zip(student_schedule.video_sigmas, record.metadata.target_sigmas)
+        ):
+            raise TrainingFailure("invalid_training_config", "record target sigma table does not match Student schedule")
+        if any(
+            abs(float(left) - float(right)) > 5e-5
+            for left, right in zip(teacher_schedule.video_sigmas, record.metadata.source_sigmas)
+        ):
+            raise TrainingFailure("invalid_training_config", "record source sigma table does not match Teacher schedule")
+
+        reference = batch.latents.video if batch.latents.video is not None else batch.latents.audio
+        if reference is None:
+            raise TrainingFailure("invalid_training_config", "native rollout-state requires a latent tensor")
+        device = reference.device
+        record_clean = record.clean_latent.to(device=device, dtype=reference.dtype)
+        if batch.latents.video is not None and tuple(batch.latents.video.shape) != tuple(record_clean.shape):
+            raise TrainingFailure("invalid_training_config", "record clean latent shape does not match batch")
+        interval_count = self.config.teacher_forced_intervals or self.config.stage.student_nfe
+        interval_count = min(int(interval_count), self.config.stage.student_nfe)
+        if interval_count <= 0:
+            raise TrainingFailure("invalid_training_config", "native rollout-state selected no Teacher intervals")
+
+        endpoint_terms = []
+        clean_terms = []
+        flow_terms = []
+        for coarse_index in range(interval_count):
+            forced_video = record.teacher_states[2 * coarse_index].to(device=device, dtype=reference.dtype)
+            forced_state = ModalLatents(video=forced_video)
+            self.adapter.begin_trajectory(self.student, student_schedule, 0, device)
+            with torch.no_grad():
+                for history_index in range(coarse_index):
+                    history_video = record.teacher_states[2 * history_index].to(
+                        device=device, dtype=reference.dtype
+                    )
+                    history_state = ModalLatents(video=history_video)
+                    history_timestep = self._times(
+                        reference.shape[0],
+                        student_schedule.video_sigmas[history_index],
+                        None,
+                        device,
+                    )
+                    history_prediction = self.adapter.predict(
+                        self.student, history_state, history_timestep, batch.conditioning
+                    )
+                    self.adapter.scheduler_step(
+                        self.student,
+                        history_state,
+                        history_prediction,
+                        self._interval(student_schedule.video_sigmas, None, history_index),
+                    )
+
+            current_timestep = self._times(
+                reference.shape[0], student_schedule.video_sigmas[coarse_index], None, device
+            )
+            current_prediction = self.adapter.predict(
+                self.student, forced_state, current_timestep, batch.conditioning
+            )
+            student_endpoint = self.adapter.scheduler_step(
+                self.student,
+                forced_state,
+                current_prediction,
+                self._interval(student_schedule.video_sigmas, None, coarse_index),
+            )
+            target_endpoint = ModalLatents(
+                video=record.teacher_states[2 * coarse_index + 2].to(device=device, dtype=reference.dtype)
+            )
+            teacher_flow = ModalLatents(
+                video=record.teacher_predictions[2 * coarse_index].to(device=device, dtype=reference.dtype)
+            )
+            endpoint_terms.append(self._mse(student_endpoint, target_endpoint, self.config.video_weight, 0.0))
+            clean_hat = self.adapter.prediction_to_clean(forced_state, current_prediction, current_timestep)
+            clean_terms.append(self._mse(clean_hat, ModalLatents(video=record_clean), self.config.video_weight, 0.0))
+            flow_terms.append(self._mse(current_prediction, teacher_flow, self.config.video_weight, 0.0))
+
+        endpoint_loss = torch.stack(endpoint_terms).mean()
+        clean_loss = torch.stack(clean_terms).mean()
+        flow_loss = torch.stack(flow_terms).mean()
+        total = (
+            self.config.endpoint_weight * endpoint_loss
+            + self.config.clean_anchor_weight * clean_loss
+            + self.config.velocity_weight * flow_loss
+        )
+        return StepOutput(
+            losses={
+                "total_loss": total,
+                "same_state_endpoint_loss": endpoint_loss,
+                "same_state_clean_loss": clean_loss,
+                "same_state_flow_loss": flow_loss,
+            },
+            metrics={
+                "same_state_endpoint": float(endpoint_loss.detach().item()),
+                "same_state_clean": float(clean_loss.detach().item()),
+                "same_state_flow": float(flow_loss.detach().item()),
+                "teacher_forced_intervals": float(interval_count),
+                "rollout_steps": 0.0,
+            },
+            detached={"trajectory_record": record.metadata.tensor_digest},
+        )
+
     def training_step(self, batch: PreparedBatch, iteration: int) -> StepOutput:
         if batch.latents is None or batch.noise is None:
             raise TrainingFailure("invalid_training_config", "progressive distillation requires clean latent and noise")
+        if self.config.mode == "native_rollout_state":
+            if self.native_trajectory_record is None:
+                raise TrainingFailure("invalid_training_config", "native_rollout_state requires a trajectory record")
+            return self.native_rollout_state_training_step(batch, iteration, self.native_trajectory_record)
         student_schedule = self._student_schedule
         teacher_schedule = self._teacher_schedule
         if student_schedule is None or teacher_schedule is None:

@@ -1,11 +1,13 @@
 import copy
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 torch = pytest.importorskip("torch")
 
 from h3_training.adapters.tiny import TinyH3Adapter
+from h3_training.algorithms.base import ModelRole
 from h3_training.algorithms.progressive_distillation import (
     DistillationStage,
     ProgressiveDistillation,
@@ -14,9 +16,68 @@ from h3_training.algorithms.progressive_distillation import (
 )
 from h3_training.data.dataset import SyntheticH3Dataset
 from h3_training.data.schema import ModalLatents
+from h3_training.data.schema import Conditioning, ModalInterval, ModalPrediction, ModalSchedule, ModalTimesteps, PreparedBatch
 from h3_training.engine.state import TrainingFailure
 from h3_training.engine.trainer import TrainerConfig, TrainerEngine
 from h3_training.tiny.model import TinyH3Model
+from h3_training.wan_trajectory_builder import build_wan_trajectory_record
+
+
+class NativeToyModel(torch.nn.Module):
+    def __init__(self, weight: float):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(float(weight)))
+
+    def forward(self, noisy, conditioning, timestep):
+        assert noisy.video is not None
+        return ModalPrediction(video=noisy.video * self.weight)
+
+
+class NativeToyAdapter:
+    native_trajectory_training = True
+
+    def __init__(self):
+        self.index = 0
+
+    def schedule(self, nfe):
+        return ModalSchedule(video_sigmas=tuple(float(nfe - i) / nfe for i in range(nfe)) + (0.0,))
+
+    def native_schedule_metadata(self, schedule):
+        values = schedule.video_sigmas
+        assert values is not None
+        return {"class": "NativeToyAdapter", "timesteps": [1000.0 * value for value in values[:-1]]}
+
+    def prepare_batch(self, raw, generator):
+        return PreparedBatch(
+            conditioning=Conditioning(text=raw["conditioning"]),
+            latents=ModalLatents(video=raw["clean"]),
+            noise=ModalLatents(video=raw["noise"]),
+        )
+
+    def resolve_trainable_parameters(self, role, policy):
+        return ("weight",)
+
+    def begin_trajectory(self, role, schedule, start_index, device):
+        self.index = int(start_index)
+        return None
+
+    def capture_native_scheduler_state(self, role):
+        return {"index": self.index}
+
+    def add_noise(self, clean, noise, timestep):
+        sigma = timestep.video.reshape(-1, 1, 1, 1, 1)
+        return ModalLatents(video=(1.0 - sigma) * clean.video + sigma * noise.video)
+
+    def predict(self, role, noisy, timestep, conditioning):
+        return role.model(noisy, conditioning, timestep)
+
+    def scheduler_step(self, role, latent, prediction, interval):
+        self.index += 1
+        return ModalLatents(video=latent.video + (interval.video[1] - interval.video[0]) * prediction.video)
+
+    def prediction_to_clean(self, noisy, prediction, timestep):
+        sigma = timestep.video.reshape(-1, 1, 1, 1, 1)
+        return ModalLatents(video=noisy.video - sigma * prediction.video)
 
 
 def clone(model):
@@ -34,6 +95,65 @@ def fixture():
     config = ProgressiveDistillationConfig(DistillationStage(4, 2), learning_rate=2e-3)
     method = ProgressiveDistillation(student, teacher, TinyH3Adapter(), config)
     return method, [[SyntheticH3Dataset(1, 91)[0]]]
+
+
+def native_rollout_fixture(tmp_path, *, intervals=2):
+    adapter = NativeToyAdapter()
+    teacher = NativeToyModel(0.5)
+    student = NativeToyModel(0.2)
+    teacher_role = ModelRole("teacher", teacher, adapter, False)
+    clean = ModalLatents(video=torch.full((1, 1, 1, 2, 2), 0.5))
+    conditioning = Conditioning(text=torch.ones(1, 1, 1))
+    cache = tmp_path / "cache.pt"
+    cache.write_bytes(b"cache")
+    teacher_path = tmp_path / "teacher.safetensors"
+    teacher_path.write_bytes(b"teacher")
+    record = build_wan_trajectory_record(
+        adapter=adapter,
+        teacher_role=teacher_role,
+        clean=clean,
+        conditioning=conditioning,
+        cache_item=cache,
+        teacher_checkpoint=teacher_path,
+        output_dir=None,
+        seed=20261008,
+        source_nfe=4,
+        target_nfe=2,
+    )
+    config = ProgressiveDistillationConfig(
+        DistillationStage(4, 2),
+        mode="native_rollout_state",
+        teacher_forced_intervals=intervals,
+        learning_rate=2e-3,
+    )
+    method = ProgressiveDistillation(student, teacher, adapter, config)
+    method.set_trajectory_record(record)
+    method.prepare()
+    batch = PreparedBatch(
+        conditioning=conditioning,
+        latents=clean,
+        noise=ModalLatents(video=record.noise.clone()),
+    )
+    return method, record, batch
+
+
+def test_native_rollout_state_uses_matching_states_and_no_legacy_velocity(tmp_path):
+    method, record, batch = native_rollout_fixture(tmp_path, intervals=2)
+    output = method.training_step(batch, iteration=1)
+    assert output.metrics["teacher_forced_intervals"] == 2.0
+    assert "same_state_endpoint_loss" in output.losses
+    assert "same_state_clean_loss" in output.losses
+    assert "same_state_flow_loss" in output.losses
+    assert "velocity_loss" not in output.losses
+    assert output.detached["trajectory_record"] == record.metadata.tensor_digest
+
+
+def test_native_rollout_state_loss_backpropagates_to_student(tmp_path):
+    method, _, batch = native_rollout_fixture(tmp_path, intervals=1)
+    output = method.training_step(batch, iteration=1)
+    output.losses["total_loss"].backward()
+    assert method.student_model.weight.grad is not None
+    assert torch.isfinite(method.student_model.weight.grad).all()
 
 
 def test_binary_stage_requires_two_to_one_nfe():
