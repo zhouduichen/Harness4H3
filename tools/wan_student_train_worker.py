@@ -768,6 +768,12 @@ def run(
                     "wan_schedule_shift": stage_schedule.shift,
                     "wan_schedule_source_nfe": stage_schedule.source_nfe or stage_schedule.nfe,
                     "wan_schedule_digest": stage_schedule_digest,
+                    "wan_scheduler_class": type(components.scheduler).__name__,
+                    "wan_scheduler_integrator": (
+                        "native_multistep"
+                        if callable(getattr(components.scheduler, "step", None))
+                        else "euler_fallback"
+                    ),
                     "offline_simulation": "false",
                 },
             )
@@ -927,6 +933,12 @@ def run(
             "wan_schedule_shift": source_schedule.shift,
             "wan_schedule_source_nfe": source_schedule.nfe,
             "wan_schedule_digest": source_schedule_digest,
+            "wan_scheduler_class": type(components.scheduler).__name__,
+            "wan_scheduler_integrator": (
+                "native_multistep"
+                if callable(getattr(components.scheduler, "step", None))
+                else "euler_fallback"
+            ),
             "training_seed": training_seed,
         },
     )
@@ -971,6 +983,12 @@ def run(
         "stage_lineage": stage_lineage,
         "teacher_forward_count": teacher_forward_count,
         "teacher_target_mode": teacher_target_mode,
+        "wan_scheduler_class": type(components.scheduler).__name__,
+        "wan_scheduler_integrator": (
+            "native_multistep"
+            if callable(getattr(components.scheduler, "step", None))
+            else "euler_fallback"
+        ),
         "training_seed": training_seed,
         "offline_simulation": False,
         "frame_contract": {

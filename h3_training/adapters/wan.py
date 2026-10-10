@@ -8,6 +8,7 @@ VAE; H3 cache rows are never treated as Wan latent tensors.
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
@@ -75,6 +76,10 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         # boundary.
         self._model_timestep_tables: list[tuple[tuple[float, ...], tuple[float, ...]]] = []
         self._active_clean: Optional[torch.Tensor] = None
+        # UniPC and similar Wan schedulers carry multistep history.  The
+        # progressive-distillation algorithm creates independent teacher and
+        # student trajectories, so each role needs a fresh scheduler context.
+        self._trajectory_schedulers: dict[int, tuple[Any, int]] = {}
 
     @staticmethod
     def _sigma(timestep: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
@@ -249,6 +254,80 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         value = noisy.video.float() - sigma * prediction.video.float()
         return ModalLatents(video=value.to(dtype=noisy.video.dtype))
 
+    def _clone_native_scheduler(self) -> Any:
+        """Clone the configured Diffusers scheduler without sharing history."""
+
+        try:
+            return copy.deepcopy(self.scheduler)
+        except Exception as deepcopy_error:
+            constructor = getattr(type(self.scheduler), "from_config", None)
+            config = getattr(self.scheduler, "config", None)
+            if callable(constructor) and config is not None:
+                try:
+                    return constructor(config)
+                except Exception as config_error:
+                    raise TrainingFailure(
+                        "wan_scheduler_init_failed",
+                        "unable to clone native scheduler: %s; from_config: %s"
+                        % (deepcopy_error, config_error),
+                    ) from config_error
+            raise TrainingFailure(
+                "wan_scheduler_init_failed",
+                "unable to clone native scheduler: %s" % deepcopy_error,
+            ) from deepcopy_error
+
+    @staticmethod
+    def _scheduler_sample(output: Any) -> torch.Tensor:
+        if isinstance(output, (tuple, list)):
+            if not output:
+                raise TrainingFailure("wan_scheduler_step_failed", "native scheduler returned an empty tuple")
+            output = output[0]
+        if hasattr(output, "prev_sample"):
+            output = output.prev_sample
+        if not isinstance(output, torch.Tensor):
+            raise TrainingFailure("wan_scheduler_step_failed", "native scheduler did not return a tensor")
+        return output
+
+    def begin_trajectory(self, role: ModelRole, schedule: ModalSchedule, start_index: int, device: Any) -> None:
+        """Create a fresh native scheduler state for one role trajectory."""
+
+        key = id(role)
+        self._trajectory_schedulers.pop(key, None)
+        set_timesteps = getattr(self.scheduler, "set_timesteps", None)
+        step = getattr(self.scheduler, "step", None)
+        sigmas = schedule.video_sigmas
+        if not callable(set_timesteps) or not callable(step) or sigmas is None:
+            return
+        nfe = len(sigmas) - 1
+        start = int(start_index)
+        if nfe <= 0 or start < 0 or start >= nfe:
+            raise TrainingFailure("wan_scheduler_trajectory_invalid", "trajectory index is outside the schedule")
+        native = self._clone_native_scheduler()
+        try:
+            native.set_timesteps(nfe, device=device)
+            native_sigmas = getattr(native, "sigmas", None)
+            if native_sigmas is not None:
+                expected = torch.as_tensor(sigmas[:-1], dtype=torch.float32)
+                actual = torch.as_tensor(native_sigmas[:nfe], dtype=torch.float32, device="cpu")
+                if actual.shape != expected.shape or not torch.allclose(actual, expected, atol=5e-5, rtol=0.0):
+                    raise TrainingFailure(
+                        "wan_scheduler_schedule_mismatch",
+                        "native scheduler sigmas do not match the training schedule",
+                    )
+            set_begin_index = getattr(native, "set_begin_index", None)
+            if callable(set_begin_index):
+                set_begin_index(start)
+            elif start != 0:
+                raise TrainingFailure(
+                    "wan_scheduler_trajectory_invalid",
+                    "native scheduler cannot start at a nonzero trajectory index",
+                )
+        except TrainingFailure:
+            raise
+        except Exception as exc:
+            raise TrainingFailure("wan_scheduler_init_failed", "native scheduler setup failed: %s" % exc) from exc
+        self._trajectory_schedulers[key] = (native, start)
+
     def scheduler_step(
         self,
         role: ModelRole,
@@ -259,6 +338,36 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         if latent.video is None or prediction.video is None or interval.video is None:
             raise TrainingFailure("invalid_training_config", "Wan adapter requires video scheduler inputs")
         current_sigma, next_sigma = interval.video
+        context = self._trajectory_schedulers.get(id(role))
+        if context is not None:
+            native, index = context
+            native_sigmas = getattr(native, "sigmas", None)
+            native_timesteps = getattr(native, "timesteps", None)
+            if native_sigmas is None or native_timesteps is None or index >= len(native_timesteps):
+                raise TrainingFailure("wan_scheduler_step_failed", "native scheduler state is incomplete")
+            expected_current = float(current_sigma)
+            expected_next = float(next_sigma)
+            actual_current = float(native_sigmas[index])
+            actual_next = float(native_sigmas[index + 1])
+            if abs(actual_current - expected_current) > 5e-5 or abs(actual_next - expected_next) > 5e-5:
+                raise TrainingFailure(
+                    "wan_scheduler_schedule_mismatch",
+                    "native scheduler interval does not match the training interval",
+                )
+            try:
+                output = native.step(
+                    prediction.video,
+                    native_timesteps[index],
+                    latent.video,
+                    return_dict=False,
+                )
+            except Exception as exc:
+                raise TrainingFailure("wan_scheduler_step_failed", "native scheduler step failed: %s" % exc) from exc
+            value = self._scheduler_sample(output)
+            if value.shape != latent.video.shape:
+                raise TrainingFailure("wan_scheduler_step_failed", "native scheduler changed latent shape")
+            self._trajectory_schedulers[id(role)] = (native, index + 1)
+            return ModalLatents(video=value.to(dtype=latent.video.dtype))
         delta = float(next_sigma) - float(current_sigma)
         value = latent.video.float() + delta * prediction.video.float()
         return ModalLatents(video=value.to(dtype=latent.video.dtype))
@@ -275,6 +384,11 @@ class WanTrainingAdapter(DenoisingModelAdapter):
     def save_role(self, role: ModelRole, path: Path) -> Mapping[str, Any]:
         metadata = dict(role.scheduler_state)
         metadata.setdefault("model_id", self.model_id)
+        metadata.setdefault("wan_scheduler_class", type(self.scheduler).__name__)
+        metadata.setdefault(
+            "wan_scheduler_integrator",
+            "native_multistep" if callable(getattr(self.scheduler, "step", None)) else "euler_fallback",
+        )
         if self.save_checkpoint is None:
             from harness4h3.student.wan_training import save_wan_checkpoint
 

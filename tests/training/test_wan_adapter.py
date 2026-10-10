@@ -15,6 +15,19 @@ class FakeScheduler:
     config = Config()
 
 
+class NativeScheduler(FakeScheduler):
+    def set_timesteps(self, num_inference_steps, device=None):
+        assert int(num_inference_steps) == 4
+        self.sigmas = torch.tensor([1.0, 0.75, 0.5, 0.25, 0.0], device=device)
+        self.timesteps = torch.tensor([1000, 750, 500, 250], device=device)
+
+    def set_begin_index(self, begin_index=0):
+        self.begin_index = int(begin_index)
+
+    def step(self, model_output, timestep, sample, return_dict=False):
+        return (sample + 10.0 * model_output,)
+
+
 class FakeTransformer(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -193,6 +206,29 @@ def test_wan_adapter_scheduler_step_moves_down_sigma_with_noise_minus_clean_velo
         ModalInterval(video=(0.75, 0.25)),
     )
     assert torch.equal(updated.video, torch.zeros_like(latent.video))
+
+
+def test_wan_adapter_uses_fresh_native_scheduler_trajectory_when_available():
+    adapter = WanTrainingAdapter(
+        transformer=FakeTransformer(),
+        scheduler=NativeScheduler(),
+        encode_frames=lambda frames: torch.as_tensor(frames).permute(3, 0, 1, 2).unsqueeze(0).contiguous(),
+        encode_prompt=lambda prompt: torch.ones(1, 2, 4),
+        schedule_provider=lambda _: WanSigmaSchedule(
+            mode="native",
+            sigmas=(1.0, 0.75, 0.5, 0.25, 0.0),
+            timesteps=(1000.0, 750.0, 500.0, 250.0),
+            num_train_timesteps=1000,
+            shift=3.0,
+        ),
+    )
+    role = ModelRole("student", adapter.transformer, adapter, True)
+    schedule = adapter.schedule(4)
+    adapter.begin_trajectory(role, schedule, 1, torch.device("cpu"))
+    latent = ModalLatents(video=torch.full((1, 1, 1, 1, 1), 0.5))
+    prediction = ModalPrediction(video=torch.ones_like(latent.video))
+    updated = adapter.scheduler_step(role, latent, prediction, ModalInterval(video=(0.75, 0.5)))
+    assert torch.equal(updated.video, torch.full_like(latent.video, 10.5))
 
 
 def test_wan_endpoint_teacher_matches_noise_minus_clean_for_nonzero_clean():

@@ -38,6 +38,11 @@ class DenoisingModelAdapter(ABC):
     def scheduler_step(self, role: Any, latent: ModalLatents, prediction: ModalPrediction, interval: ModalInterval) -> ModalLatents:
         raise NotImplementedError
 
+    def begin_trajectory(self, role: Any, schedule: ModalSchedule, start_index: int, device: Any) -> None:
+        """Reset adapter-owned solver state before integrating a trajectory."""
+
+        return None
+
     @abstractmethod
     def schedule(self, num_model_evaluations: int) -> ModalSchedule:
         raise NotImplementedError

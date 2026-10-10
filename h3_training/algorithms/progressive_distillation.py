@@ -266,6 +266,9 @@ class ProgressiveDistillation(TrainingMethod):
 
         state = latent
         last_prediction: Optional[ModalPrediction] = None
+        sample = state.video if state.video is not None else state.audio
+        assert sample is not None
+        self.adapter.begin_trajectory(role, schedule, int(start_index), sample.device)
         for offset in range(int(steps)):
             index = int(start_index) + offset
             sample = state.video if state.video is not None else state.audio
@@ -388,6 +391,7 @@ class ProgressiveDistillation(TrainingMethod):
         )
         start = self.adapter.add_noise(batch.latents, batch.noise, start_timestep)
         with torch.no_grad():
+            self.adapter.begin_trajectory(self.teacher, teacher_schedule, teacher_index, device)
             first_time = self._times(
                 batch_size,
                 teacher_schedule.video_sigmas[teacher_index] if teacher_schedule.video_sigmas else None,
@@ -414,6 +418,7 @@ class ProgressiveDistillation(TrainingMethod):
                 second_prediction,
                 self._interval(teacher_schedule.video_sigmas, teacher_schedule.audio_sigmas, teacher_index + 1),
             )
+        self.adapter.begin_trajectory(self.student, student_schedule, outer, device)
         student_prediction = self.adapter.predict(self.student, start, start_timestep, batch.conditioning)
         endpoint = self.adapter.scheduler_step(
             self.student,
