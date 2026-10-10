@@ -80,6 +80,12 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         # progressive-distillation algorithm creates independent teacher and
         # student trajectories, so each role needs a fresh scheduler context.
         self._trajectory_schedulers: dict[int, tuple[Any, int]] = {}
+        # A multistep scheduler is history-dependent.  The training method
+        # must replay the prefix of the real trajectory instead of treating
+        # every sigma interval as an independent Euler-like transition.
+        self.native_trajectory_training = callable(getattr(scheduler, "set_timesteps", None)) and callable(
+            getattr(scheduler, "step", None)
+        )
 
     @staticmethod
     def _sigma(timestep: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:

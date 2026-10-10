@@ -383,46 +383,122 @@ class ProgressiveDistillation(TrainingMethod):
         sample = batch.latents.video if batch.latents.video is not None else batch.latents.audio
         batch_size = sample.shape[0]
         device = sample.device
-        start_timestep = self._times(
-            batch_size,
-            student_schedule.video_sigmas[outer] if student_schedule.video_sigmas else None,
-            student_schedule.audio_sigmas[outer] if student_schedule.audio_sigmas else None,
-            device,
-        )
-        start = self.adapter.add_noise(batch.latents, batch.noise, start_timestep)
-        with torch.no_grad():
-            self.adapter.begin_trajectory(self.teacher, teacher_schedule, teacher_index, device)
-            first_time = self._times(
+        native_trajectory = bool(getattr(self.adapter, "native_trajectory_training", False))
+        if native_trajectory and self.config.rollout_steps > 0:
+            raise TrainingFailure(
+                "invalid_training_config",
+                "native multistep trajectory training does not support rollout_steps yet",
+            )
+        if native_trajectory:
+            # UniPC is history-dependent.  Start both roles at the native
+            # noise endpoint and replay the prefix so the multistep history
+            # at `outer` matches the real Wan inference loop.  Prefixes are
+            # deliberately no-grad: only the current Student prediction is
+            # optimized, while prior state/history remains an exact detached
+            # solver context without retaining 1B-model activations.
+            initial_time = self._times(
                 batch_size,
-                teacher_schedule.video_sigmas[teacher_index] if teacher_schedule.video_sigmas else None,
-                teacher_schedule.audio_sigmas[teacher_index] if teacher_schedule.audio_sigmas else None,
+                student_schedule.video_sigmas[0] if student_schedule.video_sigmas else None,
+                student_schedule.audio_sigmas[0] if student_schedule.audio_sigmas else None,
                 device,
             )
-            first_prediction = self.adapter.predict(self.teacher, start, first_time, batch.conditioning)
-            middle = self.adapter.scheduler_step(
-                self.teacher,
-                start,
-                first_prediction,
-                self._interval(teacher_schedule.video_sigmas, teacher_schedule.audio_sigmas, teacher_index),
-            )
-            second_time = self._times(
+            trajectory_start = self.adapter.add_noise(batch.latents, batch.noise, initial_time)
+            with torch.no_grad():
+                self.adapter.begin_trajectory(self.teacher, teacher_schedule, 0, device)
+                teacher_state = trajectory_start
+                teacher_velocity_target = None
+                for index in range(teacher_index + 2):
+                    teacher_sample = teacher_state.video if teacher_state.video is not None else teacher_state.audio
+                    assert teacher_sample is not None
+                    teacher_time = self._times(
+                        teacher_sample.shape[0],
+                        teacher_schedule.video_sigmas[index] if teacher_schedule.video_sigmas else None,
+                        teacher_schedule.audio_sigmas[index] if teacher_schedule.audio_sigmas else None,
+                        device,
+                    )
+                    teacher_prediction = self.adapter.predict(
+                        self.teacher, teacher_state, teacher_time, batch.conditioning
+                    )
+                    if index == teacher_index:
+                        teacher_velocity_target = teacher_prediction
+                    teacher_state = self.adapter.scheduler_step(
+                        self.teacher,
+                        teacher_state,
+                        teacher_prediction,
+                        self._interval(teacher_schedule.video_sigmas, teacher_schedule.audio_sigmas, index),
+                    )
+                if teacher_velocity_target is None:
+                    raise TrainingFailure("invalid_training_config", "native Teacher trajectory missed current interval")
+                target = teacher_state
+            self.adapter.begin_trajectory(self.student, student_schedule, 0, device)
+            student_input = trajectory_start
+            with torch.no_grad():
+                for index in range(outer):
+                    student_sample = student_input.video if student_input.video is not None else student_input.audio
+                    assert student_sample is not None
+                    prefix_time = self._times(
+                        student_sample.shape[0],
+                        student_schedule.video_sigmas[index] if student_schedule.video_sigmas else None,
+                        student_schedule.audio_sigmas[index] if student_schedule.audio_sigmas else None,
+                        device,
+                    )
+                    prefix_prediction = self.adapter.predict(
+                        self.student, student_input, prefix_time, batch.conditioning
+                    )
+                    student_input = self.adapter.scheduler_step(
+                        self.student,
+                        student_input,
+                        prefix_prediction,
+                        self._interval(student_schedule.video_sigmas, student_schedule.audio_sigmas, index),
+                    )
+            student_timestep = self._times(
                 batch_size,
-                teacher_schedule.video_sigmas[teacher_index + 1] if teacher_schedule.video_sigmas else None,
-                teacher_schedule.audio_sigmas[teacher_index + 1] if teacher_schedule.audio_sigmas else None,
+                student_schedule.video_sigmas[outer] if student_schedule.video_sigmas else None,
+                student_schedule.audio_sigmas[outer] if student_schedule.audio_sigmas else None,
                 device,
             )
-            second_prediction = self.adapter.predict(self.teacher, middle, second_time, batch.conditioning)
-            target = self.adapter.scheduler_step(
-                self.teacher,
-                middle,
-                second_prediction,
-                self._interval(teacher_schedule.video_sigmas, teacher_schedule.audio_sigmas, teacher_index + 1),
+        else:
+            student_timestep = self._times(
+                batch_size,
+                student_schedule.video_sigmas[outer] if student_schedule.video_sigmas else None,
+                student_schedule.audio_sigmas[outer] if student_schedule.audio_sigmas else None,
+                device,
             )
-        self.adapter.begin_trajectory(self.student, student_schedule, outer, device)
-        student_prediction = self.adapter.predict(self.student, start, start_timestep, batch.conditioning)
+            student_input = self.adapter.add_noise(batch.latents, batch.noise, student_timestep)
+            with torch.no_grad():
+                self.adapter.begin_trajectory(self.teacher, teacher_schedule, teacher_index, device)
+                first_time = self._times(
+                    batch_size,
+                    teacher_schedule.video_sigmas[teacher_index] if teacher_schedule.video_sigmas else None,
+                    teacher_schedule.audio_sigmas[teacher_index] if teacher_schedule.audio_sigmas else None,
+                    device,
+                )
+                first_prediction = self.adapter.predict(self.teacher, student_input, first_time, batch.conditioning)
+                teacher_velocity_target = first_prediction
+                middle = self.adapter.scheduler_step(
+                    self.teacher,
+                    student_input,
+                    first_prediction,
+                    self._interval(teacher_schedule.video_sigmas, teacher_schedule.audio_sigmas, teacher_index),
+                )
+                second_time = self._times(
+                    batch_size,
+                    teacher_schedule.video_sigmas[teacher_index + 1] if teacher_schedule.video_sigmas else None,
+                    teacher_schedule.audio_sigmas[teacher_index + 1] if teacher_schedule.audio_sigmas else None,
+                    device,
+                )
+                second_prediction = self.adapter.predict(self.teacher, middle, second_time, batch.conditioning)
+                target = self.adapter.scheduler_step(
+                    self.teacher,
+                    middle,
+                    second_prediction,
+                    self._interval(teacher_schedule.video_sigmas, teacher_schedule.audio_sigmas, teacher_index + 1),
+                )
+            self.adapter.begin_trajectory(self.student, student_schedule, outer, device)
+        student_prediction = self.adapter.predict(self.student, student_input, student_timestep, batch.conditioning)
         endpoint = self.adapter.scheduler_step(
             self.student,
-            start,
+            student_input,
             student_prediction,
             self._interval(student_schedule.video_sigmas, student_schedule.audio_sigmas, outer),
         )
@@ -445,12 +521,12 @@ class ProgressiveDistillation(TrainingMethod):
             losses.append(weight * value)
         velocity_loss = self._mse(
             student_prediction,
-            ModalLatents(video=first_prediction.video, audio=first_prediction.audio),
+            ModalLatents(video=teacher_velocity_target.video, audio=teacher_velocity_target.audio),
             self.config.video_weight,
             self.config.audio_weight,
         )
         modality_losses["velocity_loss"] = velocity_loss
-        clean_anchor = self.adapter.prediction_to_clean(start, student_prediction, start_timestep)
+        clean_anchor = self.adapter.prediction_to_clean(student_input, student_prediction, student_timestep)
         clean_anchor_loss = self._mse(
             clean_anchor,
             ModalLatents(video=batch.latents.video, audio=batch.latents.audio),
@@ -466,7 +542,7 @@ class ProgressiveDistillation(TrainingMethod):
         modality_losses["clean_loss"] = clean_anchor_loss
         rollout_endpoint_loss, rollout_clean_loss, effective_rollout_steps = self._rollout_losses(
             batch,
-            start,
+            student_input,
             outer,
             iteration,
         )

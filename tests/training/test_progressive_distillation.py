@@ -89,6 +89,16 @@ def test_progressive_distillation_exposes_direct_velocity_alignment_loss():
         assert torch.isfinite(output.losses[name])
 
 
+def test_native_trajectory_mode_replays_prefix_before_current_interval():
+    method, batches = fixture()
+    method.adapter.native_trajectory_training = True
+    method.prepare()
+    batch = method.prepare_batch(batches[0], torch.Generator().manual_seed(13))
+    output = method.training_step(batch, iteration=2)
+    assert torch.isfinite(output.losses["total_loss"])
+    assert output.metrics["interval_index"] == 1.0
+
+
 def test_p1_loss_components_are_separately_observable_and_rollout_is_additive():
     method, batches = fixture()
     method.config = replace(
