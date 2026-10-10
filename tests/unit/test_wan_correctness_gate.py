@@ -5,6 +5,7 @@ import pytest
 
 from harness4h3.student.wan_campaign import candidate_decision
 from tools.wan_vllm_campaign import correctness_gate_decision, validate_correctness_gate
+from h3_training.wan_native_gate import evaluate_native_promotion
 
 
 def test_pending_correctness_gate_rejects_candidate_before_quality_logic():
@@ -65,3 +66,44 @@ def test_passed_correctness_gate_freezes_configured_legacy_r2_parent(tmp_path):
         correctness_gate=gate,
     )
     assert decision == {"accepted": False, "reason": "legacy_r2_frozen"}
+
+
+def test_native_pure_color_case_vetoes_promotion(tmp_path):
+    result = evaluate_native_promotion(
+        {"quality_score": 0.66, "visual_cases": [{"passed": False, "reason": "pure_color_block"}], "nfe": 192, "pure_seconds": 8.0, "peak_vram_gib": 14.0},
+        stage="F3",
+        base_wan32_quality=0.6633,
+        frozen_r2_quality=0.6552,
+        record_valid=True,
+        scheduler_parity_ok=True,
+        failure_memory_path=tmp_path / "failure-memory.jsonl",
+    )
+    assert result["all_visual_pass"] is False
+    assert result["promotion_allowed"] is False
+    assert "pure_color_block" in result["failure_memory"][0]["reason"]
+    assert (tmp_path / "failure-memory.jsonl").read_text(encoding="utf-8").count("pure_color_block") == 1
+
+
+def test_native_f3_requires_quality_and_frozen_r2_margin():
+    passing = evaluate_native_promotion(
+        {"quality_score": 0.660, "visual_cases": [{"passed": True}], "nfe": 192, "pure_seconds": 8.0, "peak_vram_gib": 14.0},
+        stage="F3", base_wan32_quality=0.6633, frozen_r2_quality=0.6552,
+        record_valid=True, scheduler_parity_ok=True,
+    )
+    failing = evaluate_native_promotion(
+        {"quality_score": 0.657, "visual_cases": [{"passed": True}], "nfe": 192, "pure_seconds": 8.0, "peak_vram_gib": 14.0},
+        stage="F3", base_wan32_quality=0.6633, frozen_r2_quality=0.6552,
+        record_valid=True, scheduler_parity_ok=True,
+    )
+    assert passing["promotion_allowed"] is True
+    assert failing["promotion_allowed"] is False
+
+
+def test_native_partial_stage_never_enables_controller():
+    result = evaluate_native_promotion(
+        {"quality_score": 0.660, "visual_cases": [{"passed": True}], "nfe": 192, "pure_seconds": 8.0, "peak_vram_gib": 14.0},
+        stage="F2", base_wan32_quality=0.6633, frozen_r2_quality=0.6552,
+        record_valid=True, scheduler_parity_ok=True,
+    )
+    assert result["promotion_allowed"] is False
+    assert result["controller_search_enabled"] is False

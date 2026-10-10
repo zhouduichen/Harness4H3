@@ -1,0 +1,40 @@
+{
+  "cases": [
+    {
+      "case_id": "case_0001",
+      "cache_path": "/data/models/MiniMax-H3/harness4h3/cache-native-5s-24x1/00000000.pt",
+      "caption": "A red paper airplane glides slowly through a sunlit blue sky, smooth natural motion, cinematic.",
+      "seeds": [20261008, 20261009, 20261010]
+    },
+    {
+      "case_id": "case_0002",
+      "cache_path": "/data/models/MiniMax-H3/harness4h3/cache-native-5s-24x1/00000001.pt",
+      "caption": "A small orange cat walks across a quiet garden path with leaves moving in a gentle breeze, realistic.",
+      "seeds": [20261008, 20261009, 20261010]
+    },
+    {
+      "case_id": "case_0003",
+      "cache_path": "/data/models/MiniMax-H3/harness4h3/cache-native-5s-24x1/00000002.pt",
+      "caption": "A glass marble rolls across a wooden table toward a warm window, close-up cinematic camera movement.",
+      "seeds": [20261008, 20261009, 20261010]
+    },
+    {
+      "case_id": "case_0004",
+      "cache_path": "/data/models/MiniMax-H3/harness4h3/cache-native-5s-24x1/00000003.pt",
+      "caption": "A yellow train travels through green mountains under changing clouds, wide establishing shot, realistic.",
+      "seeds": [20261008, 20261009, 20261010]
+    }
+  ],
+  "digest": "0a5935cbeefcd12587cb96e940c58a32631c84aaaa69a98f8a64e0cb06fad33e",
+  "source_cache_dir": "/data/models/MiniMax-H3/harness4h3/cache-native-5s-24x1",
+  "unique_cache_items": 4,
+  "version": 1,
+  "cache_contract": {
+    "name": "native_5s",
+    "latent_frames": 24,
+    "decoded_frames": 81,
+    "width": 256,
+    "height": 256,
+    "require_real_teacher": true
+  }
+}
