@@ -71,3 +71,10 @@ def test_record_rejects_wrong_boundary_count():
     broken = replace(trajectory, teacher_states=trajectory.teacher_states[:-1])
     with pytest.raises(ValueError, match="teacher state boundary count"):
         broken.validate()
+
+
+def test_tensor_digest_supports_bfloat16_and_scalar_snapshots():
+    assert tensor_digest(torch.tensor(1, dtype=torch.int64)) == tensor_digest(torch.tensor(1, dtype=torch.int64))
+    assert tensor_digest(torch.tensor([1.0, 2.0], dtype=torch.bfloat16)) == tensor_digest(
+        torch.tensor([1.0, 2.0], dtype=torch.bfloat16)
+    )

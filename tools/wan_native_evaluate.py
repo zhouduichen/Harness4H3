@@ -65,6 +65,30 @@ def main(argv: list[str] | None = None) -> int:
     record_valid = bool(config.get("trajectory_record_valid", False))
     if record_path:
         record_valid = record_valid or Path(str(record_path)).joinpath("trajectory-record.json").is_file()
+    required_artifacts = []
+    configured_artifacts = config.get("required_artifacts", [])
+    if isinstance(configured_artifacts, list):
+        for item in configured_artifacts:
+            if isinstance(item, Mapping):
+                artifact_path = Path(str(item.get("path", ""))).resolve()
+                required_artifacts.append(
+                    {
+                        "case_id": item.get("case_id", ""),
+                        "seed": item.get("seed", 0),
+                        "path": str(artifact_path),
+                        "present": artifact_path.is_file(),
+                        "reason": item.get("reason", "required_artifact_missing"),
+                    }
+                )
+            else:
+                artifact_path = Path(str(item)).resolve()
+                required_artifacts.append(
+                    {
+                        "path": str(artifact_path),
+                        "present": artifact_path.is_file(),
+                        "reason": "required_artifact_missing",
+                    }
+                )
     gate = evaluate_native_promotion(
         result,
         stage=stage,
@@ -82,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         scheduler_parity_ok=bool(config.get("scheduler_parity_ok", False)),
         expected_nfe=int(config.get("expected_nfe", 192)),
         failure_memory_path=args.failure_memory or args.output.resolve() / "failure-memory.jsonl",
+        required_artifacts=required_artifacts,
     )
     result = {**dict(result), "native_promotion": gate, "promotion_allowed": gate["promotion_allowed"]}
     args.output.resolve().mkdir(parents=True, exist_ok=True)

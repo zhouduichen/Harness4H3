@@ -25,7 +25,11 @@ def tensor_digest(value: torch.Tensor) -> str:
         raise TypeError("trajectory digest values must be torch.Tensor instances")
     canonical = value.detach().to(device="cpu").contiguous()
     header = f"{canonical.dtype}|{tuple(canonical.shape)}|".encode("utf-8")
-    return hashlib.sha256(header + canonical.numpy().tobytes(order="C")).hexdigest()
+    # NumPy has no bfloat16 dtype bridge on the supported PyTorch versions.
+    # Hash the contiguous storage bytes directly so bf16 digests remain exact
+    # and do not silently change through a float32 conversion.
+    raw_bytes = canonical.reshape(-1).view(torch.uint8).numpy().tobytes(order="C")
+    return hashlib.sha256(header + raw_bytes).hexdigest()
 
 
 def _snapshot_digest(value: Any) -> str:

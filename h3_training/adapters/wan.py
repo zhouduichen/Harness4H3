@@ -86,6 +86,11 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         self.native_trajectory_training = callable(getattr(scheduler, "set_timesteps", None)) and callable(
             getattr(scheduler, "step", None)
         )
+        # Native Wan progressive distillation evaluates all coarse intervals
+        # against one immutable 32-step record.  Let the algorithm checkpoint
+        # each trainable Transformer call so the full 32->16 target fits on a
+        # 48-GB card without changing the scheduler math.
+        self.activation_checkpoint_native = bool(self.native_trajectory_training)
 
     @staticmethod
     def _sigma(timestep: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:

@@ -107,3 +107,14 @@ def test_native_partial_stage_never_enables_controller():
     )
     assert result["promotion_allowed"] is False
     assert result["controller_search_enabled"] is False
+
+
+def test_native_f3_requires_p0_artifacts():
+    result = evaluate_native_promotion(
+        {"quality_score": 0.660, "visual_cases": [{"passed": True}], "nfe": 192, "pure_seconds": 8.0, "peak_vram_gib": 14.0},
+        stage="F3", base_wan32_quality=0.6633, frozen_r2_quality=0.6552,
+        record_valid=True, scheduler_parity_ok=True,
+        required_artifacts=[{"path": "missing-h3-rgb.mp4", "present": False}],
+    )
+    assert result["promotion_allowed"] is False
+    assert result["failure_memory"][0]["reason"] == "required_artifact_missing"

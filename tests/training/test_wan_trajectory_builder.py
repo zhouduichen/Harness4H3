@@ -9,6 +9,7 @@ from h3_training.wan_trajectory_builder import build_wan_trajectory_record, repl
 class FakeNativeAdapter:
     def __init__(self):
         self.index = 0
+        self.prediction_coordinates = []
 
     def schedule(self, nfe):
         return ModalSchedule(video_sigmas=tuple(float(nfe - i) / nfe for i in range(nfe)) + (0.0,))
@@ -31,6 +32,8 @@ class FakeNativeAdapter:
 
     def predict(self, role, noisy, timestep, conditioning):
         assert noisy.video is not None
+        assert timestep.video is not None
+        self.prediction_coordinates.extend(float(value) for value in timestep.video.reshape(-1))
         return ModalPrediction(video=torch.ones_like(noisy.video) * 0.125)
 
     def scheduler_step(self, role, latent, prediction, interval):
@@ -91,3 +94,14 @@ def test_builder_replay_matches_record(tmp_path):
         adapter=adapter, teacher_role=role, conditioning=conditioning, trajectory=trajectory
     )
     assert all(torch.equal(left, right) for left, right in zip(replay, trajectory.teacher_states))
+
+
+def test_builder_passes_sigma_coordinates_to_adapter(tmp_path):
+    adapter, role, clean, conditioning, cache, teacher = components(tmp_path)
+    build_wan_trajectory_record(
+        adapter=adapter, teacher_role=role, clean=clean, conditioning=conditioning,
+        cache_item=cache, teacher_checkpoint=teacher, output_dir=None, seed=20261008,
+        source_nfe=4, target_nfe=2,
+    )
+    assert adapter.prediction_coordinates
+    assert all(0.0 <= value <= 1.0 for value in adapter.prediction_coordinates)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -106,8 +107,13 @@ def build_wan_trajectory_record(
     teacher_predictions: list[torch.Tensor] = []
     teacher_snapshots = [adapter.capture_native_scheduler_state(teacher_role)]
     for index, (current_sigma, next_sigma) in enumerate(zip(source_sigmas, source_sigmas[1:])):
-        timestep = ModalTimesteps(video=_batch_timestep(source_timesteps[index], state.video))
-        prediction = adapter.predict(teacher_role, state, timestep, conditioning)
+        # The shared adapter API receives sigma coordinates and performs the
+        # exact native sigma->timestep lookup internally.  source_timesteps
+        # are persisted as audit metadata only; passing 999/989/... here would
+        # make the adapter interpret them as sigmas and select the wrong model
+        # timestep.
+        sigma_timestep = ModalTimesteps(video=_batch_timestep(current_sigma, state.video))
+        prediction = adapter.predict(teacher_role, state, sigma_timestep, conditioning)
         if prediction.video is None:
             raise ValueError("native Wan Teacher returned no video prediction")
         teacher_predictions.append(prediction.video.detach().cpu().contiguous())
@@ -160,7 +166,34 @@ def build_wan_trajectory_record(
     )
     trajectory.validate()
     if output_dir is not None:
-        trajectory.save(Path(output_dir))
+        target_dir = Path(output_dir)
+        trajectory.save(target_dir)
+        replayed = replay_teacher_from_record(
+            adapter=adapter,
+            teacher_role=teacher_role,
+            conditioning=conditioning,
+            trajectory=trajectory,
+        )
+        replay_errors = [
+            float((actual.float() - expected.float()).abs().max())
+            for actual, expected in zip(replayed, trajectory.teacher_states)
+        ]
+        replay_audit = {
+            "record_digest": trajectory.metadata.tensor_digest,
+            "boundary_count": len(replay_errors),
+            "max_abs_error": max(replay_errors),
+            "mean_boundary_max_abs_error": sum(replay_errors) / len(replay_errors),
+            "tolerance": 1e-4,
+            "passed": max(replay_errors) <= 1e-4,
+        }
+        (target_dir / "trajectory-replay-audit.json").write_text(
+            json.dumps(replay_audit, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        if not replay_audit["passed"]:
+            raise ValueError(
+                "native trajectory replay parity failed: max_abs_error=%s" % replay_audit["max_abs_error"]
+            )
     return trajectory
 
 
@@ -193,7 +226,7 @@ def replay_teacher_from_record(
         prediction = adapter.predict(
             teacher_role,
             state,
-            ModalTimesteps(video=_batch_timestep(trajectory.metadata.source_timesteps[index], state.video)),
+            ModalTimesteps(video=_batch_timestep(trajectory.metadata.source_sigmas[index], state.video)),
             conditioning,
         )
         state = adapter.scheduler_step(

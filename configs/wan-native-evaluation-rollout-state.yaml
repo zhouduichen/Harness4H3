@@ -1,0 +1,38 @@
+schema_version: 1
+
+wan_eval:
+  wan_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-1.3b-paper16.remote.yaml
+  evaluation_manifest: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/evaluation-manifest.wan-5s-native-rollout-state.json
+  clip_model_path: /data/models/clip-vit-large-patch14-336
+  continuation_contract: 5s
+  device: cuda:0
+  max_cases: 4
+  seed_count: 3
+  stage: F3
+  expected_nfe: 192
+  base_wan32_quality: 0.6633350338532843
+  frozen_r2_quality: 0.6552734404647101
+  trajectory_record: /data/models/MiniMax-H3/harness4h3/wan-native-rollout-state-f1-20261010/seed-20261008/f1-record-audited/trajectory-record
+  trajectory_record_valid: true
+  scheduler_parity_ok: true
+  required_artifacts:
+    - path: /data/models/MiniMax-H3/harness4h3/p0-native-correctness-20261010/p0-correctness.json
+      reason: p0_correctness_bundle_missing
+    - path: /data/models/MiniMax-H3/harness4h3/p0-native-correctness-20261010/evidence/case_0001/seed_20261008/teacher-h3-rgb.mp4
+      reason: h3_rgb_export_missing
+    - path: /data/models/MiniMax-H3/harness4h3/p0-native-correctness-20261010/evidence/case_0001/seed_20261008/teacher-wan-vae-reconstruction.mp4
+      reason: wan_vae_reconstruction_missing
+    - path: /data/models/MiniMax-H3/harness4h3/p0-native-correctness-20261010/evidence/case_0001/seed_20261008/teacher-wan-vae-latent.pt
+      reason: wan_vae_latent_missing
+    - path: /data/models/MiniMax-H3/harness4h3/p0-native-correctness-20261010/evidence/case_0001/seed_20261008/teacher-latent-stats.json
+      reason: latent_stats_missing
+    - path: /data/models/MiniMax-H3/harness4h3/wan-native-rollout-state-f1-20261010/seed-20261008/f1-record-audited/trajectory-record/trajectory-replay-audit.json
+      reason: trajectory_replay_audit_missing
+  visual_quality_gate:
+    enabled: true
+    version: visual-structure-v1
+    min_spatial_gradient: 0.30
+    min_laplacian_std: 1.8
+    min_block_variance: 12.0
+    min_frame_difference: 0.01
+    max_low_texture_frame_ratio: 0.25

@@ -260,6 +260,37 @@ class ProgressiveDistillation(TrainingMethod):
             else None,
         )
 
+    def _native_student_prediction(
+        self,
+        noisy: ModalLatents,
+        timestep: ModalTimesteps,
+        conditioning,
+    ) -> ModalPrediction:
+        """Run one native Student prediction with activation checkpointing when supported."""
+
+        if not getattr(self.adapter, "activation_checkpoint_native", False):
+            return self.adapter.predict(self.student, noisy, timestep, conditioning)
+        if noisy.video is None:
+            raise TrainingFailure("invalid_training_config", "native Wan Student requires video latents")
+        # Sixteen independent Wan activations do not fit beside the 1.3B
+        # Student, optimizer state, and frozen trajectory Teacher on a 48-GB
+        # L40.  Non-reentrant checkpointing keeps the native solver graph but
+        # recomputes each Transformer call during backward instead of retaining
+        # all 16 activation sets on the GPU.
+        from torch.utils.checkpoint import checkpoint
+
+        dummy = noisy.video.new_zeros((), requires_grad=True)
+
+        def forward(_dummy: torch.Tensor) -> torch.Tensor:
+            prediction = self.adapter.predict(self.student, noisy, timestep, conditioning)
+            if prediction.video is None:
+                raise TrainingFailure("invalid_training_config", "native Wan Student returned no video prediction")
+            return prediction.video
+
+        return ModalPrediction(
+            video=checkpoint(forward, dummy, use_reentrant=False, preserve_rng_state=False)
+        )
+
     @staticmethod
     def _interval(video, audio, index: int, stride: int = 1) -> ModalInterval:
         return ModalInterval(
@@ -439,10 +470,16 @@ class ProgressiveDistillation(TrainingMethod):
         if interval_count <= 0:
             raise TrainingFailure("invalid_training_config", "native rollout-state selected no Teacher intervals")
 
+        # A billion-parameter Wan Student cannot retain 16 backward graphs in
+        # one optimizer step even with activation checkpointing.  Select one
+        # real coarse interval per step and cycle through the configured
+        # interval set; a 16-step F1/F2 run therefore covers the complete
+        # 32->16 trajectory while keeping the memory footprint bounded.
+        selected_index = (int(iteration) - 1) % interval_count
         endpoint_terms = []
         clean_terms = []
         flow_terms = []
-        for coarse_index in range(interval_count):
+        for coarse_index in (selected_index,):
             forced_video = record.teacher_states[2 * coarse_index].to(device=device, dtype=reference.dtype)
             forced_state = ModalLatents(video=forced_video)
             self.adapter.begin_trajectory(self.student, student_schedule, 0, device)
@@ -471,8 +508,8 @@ class ProgressiveDistillation(TrainingMethod):
             current_timestep = self._times(
                 reference.shape[0], student_schedule.video_sigmas[coarse_index], None, device
             )
-            current_prediction = self.adapter.predict(
-                self.student, forced_state, current_timestep, batch.conditioning
+            current_prediction = self._native_student_prediction(
+                forced_state, current_timestep, batch.conditioning
             )
             student_endpoint = self.adapter.scheduler_step(
                 self.student,
@@ -516,8 +553,8 @@ class ProgressiveDistillation(TrainingMethod):
                 rollout_timestep = self._times(
                     reference.shape[0], student_schedule.video_sigmas[rollout_index], None, device
                 )
-                rollout_prediction = self.adapter.predict(
-                    self.student, rollout_state, rollout_timestep, batch.conditioning
+                rollout_prediction = self._native_student_prediction(
+                    rollout_state, rollout_timestep, batch.conditioning
                 )
                 rollout_clean_hat = self.adapter.prediction_to_clean(
                     rollout_state, rollout_prediction, rollout_timestep
@@ -571,6 +608,7 @@ class ProgressiveDistillation(TrainingMethod):
                 "same_state_clean": float(clean_loss.detach().item()),
                 "same_state_flow": float(flow_loss.detach().item()),
                 "teacher_forced_intervals": float(interval_count),
+                "teacher_forced_interval_index": float(selected_index),
                 "rollout_steps": float(effective_rollout_steps),
                 "rollout_index": 0.0 if effective_rollout_steps else -1.0,
             },
