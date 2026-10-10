@@ -1,0 +1,17 @@
+schema_version: 1
+wan_eval:
+  wan_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-1.3b-paper16.remote.yaml
+  evaluation_manifest: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/evaluation-manifest.wan-5s-hardcase.json
+  clip_model_path: /data/models/clip-vit-large-patch14-336
+  continuation_contract: 5s
+  device: cuda:0
+  max_cases: 1
+  seed_count: 3
+  visual_quality_gate:
+    enabled: true
+    version: visual-structure-v1
+    min_spatial_gradient: 0.30
+    min_laplacian_std: 1.8
+    min_block_variance: 12.0
+    min_frame_difference: 0.01
+    max_low_texture_frame_ratio: 0.25
