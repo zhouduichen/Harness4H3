@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from h3_training.data.schema import Conditioning, ModalInterval, ModalLatents, ModalPrediction, ModalSchedule, ModalTimesteps
@@ -78,6 +79,7 @@ def test_builder_repeats_noise_and_boundaries(tmp_path):
     )
     assert first.metadata.noise_digest == second.metadata.noise_digest
     assert first.metadata.tensor_digest == second.metadata.tensor_digest
+    assert first.noise.dtype == torch.float32
     assert len(first.teacher_states) == 5
     assert len(first.teacher_predictions) == 4
     assert len(first.teacher_scheduler_snapshots) == 5
@@ -105,3 +107,21 @@ def test_builder_passes_sigma_coordinates_to_adapter(tmp_path):
     )
     assert adapter.prediction_coordinates
     assert all(0.0 <= value <= 1.0 for value in adapter.prediction_coordinates)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA RNG parity")
+def test_builder_noise_matches_wan_device_rng(tmp_path):
+    adapter, role, clean, conditioning, cache, teacher = components(tmp_path)
+    clean = ModalLatents(video=clean.video.cuda())
+    trajectory = build_wan_trajectory_record(
+        adapter=adapter, teacher_role=role, clean=clean, conditioning=conditioning,
+        cache_item=cache, teacher_checkpoint=teacher, output_dir=None, seed=20261008,
+        source_nfe=4, target_nfe=2,
+    )
+    expected = torch.randn(
+        clean.video.shape,
+        generator=torch.Generator(device="cuda").manual_seed(20261008),
+        device="cuda",
+        dtype=torch.float32,
+    ).cpu()
+    assert torch.equal(trajectory.noise, expected)

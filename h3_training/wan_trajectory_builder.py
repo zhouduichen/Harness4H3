@@ -94,9 +94,14 @@ def build_wan_trajectory_record(
         raise ValueError("adapter returned an invalid native sigma table")
     source_timesteps = _metadata_timetable(adapter, source_schedule)
     target_timesteps = _metadata_timetable(adapter, target_schedule)
-    generator = torch.Generator(device="cpu").manual_seed(int(seed))
-    noise = torch.randn(clean_video.shape, generator=generator, device="cpu", dtype=torch.float32)
-    noise = noise.to(device=clean_video.device, dtype=clean_video.dtype)
+    # Wan's production ``prepare_latents`` samples float32 noise on the
+    # inference device.  Use the same device-local RNG here so a fixed seed
+    # names the same initial latent in training and in the real 16-step
+    # sampler; a CPU generator produces a different Philox stream and makes
+    # single-sample overfit evidence invalid.  Keep the persisted artifact on
+    # CPU, but do the trajectory replay from the device-local float32 noise.
+    generator = torch.Generator(device=clean_video.device).manual_seed(int(seed))
+    noise = torch.randn(clean_video.shape, generator=generator, device=clean_video.device, dtype=torch.float32)
 
     adapter.begin_trajectory(teacher_role, source_schedule, 0, clean_video.device)
     initial_timestep = ModalTimesteps(video=_batch_timestep(source_sigmas[0], clean_video))
