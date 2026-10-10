@@ -9,6 +9,7 @@ from tools.wan_student_train_worker import (
     _configure_trainable_scope,
     _encode_training_prompt,
     _parse_devices,
+    _load_mapping,
     _trainable_parameter_probe,
     _training_cache_paths,
     _training_seed,
@@ -85,6 +86,16 @@ def test_training_prompt_is_normal_autograd_tensor():
     assert not negative_prompt_embeds.is_inference()
     assert prompt_embeds.requires_grad is False
     assert negative_prompt_embeds.requires_grad is False
+
+
+def test_native_rollout_state_config_selects_one_record_and_two_step_rollout():
+    raw = _load_mapping(Path("configs/wan-p1-native-rollout-state.yaml"))
+    assert raw["mode"] == "native_rollout_state"
+    assert raw["source_steps"] == 32
+    assert raw["target_steps"] == 16
+    assert raw["teacher_forced_intervals"] == 16
+    assert raw["rollout_steps"] == 2
+    assert raw["teacher_target_groups"] == 1
 
 
 def test_training_cache_paths_select_unique_captions(tmp_path: Path):

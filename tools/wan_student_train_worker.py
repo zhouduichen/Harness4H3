@@ -39,6 +39,7 @@ from harness4h3.student.wan_training import (
     sha256_path,
 )
 from h3_training.adapters.wan import WanEndpointTeacher, WanTrainingAdapter
+from h3_training.algorithms.base import ModelRole
 from h3_training.algorithms.dmd2 import DMD2, DMD2Config
 from h3_training.algorithms.progressive_distillation import (
     ProgressiveDistillation,
@@ -46,6 +47,8 @@ from h3_training.algorithms.progressive_distillation import (
     plan_binary_stages,
 )
 from h3_training.engine.trainer import TrainerConfig, TrainerEngine
+from h3_training.wan_trajectory import WanTrajectoryRecord, load_trajectory_tensors
+from h3_training.wan_trajectory_builder import build_wan_trajectory_record
 from harness4h3.student.wan_campaign import WanTrainingPolicy
 from h3_training.data.schema import Conditioning, ModalLatents, ModalTimesteps
 
@@ -482,6 +485,10 @@ def run(
     checkpoint_every_steps_override: int | None = None,
     dmd2_memory_admitted_override: bool | None = None,
     wan_dmd2_adapter_ready_override: bool | None = None,
+    mode_override: str | None = None,
+    teacher_forced_intervals_override: int | None = None,
+    trajectory_record_override: Path | None = None,
+    stage_name_override: str | None = None,
 ) -> Mapping[str, Any]:
     wan_config = Path(str(raw["wan_config"])).resolve()
     spec = _training_spec(raw, wan_config)
@@ -499,6 +506,19 @@ def run(
     method = str(method_override or raw.get("method", "progressive_distillation"))
     source_steps = int(source_steps_override if source_steps_override is not None else raw.get("source_steps", 32))
     target_steps = int(target_steps_override if target_steps_override is not None else raw.get("target_steps", 8))
+    mode = str(mode_override or raw.get("mode", "legacy")).strip()
+    teacher_forced_intervals = int(
+        teacher_forced_intervals_override
+        if teacher_forced_intervals_override is not None
+        else raw.get("teacher_forced_intervals", 0)
+    )
+    stage_name = str(stage_name_override or raw.get("stage", "unassigned")).strip()
+    if mode not in {"legacy", "native_rollout_state"}:
+        raise ValueError("unsupported Wan training mode: %s" % mode)
+    if teacher_forced_intervals < 0:
+        raise ValueError("teacher_forced_intervals must be non-negative")
+    if mode == "native_rollout_state" and (method != "progressive_distillation" or source_steps != 32 or target_steps != 16):
+        raise ValueError("native_rollout_state requires progressive_distillation source_steps=32 target_steps=16")
     rollout_steps = int(rollout_steps_override if rollout_steps_override is not None else raw.get("rollout_steps", 0))
     rollout_every = int(rollout_every_override if rollout_every_override is not None else raw.get("rollout_every", teacher_reuse_steps))
     rollout_endpoint_weight = float(
@@ -569,7 +589,15 @@ def run(
         else Path(output).resolve() / "training-checkpoint.pt"
     )
     checkpoint_evidence_path: Optional[Path] = None
-    policy_digest = _digest({"policy": asdict(policy), "initialization_mode": initialization_mode_override or raw.get("initialization_mode", "inherit")})
+    policy_digest = _digest(
+        {
+            "policy": asdict(policy),
+            "mode": mode,
+            "teacher_forced_intervals": teacher_forced_intervals,
+            "stage": stage_name,
+            "initialization_mode": initialization_mode_override or raw.get("initialization_mode", "inherit"),
+        }
+    )
     resumed_from_step = 0
     if policy.method == "dmd2" and (
         not dmd2_memory_admitted
@@ -688,6 +716,51 @@ def run(
         model_id=spec.model_id,
         guidance_scale=spec.guidance_scale,
     )
+    native_trajectory = None
+    trajectory_record_path: Optional[Path] = None
+    if mode == "native_rollout_state":
+        if len(training_batches) != 1:
+            raise ValueError("native_rollout_state requires exactly one fixed Teacher video")
+        trajectory_record_path = Path(
+            trajectory_record_override
+            if trajectory_record_override is not None
+            else raw.get("trajectory_record", output / "trajectory-record")
+        ).resolve()
+        record_json = trajectory_record_path / "trajectory-record.json"
+        if record_json.is_file():
+            metadata = WanTrajectoryRecord.load(trajectory_record_path)
+            native_trajectory = load_trajectory_tensors(trajectory_record_path, metadata)
+        else:
+            batch_raw = training_batches[0]
+            clean_latent = batch_raw.get("wan_latent")
+            if not isinstance(clean_latent, torch.Tensor):
+                raise ValueError("native_rollout_state requires a Wan clean latent")
+            conditioning = Conditioning(
+                text=batch_raw["prompt_embeds"],
+                negative_text=batch_raw.get("negative_prompt_embeds"),
+                metadata={"prompt": str(batch_raw.get("prompt", "")), "model_id": spec.model_id},
+            )
+            teacher_role_for_record = ModelRole("teacher", wan_teacher_model, adapter, False)
+            teacher_source = spec.pretrained_path or raw["teacher_checkpoint"]
+            native_trajectory = build_wan_trajectory_record(
+                adapter=adapter,
+                teacher_role=teacher_role_for_record,
+                clean=ModalLatents(video=clean_latent),
+                conditioning=conditioning,
+                cache_item=cache_paths[0],
+                teacher_checkpoint=teacher_source,
+                output_dir=trajectory_record_path,
+                seed=int(raw.get("seed", 20261008)),
+                source_nfe=32,
+                target_nfe=16,
+            )
+        native_trajectory.validate()
+        fixed_noise = native_trajectory.noise.to(
+            device=components.device,
+            dtype=training_batches[0]["wan_latent"].dtype,
+        )
+        training_batches[0]["fixed_noise"] = fixed_noise
+        training_batches[0]["trajectory_record"] = str(trajectory_record_path)
     source_schedule = adapter.schedule_provider(policy.source_steps)
     source_schedule_digest = _digest(source_schedule.to_dict())
     endpoint_teacher = wan_teacher_model
@@ -712,6 +785,8 @@ def run(
                 adapter,
                 ProgressiveDistillationConfig(
                     stage=stage,
+                    mode=mode,
+                    teacher_forced_intervals=teacher_forced_intervals,
                     learning_rate=policy.learning_rate,
                     trainable_scope=policy.trainable_scope,
                     audio_weight=0.0,
@@ -725,6 +800,8 @@ def run(
                     fp32_optimizer_state=policy.fp32_optimizer_state,
                 ),
             )
+            if native_trajectory is not None:
+                stage_method.set_trajectory_record(native_trajectory)
             stage_checkpoint = _stage_checkpoint_path(training_checkpoint, stage_index)
             trainer = TrainerEngine(
                 TrainerConfig(
@@ -760,6 +837,10 @@ def run(
                     "model_id": spec.model_id,
                     "guidance_scale": spec.guidance_scale,
                     "algorithm_name": policy.method,
+                    "training_mode": mode,
+                    "stage_name": stage_name,
+                    "trajectory_record": str(trajectory_record_path) if trajectory_record_path else "",
+                    "trajectory_digest": native_trajectory.metadata.tensor_digest if native_trajectory else "",
                     "teacher_nfe": stage.teacher_nfe,
                     "student_nfe": stage.student_nfe,
                     "stage_index": stage_index,
@@ -787,6 +868,10 @@ def run(
                     "stage_index": stage_index,
                     "teacher_nfe": stage.teacher_nfe,
                     "student_nfe": stage.student_nfe,
+                    "training_mode": mode,
+                    "stage_name": stage_name,
+                    "trajectory_record": str(trajectory_record_path) if trajectory_record_path else "",
+                    "trajectory_digest": native_trajectory.metadata.tensor_digest if native_trajectory else "",
                     "stage_train_steps": stage_budgets[stage_index],
                     "stage_optimizer_steps": optimizer_steps,
                     "stage_child": str(stage_path),
@@ -897,6 +982,10 @@ def run(
             "parent_checkpoint": str(parent_checkpoint) if parent_checkpoint else "",
             "parent_checkpoint_sha256": parent_checkpoint_digest or "",
             "teacher_checkpoint_sha256": teacher_digest,
+            "training_mode": mode,
+            "stage_name": stage_name,
+            "trajectory_record": str(trajectory_record_path) if trajectory_record_path else "",
+            "trajectory_digest": native_trajectory.metadata.tensor_digest if native_trajectory else "",
             "wan_teacher_mode": wan_teacher_mode,
             "wan_teacher_checkpoint_sha256": wan_teacher_digest or "",
             "teacher_forward_count": teacher_forward_count,
@@ -958,8 +1047,13 @@ def run(
         "student_checkpoint_sha256": checkpoint_digest,
         "student_checkpoint": str(checkpoint_path),
         "optimizer_steps": total_optimizer_steps,
+        "teacher_forced_intervals": teacher_forced_intervals,
         "algorithm_name": policy.method,
         "algorithm_path": algorithm_path,
+        "training_mode": mode,
+        "stage_name": stage_name,
+        "trajectory_record": str(trajectory_record_path) if trajectory_record_path else "",
+        "trajectory_digest": native_trajectory.metadata.tensor_digest if native_trajectory else "",
         "teacher_reuse_steps": teacher_reuse_steps,
         "teacher_target_groups": teacher_groups,
         "learning_rate": learning_rate,
@@ -1015,6 +1109,7 @@ def run(
         "training_checkpoint_sha256": sha256_path(checkpoint_evidence_path) if checkpoint_evidence_path else "",
         "checkpoint_every_steps": checkpoint_every_steps,
         "policy_digest": policy_digest,
+        "teacher_forced_intervals": teacher_forced_intervals,
         "resumed_from_step": resumed_from_step,
         "resume_config_digest": resume_config_digest or "",
         "dmd2_memory_admitted": dmd2_memory_admitted,
@@ -1057,6 +1152,10 @@ def main(argv=None) -> int:
     parser.add_argument("--checkpoint-every-steps", type=int, default=None)
     parser.add_argument("--dmd2-memory-admitted", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--wan-dmd2-adapter-ready", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--mode", default=None)
+    parser.add_argument("--teacher-forced-intervals", type=int, default=None)
+    parser.add_argument("--trajectory-record", type=Path, default=None)
+    parser.add_argument("--stage", dest="stage_name", default=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -1090,6 +1189,10 @@ def main(argv=None) -> int:
             checkpoint_every_steps_override=args.checkpoint_every_steps,
             dmd2_memory_admitted_override=args.dmd2_memory_admitted,
             wan_dmd2_adapter_ready_override=args.wan_dmd2_adapter_ready,
+            mode_override=args.mode,
+            teacher_forced_intervals_override=args.teacher_forced_intervals,
+            trajectory_record_override=args.trajectory_record,
+            stage_name_override=args.stage_name,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
