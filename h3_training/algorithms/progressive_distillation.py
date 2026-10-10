@@ -404,10 +404,10 @@ class ProgressiveDistillation(TrainingMethod):
                 "invalid_training_config",
                 "native_rollout_state requires an adapter with a native scheduler",
             )
-        if self.config.rollout_steps > 0:
+        if self.config.rollout_steps > self.config.stage.student_nfe:
             raise TrainingFailure(
                 "invalid_training_config",
-                "native rollout-state free-running supervision is enabled in the next stage",
+                "rollout_steps cannot exceed the Student target intervals",
             )
         record.validate()
         if record.metadata.target_nfe != self.config.stage.student_nfe:
@@ -494,10 +494,68 @@ class ProgressiveDistillation(TrainingMethod):
         endpoint_loss = torch.stack(endpoint_terms).mean()
         clean_loss = torch.stack(clean_terms).mean()
         flow_loss = torch.stack(flow_terms).mean()
+        zero = reference.new_zeros((), dtype=torch.float32)
+        rollout_endpoint_loss = zero
+        rollout_clean_loss = zero
+        effective_rollout_steps = 0
+        if self.config.rollout_steps > 0 and ((iteration - 1) % self.config.rollout_every) == 0:
+            effective_rollout_steps = min(self.config.rollout_steps, self.config.stage.student_nfe)
+            rollout_clean_state = ModalLatents(video=record_clean)
+            rollout_noise = ModalLatents(
+                video=record.noise.to(device=device, dtype=reference.dtype)
+            )
+            rollout_state = self.adapter.add_noise(
+                rollout_clean_state,
+                rollout_noise,
+                self._times(reference.shape[0], student_schedule.video_sigmas[0], None, device),
+            )
+            self.adapter.begin_trajectory(self.student, student_schedule, 0, device)
+            endpoint_terms_rollout = []
+            clean_terms_rollout = []
+            for rollout_index in range(effective_rollout_steps):
+                rollout_timestep = self._times(
+                    reference.shape[0], student_schedule.video_sigmas[rollout_index], None, device
+                )
+                rollout_prediction = self.adapter.predict(
+                    self.student, rollout_state, rollout_timestep, batch.conditioning
+                )
+                rollout_clean_hat = self.adapter.prediction_to_clean(
+                    rollout_state, rollout_prediction, rollout_timestep
+                )
+                rollout_state = self.adapter.scheduler_step(
+                    self.student,
+                    rollout_state,
+                    rollout_prediction,
+                    self._interval(student_schedule.video_sigmas, None, rollout_index),
+                )
+                endpoint_terms_rollout.append(
+                    self._mse(
+                        rollout_state,
+                        ModalLatents(
+                            video=record.teacher_states[2 * (rollout_index + 1)].to(
+                                device=device, dtype=reference.dtype
+                            )
+                        ),
+                        self.config.video_weight,
+                        0.0,
+                    )
+                )
+                clean_terms_rollout.append(
+                    self._mse(
+                        rollout_clean_hat,
+                        ModalLatents(video=record_clean),
+                        self.config.video_weight,
+                        0.0,
+                    )
+                )
+            rollout_endpoint_loss = torch.stack(endpoint_terms_rollout).mean()
+            rollout_clean_loss = torch.stack(clean_terms_rollout).mean()
         total = (
             self.config.endpoint_weight * endpoint_loss
             + self.config.clean_anchor_weight * clean_loss
             + self.config.velocity_weight * flow_loss
+            + self.config.rollout_endpoint_weight * rollout_endpoint_loss
+            + self.config.rollout_clean_weight * rollout_clean_loss
         )
         return StepOutput(
             losses={
@@ -505,13 +563,16 @@ class ProgressiveDistillation(TrainingMethod):
                 "same_state_endpoint_loss": endpoint_loss,
                 "same_state_clean_loss": clean_loss,
                 "same_state_flow_loss": flow_loss,
+                "rollout_endpoint_loss": rollout_endpoint_loss,
+                "rollout_clean_loss": rollout_clean_loss,
             },
             metrics={
                 "same_state_endpoint": float(endpoint_loss.detach().item()),
                 "same_state_clean": float(clean_loss.detach().item()),
                 "same_state_flow": float(flow_loss.detach().item()),
                 "teacher_forced_intervals": float(interval_count),
-                "rollout_steps": 0.0,
+                "rollout_steps": float(effective_rollout_steps),
+                "rollout_index": 0.0 if effective_rollout_steps else -1.0,
             },
             detached={"trajectory_record": record.metadata.tensor_digest},
         )

@@ -156,6 +156,49 @@ def test_native_rollout_state_loss_backpropagates_to_student(tmp_path):
     assert torch.isfinite(method.student_model.weight.grad).all()
 
 
+def test_native_rollout_state_has_two_step_free_running_gradient(tmp_path):
+    method, _, batch = native_rollout_fixture(tmp_path, intervals=2)
+    method.config = replace(
+        method.config,
+        rollout_steps=2,
+        rollout_every=1,
+        rollout_endpoint_weight=1.0,
+        rollout_clean_weight=1.0,
+    )
+    output = method.training_step(batch, iteration=1)
+    assert output.metrics["rollout_steps"] == 2.0
+    assert output.losses["rollout_endpoint_loss"].requires_grad
+    assert output.losses["rollout_clean_loss"].requires_grad
+    output.losses["total_loss"].backward()
+    assert method.student_model.weight.grad is not None
+
+
+def test_native_rollout_state_rollout_uses_fixed_record_noise(tmp_path):
+    method, _, batch = native_rollout_fixture(tmp_path, intervals=2)
+    method.config = replace(
+        method.config,
+        rollout_steps=2,
+        rollout_endpoint_weight=1.0,
+        rollout_clean_weight=1.0,
+    )
+    first = method.training_step(batch, iteration=1)
+    second = method.training_step(batch, iteration=1)
+    assert first.metrics["rollout_steps"] == 2.0
+    assert first.losses["rollout_endpoint_loss"].item() == second.losses["rollout_endpoint_loss"].item()
+
+
+def test_native_rollout_state_rejects_horizon_above_target(tmp_path):
+    method, _, batch = native_rollout_fixture(tmp_path, intervals=2)
+    method.config = replace(
+        method.config,
+        rollout_steps=3,
+        rollout_endpoint_weight=1.0,
+        rollout_clean_weight=1.0,
+    )
+    with pytest.raises(TrainingFailure, match="rollout_steps"):
+        method.training_step(batch, iteration=1)
+
+
 def test_binary_stage_requires_two_to_one_nfe():
     with pytest.raises(ValueError, match="twice"):
         DistillationStage(teacher_nfe=12, student_nfe=8)
