@@ -173,10 +173,22 @@ class WanTrainingAdapter(DenoisingModelAdapter):
                 raise TrainingFailure("wan_conditioning_invalid", "Wan negative prompt encoder must return [B,S,D]")
             if negative_text.shape != text.shape:
                 raise TrainingFailure("wan_conditioning_invalid", "positive and negative prompt shapes differ")
-        # TrainerEngine's CPU generator is intentional: sampling on CPU and
-        # moving once gives deterministic batches on both CPU and CUDA hosts.
-        noise = torch.randn(clean.shape, generator=generator, device="cpu", dtype=torch.float32)
-        noise = noise.to(device=clean.device, dtype=clean.dtype)
+        # TrainerEngine's CPU generator is intentional for legacy callers:
+        # sampling on CPU and moving once gives deterministic batches on both
+        # CPU and CUDA hosts.  Native trajectory runs pass fixed_noise so the
+        # cached Teacher video maps to one stationary diffusion trajectory.
+        fixed_noise = raw.get("fixed_noise")
+        if fixed_noise is None:
+            noise = torch.randn(clean.shape, generator=generator, device="cpu", dtype=torch.float32)
+            noise = noise.to(device=clean.device, dtype=clean.dtype)
+        else:
+            noise = torch.as_tensor(fixed_noise, device=clean.device, dtype=clean.dtype).detach().clone()
+            if noise.shape != clean.shape:
+                raise TrainingFailure(
+                    "wan_noise_shape_invalid",
+                    "fixed noise shape %s does not match clean latent shape %s"
+                    % (tuple(noise.shape), tuple(clean.shape)),
+                )
         self._active_clean = clean.detach()
         sample_id = str(raw.get("sample_id", raw.get("id", "wan-sample")))
         return PreparedBatch(
@@ -333,6 +345,97 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         except Exception as exc:
             raise TrainingFailure("wan_scheduler_init_failed", "native scheduler setup failed: %s" % exc) from exc
         self._trajectory_schedulers[key] = (native, start)
+
+    @staticmethod
+    def _clone_scheduler_value(value: Any) -> Any:
+        if isinstance(value, torch.Tensor):
+            return value.detach().clone()
+        if isinstance(value, Mapping):
+            return {str(key): WanTrainingAdapter._clone_scheduler_value(item) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return tuple(WanTrainingAdapter._clone_scheduler_value(item) for item in value)
+        if isinstance(value, list):
+            return [WanTrainingAdapter._clone_scheduler_value(item) for item in value]
+        try:
+            return copy.deepcopy(value)
+        except Exception:
+            return value
+
+    @staticmethod
+    def _scheduler_metadata_value(value: Any) -> Any:
+        if isinstance(value, torch.Tensor):
+            cpu = value.detach().to(device="cpu")
+            if cpu.numel() <= 4096:
+                return cpu.reshape(-1).tolist()
+            return {"dtype": str(cpu.dtype), "shape": list(cpu.shape), "numel": cpu.numel()}
+        if isinstance(value, Mapping):
+            return {
+                str(key): WanTrainingAdapter._scheduler_metadata_value(item)
+                for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+            }
+        if isinstance(value, (tuple, list)):
+            return [WanTrainingAdapter._scheduler_metadata_value(item) for item in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return repr(value)
+
+    def capture_native_scheduler_state(self, role: ModelRole) -> dict[str, Any]:
+        """Capture only detached scheduler state, never the mutable object."""
+
+        context = self._trajectory_schedulers.get(id(role))
+        if context is None:
+            raise TrainingFailure("wan_scheduler_snapshot_missing", "native scheduler trajectory has not begun")
+        native, index = context
+        return {
+            "index": int(index),
+            "scheduler_class": type(native).__module__ + "." + type(native).__qualname__,
+            "state": self._clone_scheduler_value(native.__dict__),
+        }
+
+    def restore_native_scheduler_state(self, role: ModelRole, state: Mapping[str, Any]) -> None:
+        """Restore a snapshot into the role-owned scheduler instance."""
+
+        context = self._trajectory_schedulers.get(id(role))
+        if context is None:
+            raise TrainingFailure("wan_scheduler_snapshot_missing", "native scheduler trajectory has not begun")
+        if not isinstance(state, Mapping) or "state" not in state or "index" not in state:
+            raise TrainingFailure("wan_scheduler_snapshot_invalid", "native scheduler snapshot is incomplete")
+        native, _ = context
+        saved_class = str(state.get("scheduler_class", ""))
+        current_class = type(native).__module__ + "." + type(native).__qualname__
+        if saved_class and saved_class != current_class:
+            raise TrainingFailure("wan_scheduler_snapshot_invalid", "native scheduler class changed")
+        saved_state = state["state"]
+        if not isinstance(saved_state, Mapping):
+            raise TrainingFailure("wan_scheduler_snapshot_invalid", "native scheduler state is not a mapping")
+        native.__dict__.clear()
+        native.__dict__.update(self._clone_scheduler_value(saved_state))
+        self._trajectory_schedulers[id(role)] = (native, int(state["index"]))
+
+    def native_schedule_metadata(self, schedule: ModalSchedule) -> Mapping[str, Any]:
+        """Return JSON-safe native solver metadata for a trajectory record."""
+
+        sigmas = schedule.video_sigmas
+        if sigmas is None:
+            raise TrainingFailure("wan_scheduler_schedule_invalid", "native metadata requires a video schedule")
+        context = self._trajectory_schedulers.get(next(iter(self._trajectory_schedulers), -1))
+        native = context[0] if context is not None else self.scheduler
+        return {
+            "class": type(native).__module__ + "." + type(native).__qualname__,
+            "config": self._scheduler_metadata_value(getattr(native, "_internal_dict", getattr(native, "config", {}))),
+            "solver_order": self._scheduler_metadata_value(
+                getattr(getattr(native, "config", None), "solver_order", None)
+            ),
+            "flow_shift": self._scheduler_metadata_value(
+                getattr(getattr(native, "config", None), "flow_shift", None)
+            ),
+            "use_flow_sigmas": self._scheduler_metadata_value(
+                getattr(getattr(native, "config", None), "use_flow_sigmas", None)
+            ),
+            "predict_x0": self._scheduler_metadata_value(getattr(native, "predict_x0", None)),
+            "sigmas": [float(value) for value in sigmas],
+            "nfe": len(sigmas) - 1,
+        }
 
     def scheduler_step(
         self,

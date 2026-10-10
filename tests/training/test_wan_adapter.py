@@ -110,6 +110,36 @@ def test_wan_adapter_prepares_rgb_boundary_and_native_conditioning():
     assert batch.sample_ids == ("s0",)
 
 
+def test_wan_adapter_reuses_supplied_fixed_noise():
+    adapter = make_adapter()
+    fixed = torch.full((1, 3, 2, 2, 2), 0.25)
+    raw = {
+        "sample_id": "s0",
+        "prompt": "red train",
+        "frames": torch.zeros(2, 2, 2, 3),
+        "fixed_noise": fixed,
+    }
+    first = adapter.prepare_batch(raw, torch.Generator().manual_seed(1))
+    second = adapter.prepare_batch(raw, torch.Generator().manual_seed(2))
+    assert first.noise is not None and second.noise is not None
+    assert torch.equal(first.noise.video, fixed)
+    assert torch.equal(second.noise.video, fixed)
+
+
+def test_wan_adapter_rejects_fixed_noise_shape_mismatch():
+    adapter = make_adapter()
+    with pytest.raises(TrainingFailure, match="fixed noise shape"):
+        adapter.prepare_batch(
+            {
+                "sample_id": "s0",
+                "prompt": "red train",
+                "frames": torch.zeros(2, 2, 2, 3),
+                "fixed_noise": torch.zeros(1, 1, 2, 2, 2),
+            },
+            torch.Generator().manual_seed(1),
+        )
+
+
 def test_wan_adapter_forward_uses_native_transformer_role():
     adapter = make_adapter()
     batch = adapter.prepare_batch(
@@ -229,6 +259,41 @@ def test_wan_adapter_uses_fresh_native_scheduler_trajectory_when_available():
     prediction = ModalPrediction(video=torch.ones_like(latent.video))
     updated = adapter.scheduler_step(role, latent, prediction, ModalInterval(video=(0.75, 0.5)))
     assert torch.equal(updated.video, torch.full_like(latent.video, 10.5))
+
+
+def test_wan_adapter_native_scheduler_snapshot_restores_next_step():
+    adapter = WanTrainingAdapter(
+        transformer=FakeTransformer(),
+        scheduler=NativeScheduler(),
+        encode_frames=lambda frames: torch.as_tensor(frames).permute(3, 0, 1, 2).unsqueeze(0).contiguous(),
+        encode_prompt=lambda prompt: torch.ones(1, 2, 4),
+        schedule_provider=lambda _: WanSigmaSchedule(
+            mode="native",
+            sigmas=(1.0, 0.75, 0.5, 0.25, 0.0),
+            timesteps=(1000.0, 750.0, 500.0, 250.0),
+            num_train_timesteps=1000,
+            shift=3.0,
+        ),
+    )
+    role = ModelRole("student", adapter.transformer, adapter, True)
+    schedule = adapter.schedule(4)
+    adapter.begin_trajectory(role, schedule, 0, torch.device("cpu"))
+    snapshot = adapter.capture_native_scheduler_state(role)
+    latent = ModalLatents(video=torch.full((1, 1, 1, 1, 1), 0.5))
+    prediction = ModalPrediction(video=torch.ones_like(latent.video))
+    expected = adapter.scheduler_step(role, latent, prediction, ModalInterval(video=(1.0, 0.75)))
+    adapter.restore_native_scheduler_state(role, snapshot)
+    actual = adapter.scheduler_step(role, latent, prediction, ModalInterval(video=(1.0, 0.75)))
+    assert torch.equal(actual.video, expected.video)
+
+
+def test_wan_adapter_native_schedule_metadata_contains_solver_contract():
+    adapter = make_adapter()
+    schedule = adapter.schedule(4)
+    metadata = adapter.native_schedule_metadata(schedule)
+    assert metadata["nfe"] == 4
+    assert metadata["sigmas"] == list(schedule.video_sigmas)
+    assert "class" in metadata
 
 
 def test_wan_endpoint_teacher_matches_noise_minus_clean_for_nonzero_clean():
