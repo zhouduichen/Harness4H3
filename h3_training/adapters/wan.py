@@ -386,10 +386,26 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         if context is None:
             raise TrainingFailure("wan_scheduler_snapshot_missing", "native scheduler trajectory has not begun")
         native, index = context
+        mutable_names = (
+            "sigmas",
+            "timesteps",
+            "num_inference_steps",
+            "model_outputs",
+            "timestep_list",
+            "lower_order_nums",
+            "last_sample",
+            "_step_index",
+            "_begin_index",
+        )
+        scheduler_state = {
+            name: self._clone_scheduler_value(getattr(native, name))
+            for name in mutable_names
+            if hasattr(native, name)
+        }
         return {
             "index": int(index),
             "scheduler_class": type(native).__module__ + "." + type(native).__qualname__,
-            "state": self._clone_scheduler_value(native.__dict__),
+            "state": scheduler_state,
         }
 
     def restore_native_scheduler_state(self, role: ModelRole, state: Mapping[str, Any]) -> None:
@@ -408,8 +424,8 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         saved_state = state["state"]
         if not isinstance(saved_state, Mapping):
             raise TrainingFailure("wan_scheduler_snapshot_invalid", "native scheduler state is not a mapping")
-        native.__dict__.clear()
-        native.__dict__.update(self._clone_scheduler_value(saved_state))
+        for name, value in saved_state.items():
+            setattr(native, str(name), self._clone_scheduler_value(value))
         self._trajectory_schedulers[id(role)] = (native, int(state["index"]))
 
     def native_schedule_metadata(self, schedule: ModalSchedule) -> Mapping[str, Any]:
@@ -418,8 +434,18 @@ class WanTrainingAdapter(DenoisingModelAdapter):
         sigmas = schedule.video_sigmas
         if sigmas is None:
             raise TrainingFailure("wan_scheduler_schedule_invalid", "native metadata requires a video schedule")
-        context = self._trajectory_schedulers.get(next(iter(self._trajectory_schedulers), -1))
-        native = context[0] if context is not None else self.scheduler
+        native = self.scheduler
+        schedule_sigmas = tuple(float(value) for value in sigmas[:-1])
+        timesteps: tuple[float, ...] | None = None
+        for known_sigmas, known_timesteps in self._model_timestep_tables:
+            if len(known_sigmas) == len(schedule_sigmas) and all(
+                abs(float(left) - float(right)) <= 5e-5
+                for left, right in zip(known_sigmas, schedule_sigmas)
+            ):
+                timesteps = tuple(float(value) for value in known_timesteps)
+                break
+        if timesteps is None:
+            raise TrainingFailure("wan_scheduler_schedule_invalid", "native schedule timestep table is unavailable")
         return {
             "class": type(native).__module__ + "." + type(native).__qualname__,
             "config": self._scheduler_metadata_value(getattr(native, "_internal_dict", getattr(native, "config", {}))),
@@ -434,6 +460,7 @@ class WanTrainingAdapter(DenoisingModelAdapter):
             ),
             "predict_x0": self._scheduler_metadata_value(getattr(native, "predict_x0", None)),
             "sigmas": [float(value) for value in sigmas],
+            "timesteps": list(timesteps),
             "nfe": len(sigmas) - 1,
         }
 
