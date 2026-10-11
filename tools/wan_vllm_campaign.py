@@ -663,7 +663,12 @@ def wait_for_gpu_quiet(config: Mapping[str, Any]) -> None:
                 check=False,
                 timeout=15,
             )
-            free = [float(line.strip()) for line in probe.stdout.splitlines() if line.strip()]
+            free = []
+            for line in probe.stdout.splitlines():
+                try:
+                    free.append(float(line.strip()))
+                except ValueError:
+                    continue
             if len(free) < needed:
                 try:
                     import torch
