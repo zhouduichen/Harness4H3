@@ -14,6 +14,7 @@ if [ -f "$MODEL_CACHE/.ready" ] && [ -f "$MODEL_CACHE/config.json" ]; then
 fi
 LOG=/data/models/controller-llm/controller-vllm.log
 PY=/data/models/envs/sglang_h3/bin/vllm
+CONTROLLER_GPU_PYTHON=${CONTROLLER_GPU_PYTHON:-/home/intern/miniconda3/envs/comfy/bin/python}
 # Leave a small allowance for nvidia-smi rounding/reservation differences.
 # The per-shard guard and dynamic gpu_memory_utilization remain in force.
 TOTAL_MIN_FREE_MIB=${CONTROLLER_TOTAL_MIN_FREE_MIB:-39900}
@@ -608,7 +609,7 @@ select_candidate() {
                 "$(date -Is)" "$effective_max_tp" >> "$LOG"
         fi
     fi
-    nvidia-smi --query-gpu=index,memory.free,memory.total --format=csv,noheader,nounits 2>/dev/null \
+    gpu_memory_snapshot \
         | awk -F, -v total="$TOTAL_MIN_FREE_MIB" -v max_tp="$effective_max_tp" -v allowed_tp="$ALLOWED_TENSOR_PARALLEL" -v cooled_tp="$COOLED_TENSOR_PARALLEL" -v blocked_gpu="$BLOCKED_GPUS" -v preferred_gpu="$preferred_gpu" '
             function visit(start, depth, sum, min_free, min_ratio, selected, i, req, shard_util) {
                 if (depth > 0) {
@@ -650,6 +651,36 @@ select_candidate() {
             }'
 }
 
+gpu_memory_snapshot() {
+    # Prefer nvidia-smi when its NVML client is healthy.  On this host the
+    # CUDA runtime remains usable while nvidia-smi can report a driver-library
+    # mismatch; PyTorch's allocator query is a read-only equivalent fallback.
+    local probe
+    probe=$(nvidia-smi --query-gpu=index,memory.free,memory.total --format=csv,noheader,nounits 2>/dev/null || true)
+    if printf '%s\n' "$probe" | awk -F, '
+        BEGIN { valid=0 }
+        {
+            index=$1; free=$2; total=$3
+            gsub(/[[:space:]]/, "", index)
+            gsub(/[[:space:]]/, "", free)
+            gsub(/[[:space:]]/, "", total)
+            if (index ~ /^[0-9]+$/ && free ~ /^[0-9]+([.][0-9]+)?$/ && total ~ /^[0-9]+([.][0-9]+)?$/) valid++
+        }
+        END { exit(valid > 0 ? 0 : 1) }'; then
+        printf '%s\n' "$probe"
+        return 0
+    fi
+    "$CONTROLLER_GPU_PYTHON" - <<'PY'
+import torch
+
+if not torch.cuda.is_available():
+    raise SystemExit(1)
+for index in range(torch.cuda.device_count()):
+    free, total = torch.cuda.mem_get_info(index)
+    print(f"{index},{free / (1024 * 1024):.0f},{total / (1024 * 1024):.0f}")
+PY
+}
+
 candidate_is_quiet() {
     local selected_gpus="$1" gpu utilization compute_pids
     IFS=',' read -r -a gpu_list <<< "$selected_gpus"
@@ -665,7 +696,13 @@ candidate_is_quiet() {
         fi
         utilization=$(nvidia-smi --id="$gpu" --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | tr -d '[:space:]')
         case "$utilization" in
-            ''|*[!0-9]*) return 1 ;;
+            ''|*[!0-9]*)
+                # If the NVML client is unavailable, the memory-backed
+                # candidate from gpu_memory_snapshot is the only trustworthy
+                # signal available.  Keep the queue moving; vLLM will still
+                # fail closed if CUDA initialization cannot claim the card.
+                continue
+                ;;
         esac
         if [ "$utilization" -gt "$MAX_LAUNCH_GPU_UTILIZATION" ]; then
             return 1
