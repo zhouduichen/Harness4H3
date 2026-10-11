@@ -643,7 +643,13 @@ def ensure_controller(config: Mapping[str, Any]) -> None:
 
 
 def wait_for_gpu_quiet(config: Mapping[str, Any]) -> None:
-    """Wait until all four Wan role cards have enough free memory."""
+    """Wait until all configured Wan role cards have enough free memory.
+
+    Some remote hosts expose a working CUDA runtime while the ``nvidia-smi``
+    client has a minor driver-library mismatch.  Use PyTorch's CUDA allocator
+    query as a read-only fallback so the resource gate does not wait forever
+    when the worker itself can still initialize CUDA.
+    """
 
     deadline = time.monotonic() + float(config["gpu_wait_s"])
     minimum_mib = float(config["min_free_memory_gb"]) * 1024.0
@@ -658,6 +664,14 @@ def wait_for_gpu_quiet(config: Mapping[str, Any]) -> None:
                 timeout=15,
             )
             free = [float(line.strip()) for line in probe.stdout.splitlines() if line.strip()]
+            if len(free) < needed:
+                try:
+                    import torch
+
+                    if torch.cuda.is_available():
+                        free = [float(torch.cuda.mem_get_info(index)[0]) / (1024.0 * 1024.0) for index in range(needed)]
+                except (ImportError, RuntimeError, TypeError, ValueError):
+                    pass
             if len(free) >= needed and sum(value >= minimum_mib for value in free) >= needed:
                 return
         except (OSError, subprocess.SubprocessError, ValueError):
