@@ -603,8 +603,9 @@ def ensure_controller(config: Mapping[str, Any]) -> None:
     if pid_file.is_file():
         try:
             pid = int(pid_file.read_text(encoding="utf-8").strip())
-            os.kill(pid, 0)
-            live = True
+            cmdline = Path("/proc/%d/cmdline" % pid).read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+            launcher_name = Path(launcher).name
+            live = bool(cmdline.strip()) and launcher_name in cmdline and "controller-wait-launch" in cmdline
         except (OSError, TypeError, ValueError):
             live = False
     if not live:
