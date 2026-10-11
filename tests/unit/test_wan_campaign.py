@@ -42,6 +42,7 @@ def _v2_proposal(parent: str, *, method: str = "progressive_distillation", **ove
             "train_steps": 256,
             "learning_rate": 1e-4,
             "critic_learning_rate": 1e-4,
+            "endpoint_weight": 0.0,
             "velocity_weight": 1.0,
             "clean_anchor_weight": 0.5,
             "rollout_steps": 4,
@@ -195,6 +196,27 @@ def test_v2_proposal_normalizes_nested_training_policy():
     assert proposal.training.rollout_steps == 4
     assert proposal.continuation.overlap_latent_frames == 7
     assert len(proposal.fingerprint()) == 64
+
+
+def test_v2_rollout_only_policy_allows_zero_same_state_weights():
+    parent = "a" * 64
+    proposal = _v2_proposal(
+        parent,
+        endpoint_weight=0.0,
+        velocity_weight=0.0,
+        clean_anchor_weight=0.0,
+        rollout_steps=2,
+        rollout_endpoint_weight=1.0,
+        rollout_clean_weight=1.0,
+    )
+    parsed = WanTrainingProposal.from_mapping(
+        proposal,
+        expected_parent_sha256=parent,
+        capabilities=_progressive_capabilities(),
+    )
+    assert parsed.training.endpoint_weight == 0.0
+    assert parsed.training.velocity_weight == 0.0
+    assert parsed.training.clean_anchor_weight == 0.0
 
 
 def test_v1_proposal_remains_readable_as_flat_policy():

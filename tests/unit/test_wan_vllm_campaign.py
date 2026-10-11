@@ -53,9 +53,66 @@ def test_training_command_contains_only_trusted_paths_and_validated_knobs(tmp_pa
     assert command[:2] == ("/opt/python", "/srv/tools/wan_student_train_worker.py")
     assert "--steps" in command and "8" in command
     assert "--learning-rate" in command and "5e-07" in command
+    assert "--endpoint-weight" in command and "1.0" in command
     assert "--parent-checkpoint" in command
     assert "--training-checkpoint" in command
     assert "--checkpoint-every-steps" in command
+
+
+def test_native_training_command_binds_rollout_state_contract(tmp_path: Path):
+    parent = "a" * 64
+    proposal = WanTrainingProposal.from_mapping(
+        {
+            "schema_version": 2,
+            "proposal_id": "wan_0001",
+            "parent_checkpoint_sha256": parent,
+            "training": {
+                "method": "progressive_distillation",
+                "source_steps": 32,
+                "target_steps": 16,
+                "train_steps": 8,
+                "learning_rate": 5e-7,
+                "critic_learning_rate": 1e-6,
+                "endpoint_weight": 0.0,
+                "velocity_weight": 0.0,
+                "clean_anchor_weight": 0.0,
+                "rollout_steps": 2,
+                "rollout_every": 1,
+                "rollout_endpoint_weight": 1.0,
+                "rollout_clean_weight": 1.0,
+                "trainable_scope": "all",
+                "fp32_optimizer_state": False,
+            },
+            "initialization": {"mode": "inherit"},
+            "precision": {"loss_reduction": "fp32", "optimizer_state": "bf16"},
+            "curriculum": {"fidelity_schedule": ["F1", "F2", "F3"]},
+            "data": {"manifest_digest": "c" * 64, "prompt_policy": "fixed_manifest", "seed_policy": "fixed"},
+            "continuation": {"overlap_latent_frames": 6, "anchor_schedule": "constant"},
+            "focus": "stability",
+            "hypothesis": "Native rollout-state stability.",
+        },
+        expected_parent_sha256=parent,
+    )
+    command = build_training_command(
+        {
+            "worker_python": "/opt/python",
+            "training_entrypoint": "/srv/tools/wan_student_train_worker.py",
+            "training_config": "/srv/config.yaml",
+            "training_mode": "native_rollout_state",
+            "teacher_forced_intervals": 16,
+            "trajectory_record": "/data/trajectory-record",
+        },
+        proposal,
+        output_dir=tmp_path / "round",
+        result_path=tmp_path / "round" / "training-result.json",
+        parent_checkpoint=tmp_path / "parent.safetensors",
+    )
+    assert command[command.index("--endpoint-weight") + 1] == "0.0"
+    assert command[command.index("--velocity-weight") + 1] == "0.0"
+    assert command[command.index("--clean-anchor-weight") + 1] == "0.0"
+    assert command[command.index("--mode") + 1] == "native_rollout_state"
+    assert command[command.index("--teacher-forced-intervals") + 1] == "16"
+    assert command[command.index("--trajectory-record") + 1] == "/data/trajectory-record"
 
 
 def test_loop_config_requires_absolute_trusted_paths(tmp_path: Path):
@@ -98,6 +155,57 @@ def test_native_5s_config_enables_visual_information_gate():
     assert gate["max_low_texture_frame_ratio"] < 1
 
 
+def test_native_rollout_state_loop_requires_fixed_trajectory(tmp_path: Path):
+    config = tmp_path / "loop.yaml"
+    config.write_text(
+        "wan_loop:\n"
+        "  training_config: /srv/training.yaml\n"
+        "  wan_config: /srv/wan.yaml\n"
+        "  evaluation_manifest: /srv/manifest.json\n"
+        "  clip_model_path: /srv/clip\n"
+        "  teacher_baseline_result: /srv/teacher.json\n"
+        "  parent_checkpoint: /srv/parent.safetensors\n"
+        "  output_root: /data/campaign\n"
+        "  worker_python: /opt/python\n"
+        "  training_entrypoint: /srv/worker.py\n"
+        "  vllm_base_url: http://127.0.0.1:8000/v1\n"
+        "  vllm_model: qwen3.5-controller\n"
+        "  continuation_contract: 5s\n"
+        "  training_mode: native_rollout_state\n"
+        "  teacher_forced_intervals: 16\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="trajectory_record"):
+        load_loop_config(config)
+
+
+def test_native_rollout_state_loop_rejects_non_native_training_cache(tmp_path: Path):
+    training = tmp_path / "training.yaml"
+    training.write_text("wan_training:\n  cache_contract: long_video_30s\n", encoding="utf-8")
+    config = tmp_path / "loop.yaml"
+    config.write_text(
+        "wan_loop:\n"
+        f"  training_config: {training}\n"
+        "  wan_config: /srv/wan.yaml\n"
+        "  evaluation_manifest: /srv/manifest.json\n"
+        "  clip_model_path: /srv/clip\n"
+        "  teacher_baseline_result: /srv/teacher.json\n"
+        "  parent_checkpoint: /srv/parent.safetensors\n"
+        "  output_root: /data/campaign\n"
+        "  worker_python: /opt/python\n"
+        "  training_entrypoint: /srv/worker.py\n"
+        "  vllm_base_url: http://127.0.0.1:8000/v1\n"
+        "  vllm_model: qwen3.5-controller\n"
+        "  continuation_contract: 5s\n"
+        "  training_mode: native_rollout_state\n"
+        "  teacher_forced_intervals: 16\n"
+        "  trajectory_record: /data/trajectory-record\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="cache_contract=native_5s"):
+        load_loop_config(config)
+
+
 def test_visual_collapse_is_persisted_as_a_negative_memory_lesson():
     lessons = _memory_lessons(
         {"controller_memory_limit": 3, "memory_seed_paths": []},
@@ -127,6 +235,7 @@ def test_v2_schema_contains_bounded_algorithm_policy_and_capability_snapshot():
     assert "training" in schema["properties"]
     assert "method" in schema["properties"]["training"]["properties"]
     assert "source_steps" in schema["properties"]["training"]["properties"]
+    assert "endpoint_weight" in schema["properties"]["training"]["required"]
     assert "initialization" in schema["properties"]
     assert "continuation" in schema["properties"]
 

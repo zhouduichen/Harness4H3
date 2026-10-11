@@ -1,0 +1,83 @@
+schema_version: 1
+
+wan_loop:
+  training_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-native-controller-training.yaml
+  wan_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-1.3b-paper16.remote.yaml
+  evaluation_manifest: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/evaluation-manifest.wan-5s-native-paper.json
+  clip_model_path: /data/models/clip-vit-large-patch14-336
+  teacher_baseline_result: /data/models/MiniMax-H3/harness4h3/wan-teacher-native-5s-20261009/teacher-baseline-result.json
+  parent_checkpoint: /data/models/MiniMax-H3/harness4h3/wan-p1-rollout-seed10-cont-gpu-noise-20261010/seed-20261010/training/student.safetensors
+  output_root: /data/models/MiniMax-H3/harness4h3/wan-native-controller-search-20261011
+  worker_python: /home/intern/miniconda3/envs/comfy/bin/python
+  training_entrypoint: /home/intern/huangjiahao/Harness4H3-long-video-30s/tools/wan_student_train_worker.py
+
+  vllm_base_url: http://127.0.0.1:8000/v1
+  vllm_model: qwen3.5-controller
+  controller_launcher: /home/intern/huangjiahao/Harness4H3-long-video-30s/tools/controller-wait-launch-tp1.sh
+  proposal_schema_version: 2
+  algorithm_capabilities: [progressive_distillation]
+  dmd2_memory_admitted: false
+  wan_dmd2_adapter_ready: false
+  fidelity_schedule: [F1, F2, F3]
+  continuation_contract: 5s
+  training_mode: native_rollout_state
+  teacher_forced_intervals: 16
+  trajectory_record: /data/models/MiniMax-H3/harness4h3/trajectory-seed10-builder-20261010/seed-20261010/trajectory-record
+
+  correctness_audit_passed: true
+  correctness_evidence_path: /data/models/MiniMax-H3/harness4h3/p0-native-correctness-20261010/p0-correctness.json
+  correctness_evidence_sha256: 2ec2e33af31d1464f95f4d3b880365503676899451653666d5f29114e9205c00
+  legacy_r2_promotion_frozen: true
+  legacy_r2_checkpoint_digests:
+    - a06eaca14a0a864c1c45210d7aa2dd037bcc87319b98e71a05c705b71e969729
+
+  checkpoint_every_steps: 8
+  watchdog_restart_limit: 3
+  watchdog_backoff_seconds: 30
+  offline_simulation: false
+  device: cuda:3
+  gpu_count: 4
+  min_free_memory_gb: 35
+  gpu_wait_s: 3600
+  max_rounds: 1
+  max_train_steps: 64
+  progressive_source_steps: 32
+  progressive_target_steps: 16
+  wan_trainable_scope: all
+  max_cases: 4
+  seed_count: 3
+  window_count: 1
+  overlap_latent_frames: 0
+  inference_steps: 16
+  vllm_timeout_s: 900
+  training_timeout_s: 86400
+  semantic_floor_ratio: 0.90
+  quality_floor_ratio: 0.99
+  min_semantic_delta: 0.0
+  controller_primary_objective: quality_and_visual_stability
+  controller_secondary_objectives: [semantic_alignment, temporal_consistency, resource_efficiency]
+  controller_min_quality_delta: 0.0
+  controller_max_temporal_drop: 0.005
+  controller_memory_limit: 3
+  memory_seed_paths: []
+  visual_quality_gate:
+    enabled: true
+    version: visual-structure-v1
+    min_spatial_gradient: 0.30
+    min_laplacian_std: 1.8
+    min_block_variance: 12.0
+    min_frame_difference: 0.01
+    max_low_texture_frame_ratio: 0.25
+  controller_search_space:
+    learning_rate: [0.0000001, 0.0000005, 0.000001]
+    critic_learning_rate: [0.000001]
+    endpoint_weight: [0.0, 0.25, 0.5]
+    velocity_weight: [0.0, 0.25, 0.5]
+    clean_anchor_weight: [0.0, 0.25, 0.5]
+    rollout_endpoint_weight: [0.5, 1.0]
+    rollout_clean_weight: [0.5, 1.0]
+    rollout_every: [1, 2]
+    rollout_steps: [2]
+    train_steps: [32, 64]
+    teacher_reuse_steps: [1, 2]
+  no_improvement_patience: 1

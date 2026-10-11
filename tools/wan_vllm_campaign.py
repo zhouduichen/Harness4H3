@@ -70,7 +70,7 @@ def proposal_json_schema() -> dict[str, Any]:
                 "additionalProperties": False,
                 "required": [
                     "method", "source_steps", "target_steps", "train_steps", "learning_rate",
-                    "critic_learning_rate", "velocity_weight", "clean_anchor_weight", "rollout_steps",
+                    "critic_learning_rate", "endpoint_weight", "velocity_weight", "clean_anchor_weight", "rollout_steps",
                     "rollout_every", "rollout_endpoint_weight", "rollout_clean_weight", "trainable_scope",
                     "fp32_optimizer_state",
                 ],
@@ -81,6 +81,7 @@ def proposal_json_schema() -> dict[str, Any]:
                     "train_steps": {"type": "integer", "minimum": 1, "maximum": 100000},
                     "learning_rate": positive,
                     "critic_learning_rate": positive,
+                    "endpoint_weight": non_negative,
                     "velocity_weight": non_negative,
                     "clean_anchor_weight": non_negative,
                     "rollout_steps": {"type": "integer", "enum": [0, 2, 4]},
@@ -229,6 +230,9 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         ("wan_dmd2_adapter_ready", False),
         ("fidelity_schedule", ["F1", "F2", "F3"]),
         ("continuation_contract", "30s"),
+        ("training_mode", "legacy"),
+        ("teacher_forced_intervals", 0),
+        ("trajectory_record", ""),
         ("state_path", ""),
         ("fingerprint_path", ""),
         ("experience_path", ""),
@@ -330,6 +334,25 @@ def load_loop_config(path: Path) -> dict[str, Any]:
         raise ValueError("Wan vLLM loop requires offline_simulation=false")
     if str(loop["continuation_contract"]) not in {"30s", "5s"}:
         raise ValueError("continuation_contract must be 30s or 5s")
+    if str(loop["training_mode"]) not in {"legacy", "native_rollout_state"}:
+        raise ValueError("training_mode must be legacy or native_rollout_state")
+    if int(loop["teacher_forced_intervals"]) < 0:
+        raise ValueError("teacher_forced_intervals must be non-negative")
+    if loop["trajectory_record"] and not Path(str(loop["trajectory_record"])).is_absolute():
+        raise ValueError("trajectory_record must be absolute")
+    if str(loop["training_mode"]) == "native_rollout_state":
+        if str(loop["continuation_contract"]) != "5s":
+            raise ValueError("native_rollout_state requires continuation_contract=5s")
+        if int(loop["teacher_forced_intervals"]) != 16:
+            raise ValueError("native_rollout_state requires teacher_forced_intervals=16")
+        if not str(loop["trajectory_record"]).strip():
+            raise ValueError("native_rollout_state requires trajectory_record")
+        training_path = Path(str(loop["training_config"]))
+        if training_path.is_file():
+            training_raw = yaml.safe_load(training_path.read_text(encoding="utf-8"))
+            training = training_raw.get("wan_training") if isinstance(training_raw, Mapping) else None
+            if not isinstance(training, Mapping) or str(training.get("cache_contract", "")).strip() != "native_5s":
+                raise ValueError("native_rollout_state requires training_config cache_contract=native_5s")
     capabilities = loop["algorithm_capabilities"]
     if not isinstance(capabilities, list) or not capabilities or any(str(item) not in {"progressive_distillation", "dmd2"} for item in capabilities):
         raise ValueError("algorithm_capabilities must list progressive_distillation and/or dmd2")
@@ -651,7 +674,7 @@ def build_training_command(
     result_path: Path,
     parent_checkpoint: Path,
 ) -> tuple[str, ...]:
-    return (
+    command = [
         str(config["worker_python"]),
         str(config["training_entrypoint"]),
         "--config",
@@ -680,6 +703,8 @@ def build_training_command(
         str(proposal.training.rollout_endpoint_weight),
         "--rollout-clean-weight",
         str(proposal.training.rollout_clean_weight),
+        "--endpoint-weight",
+        str(proposal.training.endpoint_weight),
         "--velocity-weight",
         str(proposal.training.velocity_weight),
         "--clean-anchor-weight",
@@ -697,7 +722,19 @@ def build_training_command(
         str(int(config.get("checkpoint_every_steps", 8))),
         "--dmd2-memory-admitted" if bool(config.get("dmd2_memory_admitted", False)) else "--no-dmd2-memory-admitted",
         "--wan-dmd2-adapter-ready" if bool(config.get("wan_dmd2_adapter_ready", False)) else "--no-wan-dmd2-adapter-ready",
-    )
+    ]
+    if str(config.get("training_mode", "legacy")) == "native_rollout_state":
+        command.extend(
+            [
+                "--mode",
+                str(config["training_mode"]),
+                "--teacher-forced-intervals",
+                str(int(config["teacher_forced_intervals"])),
+                "--trajectory-record",
+                str(config["trajectory_record"]),
+            ]
+        )
+    return tuple(command)
 
 
 def _compact_controller_evaluation(value: Any) -> Mapping[str, Any]:
@@ -758,6 +795,9 @@ def _compact_controller_training(value: Any) -> Mapping[str, Any]:
             "optimizer_steps",
             "teacher_forward_count",
             "teacher_reuse_steps",
+            "endpoint_weight",
+            "velocity_weight",
+            "clean_anchor_weight",
             "teacher_target_groups",
             "student_checkpoint_sha256",
             "parent_checkpoint_sha256",
@@ -810,7 +850,9 @@ def _request_vllm(config: Mapping[str, Any], context: Mapping[str, Any]) -> Mapp
         "Choose exactly one bounded training policy from the supplied capability snapshot, including method, "
         "rollout, initialization, precision, curriculum, data, continuation, focus, and hypothesis. "
         "Never output code, shell commands, paths, device IDs, architecture, or checkpoint content. "
-        "The trusted runner will bind the parent digest and all execution paths."
+        "The trusted runner will bind the parent digest and all execution paths. "
+        "When the campaign is native 5s, search only the supplied native 32-to-16 rollout-state recipe fields; "
+        "never propose a different cache, trajectory, duration, teacher, architecture, or algorithm."
     )
     contract = str(config.get("continuation_contract", "30s"))
     if contract == "5s":
@@ -847,6 +889,12 @@ def _request_vllm(config: Mapping[str, Any], context: Mapping[str, Any]) -> Mapp
         "offline_simulation=false, %s, and the 1-2B Wan Student. " % contract_text
         +
         "Prefer semantic alignment when semantic is below the Teacher floor; otherwise protect continuity. "
+        + (
+            "This is a locked native rollout-state campaign: keep the fixed real 5s H3 cache, one immutable 32-step "
+            "trajectory, target 16 steps, and the visual veto. Only change values explicitly listed in SEARCH_SPACE. "
+            if contract == "5s"
+            else ""
+        )
         + step_text
         + scope_text
         + objective_text
@@ -940,6 +988,7 @@ def _validate_recipe_search_space(proposal: WanTrainingProposal, config: Mapping
         "rollout_steps": proposal.training.rollout_steps,
         "train_steps": proposal.training.train_steps,
         "teacher_reuse_steps": proposal.teacher_reuse_steps,
+        "endpoint_weight": proposal.training.endpoint_weight,
         "velocity_weight": proposal.training.velocity_weight,
         "clean_anchor_weight": proposal.training.clean_anchor_weight,
     }
@@ -1618,7 +1667,10 @@ def _memory_lessons(config: Mapping[str, Any], rounds: list[Mapping[str, Any]]) 
         temporal = metrics.get("temporal")
         recipe = {
             key: training[key]
-            for key in ("learning_rate", "rollout_endpoint_weight", "rollout_clean_weight", "rollout_every", "train_steps")
+            for key in (
+                "learning_rate", "endpoint_weight", "velocity_weight", "clean_anchor_weight",
+                "rollout_endpoint_weight", "rollout_clean_weight", "rollout_every", "rollout_steps", "train_steps",
+            )
             if key in training
         }
         lesson = {
@@ -1677,12 +1729,15 @@ def _campaign_capabilities(config: Mapping[str, Any]) -> dict[str, Any]:
 def _campaign_identity(config: Mapping[str, Any], capabilities: Mapping[str, Any]) -> dict[str, Any]:
     path_digests = {
         "wan_config_digest": sha256_file(Path(str(config["wan_config"]))),
+        "training_config_digest": sha256_file(Path(str(config["training_config"]))),
         "training_entrypoint_digest": sha256_file(Path(str(config["training_entrypoint"]))),
         "evaluation_manifest_digest": sha256_file(Path(str(config["evaluation_manifest"]))),
         "clip_model_digest": sha256_path(Path(str(config["clip_model_path"]))),
         "teacher_baseline_digest": sha256_file(Path(str(config["teacher_baseline_result"]))),
         "parent_checkpoint_digest": sha256_file(Path(str(config["parent_checkpoint"]))),
     }
+    if str(config.get("training_mode", "legacy")) == "native_rollout_state":
+        path_digests["trajectory_record_digest"] = sha256_path(Path(str(config["trajectory_record"])))
     code_files = [Path(__file__), Path(__file__).resolve().parents[1] / "harness4h3" / "student" / "wan_campaign.py"]
     code_files.append(Path(__file__).resolve().parents[1] / "h3_training" / "adapters" / "wan.py")
     path_digests["code_digest"] = _canonical_digest({str(path): sha256_file(path) for path in code_files})
