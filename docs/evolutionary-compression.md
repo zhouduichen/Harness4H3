@@ -85,6 +85,10 @@ embedding 只编码一次，warmup 和 3 次 repeat 测量扩散 Transformer 与
 可以避免把未优化组件的 CPU 时间误归因给候选 Transformer；recipe digest 会随测量
 方法变化，旧缓存不会被错误复用。
 
+Peak memory 会针对 evaluator 配置的 CUDA device 重置并读取；不能用默认 CUDA
+device 的统计值代表实际执行卡。如果运行环境无法提供 CUDA memory telemetry，结果
+必须显式保留为 unavailable/0 并在报告中标注，不能解释成低显存占用。
+
 EvolutionLoop 也会复用没有 `decision.json` 的最早未完成 round；已写入的
 `profile.json`、`algorithm.json`、`sandbox.json` 和 `compression.json` 会先校验并
 继续使用，避免进程崩溃后无条件新建 round 或重复执行相同算法。

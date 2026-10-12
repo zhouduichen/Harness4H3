@@ -141,9 +141,20 @@ def test_real_evaluator_caches_prompt_embeddings_for_latency_repeats(tmp_path, m
     )
 
     class FakeCuda:
+        reset_devices = []
+
         @staticmethod
         def is_available():
-            return False
+            return True
+
+        @classmethod
+        def reset_peak_memory_stats(cls, device):
+            cls.reset_devices.append(device)
+
+        @staticmethod
+        def max_memory_allocated(device):
+            assert device == "cuda:0"
+            return 2 * 1024**3
 
     class FakeTorch:
         cuda = FakeCuda()
@@ -181,6 +192,8 @@ def test_real_evaluator_caches_prompt_embeddings_for_latency_repeats(tmp_path, m
 
     assert result["hardware_metrics"]["latency_measurement_method"] == "denoising+vae_decode_with_case_cached_prompt_embeddings"
     assert result["hardware_metrics"]["prompt_encoding_included"] is False
+    assert result["hardware_metrics"]["peak_memory_gb_max"] == 2.0
+    assert FakeCuda.reset_devices
     assert len(pipeline.embed_calls) == 4  # positive and negative text, once for each artifact
     assert len(generate_calls) == 8  # baseline and child, warmup plus three repeats
     assert all(call[2]["prompt_embeds"] is not None for call in generate_calls)

@@ -555,19 +555,20 @@ class WanVideoEvaluator:
             )
         return self._quality_backend
 
-    @staticmethod
-    def _reset_peak_memory(torch: Any) -> None:
+    def _cuda_device(self, torch: Any) -> Any:
+        return torch.device(self.config.device)
+
+    def _reset_peak_memory(self, torch: Any) -> None:
         try:
             if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats()
+                torch.cuda.reset_peak_memory_stats(self._cuda_device(torch))
         except (AttributeError, RuntimeError):
             pass
 
-    @staticmethod
-    def _peak_memory_gb(torch: Any) -> float:
+    def _peak_memory_gb(self, torch: Any) -> float:
         try:
             if torch.cuda.is_available():
-                return float(torch.cuda.max_memory_allocated()) / float(1024**3)
+                return float(torch.cuda.max_memory_allocated(self._cuda_device(torch))) / float(1024**3)
         except (AttributeError, RuntimeError):
             pass
         return 0.0
