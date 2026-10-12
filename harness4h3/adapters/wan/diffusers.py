@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange, checkpoint_content_sha256
+from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange
 
 
 def _torch_modules() -> tuple[Any, Any]:
@@ -28,6 +28,36 @@ def _import_pipeline() -> Any:
 
 def _param_count(module: Any) -> int:
     return sum(int(item.numel()) for item in module.parameters())
+
+
+def _transformer_checkpoint_sha256(path: str | Path) -> str:
+    """Hash the actual Wan Transformer bytes and its pipeline index.
+
+    The VAE and text encoder are unchanged by EvoCompress.  Including the
+    Transformer files plus ``model_index.json`` gives an honest model-content
+    identity while avoiding a repeated 27GB scan of unrelated components on a
+    network filesystem.  The scope is recorded in artifact metadata.
+    """
+
+    root = Path(path)
+    candidates = []
+    index = root / "model_index.json"
+    if index.is_file():
+        candidates.append(index)
+    transformer = root / "transformer"
+    if transformer.is_dir():
+        candidates.extend(item for item in transformer.rglob("*") if item.is_file())
+    if not candidates:
+        raise ValueError("Wan checkpoint has no model_index/transformer content: %s" % root)
+    digest = hashlib.sha256()
+    for item in sorted(candidates, key=lambda value: value.relative_to(root).as_posix()):
+        relative = item.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        with item.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _module_at(root: Any, path: str) -> Any:
@@ -69,7 +99,7 @@ class DiffusersWanAdapter:
         self._device = str(device)
         self._dtype = str(dtype)
         pipe._harness4h3_checkpoint_root = str(checkpoint)
-        pipe._harness4h3_checkpoint_sha256 = checkpoint_content_sha256(checkpoint)
+        pipe._harness4h3_checkpoint_sha256 = _transformer_checkpoint_sha256(checkpoint)
         return pipe
 
     @classmethod
@@ -229,13 +259,13 @@ class DiffusersWanAdapter:
             model.save_pretrained(str(target))
         else:
             raise ValueError("unsupported_model_layout: model cannot save_pretrained")
-        value = checkpoint_content_sha256(target)
+        value = _transformer_checkpoint_sha256(target)
         model._harness4h3_checkpoint_sha256 = value
         structure = self.inspect(model)
-        return CheckpointArtifact(str(target), value, self.architecture_name, structure, {"offline_simulation": False})
+        return CheckpointArtifact(str(target), value, self.architecture_name, structure, {"offline_simulation": False, "checkpoint_hash_scope": "model_index+transformer"})
 
     def reload_model(self, artifact: CheckpointArtifact) -> Any:
-        actual = checkpoint_content_sha256(artifact.path)
+        actual = _transformer_checkpoint_sha256(artifact.path)
         if actual != artifact.sha256:
             raise ValueError("checkpoint_reload_failed: digest mismatch")
         model = self.load_model(artifact.path, device=self._device, dtype=self._dtype)
