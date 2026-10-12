@@ -120,7 +120,11 @@ class EvolutionLoop:
         # The initial parent already has a measured structural state.  Let the
         # policy decide whether to exploit it or open an exploration branch.
         search_choice = self.search_policy.choose(has_best=bool(parent_candidate.state.measured_metrics))
-        parent_algorithm_id = parent_candidate.created_by_experiment_id
+        # Algorithm lineage is independent from model lineage.  A rejected
+        # child must not become the next model parent, but its algorithm is
+        # still the version that the next algorithm should inherit from.
+        latest_algorithm = self.algorithm_store.latest()
+        parent_algorithm_id = latest_algorithm.algorithm_id if latest_algorithm is not None else None
         try:
             algorithm = self.agent.generate(
                 algorithm_id,

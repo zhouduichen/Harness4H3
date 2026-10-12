@@ -66,3 +66,13 @@ def test_real_improvement_can_promote():
     )
     assert decision["accepted"] is True
     assert decision["improvements"]["latency_s"] == 0.1
+
+
+def test_efficiency_gain_without_required_model_size_gain_does_not_promote():
+    decision = PromotionPolicy().decide(
+        parent={},
+        evaluation=_evidence(latency=90.0, memory=7.0, size=9.5),
+        child_integrity=True,
+    )
+    assert decision["accepted"] is False
+    assert "model_size_improvement_below_threshold" in decision["reasons"]

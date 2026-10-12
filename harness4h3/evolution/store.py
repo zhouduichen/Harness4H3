@@ -73,6 +73,14 @@ class AlgorithmStore:
 
         return records()
 
+    def latest(self) -> AlgorithmCandidate | None:
+        """Return the newest algorithm version, including rejected experiments."""
+
+        candidates = list(self.read())
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: int(item.algorithm_id[1:]))
+
     @staticmethod
     def _atomic_write(path: Path, text: str) -> None:
         fd, temporary = tempfile.mkstemp(prefix=path.name + ".tmp-", dir=str(path.parent))

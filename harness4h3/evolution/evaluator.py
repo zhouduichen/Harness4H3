@@ -130,11 +130,17 @@ class PromotionPolicy:
                 reasons.append("hardware_regression:%s" % names[0])
         if comparable == 0:
             reasons.append("hardware_data_missing")
-        elif not any(
-            improvements.get(names[0], -1.0) >= minimum
-            for names, minimum in metric_specs
-        ):
+        efficiency_improved = any(
+            improvements.get(names[0], -1.0) >= self.min_efficiency_improvement
+            for names, _minimum in metric_specs[:2]
+        )
+        if comparable > 0 and not efficiency_improved:
             reasons.append("no_substantial_efficiency_improvement")
+        model_size_improvement = improvements.get("model_size_gb")
+        if model_size_improvement is None:
+            reasons.append("model_size_data_missing")
+        elif model_size_improvement < self.min_model_size_improvement:
+            reasons.append("model_size_improvement_below_threshold")
 
         # A candidate must not be dominated by the current independent front.
         if pareto_front and any(self._dominates(front, evaluation) for front in pareto_front):

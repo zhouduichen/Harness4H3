@@ -75,3 +75,32 @@ def test_duplicate_algorithm_is_recorded_without_overwriting_active_parent(tmp_p
     assert duplicate.decision["failure_type"] == "duplicate_algorithm"
     assert loop.model_store.active_id == "M0001"
     assert loop.search_policy.duplicate_rounds == 1
+
+
+def test_algorithm_lineage_advances_after_rejected_model(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=5, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    calls = {"count": 0}
+
+    def evaluator(child, profile):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {
+                "quality_score": 0.5,
+                "baseline_quality_score": 1.0,
+                "baseline_hardware_metrics": {"latency_s": 1.0, "peak_memory_gb": 1.0, "model_size_gb": 1.0},
+                "hardware_metrics": {"latency_s": 0.5, "peak_memory_gb": 0.5, "model_size_gb": 0.5},
+                "valid": True,
+            }
+        return {
+            "quality_score": 1.0,
+            "baseline_quality_score": 1.0,
+            "baseline_hardware_metrics": {"latency_s": 1.0, "peak_memory_gb": 1.0, "model_size_gb": 1.0},
+            "hardware_metrics": {"latency_s": 0.5, "peak_memory_gb": 0.5, "model_size_gb": 0.5},
+            "valid": True,
+        }
+
+    loop = EvolutionLoop(adapter=adapter, parent=parent, output_root=tmp_path / "run", evaluator=evaluator)
+    assert loop.run_round().status == "rejected"
+    assert loop.run_round().status == "promoted"
+    assert loop.algorithm_store.get("A0002").parent_algorithm_id == "A0001"
