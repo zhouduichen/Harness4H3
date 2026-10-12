@@ -230,6 +230,18 @@ class WanVideoEvaluator:
         self._cache: dict[str, Mapping[str, Any]] = {}
         self.manifest_sha256 = hashlib.sha256(Path(config.evaluation_manifest).read_bytes()).hexdigest()
         self._manifest = self._load_manifest(config.evaluation_manifest)
+        if len(self._manifest) < int(config.max_cases):
+            raise WanEvaluationError(
+                "evaluation_manifest_insufficient_cases: requested %d, found %d"
+                % (int(config.max_cases), len(self._manifest))
+            )
+        for item in self._manifest[: int(config.max_cases)]:
+            seeds = item.get("seeds")
+            if not isinstance(seeds, list) or len(seeds) < int(config.seed_count):
+                raise WanEvaluationError(
+                    "evaluation_manifest_insufficient_seeds: case %s requires %d"
+                    % (str(item.get("case_id", "case")), int(config.seed_count))
+                )
         self._wan_spec = self._load_wan_spec(config.wan_config)
         self.recipe_digest = stable_digest(
             {
@@ -293,6 +305,8 @@ class WanVideoEvaluator:
                 "offline_simulation": False,
                 "search_score": 0.0,
                 "evaluator_recipe_sha256": self.recipe_digest,
+                "evaluator_version": EVALUATOR_VERSION,
+                "evaluation_manifest_sha256": self.manifest_sha256,
             }
         baseline_quality = float(baseline["quality_score"])
         candidate_quality = float(candidate["quality_score"])

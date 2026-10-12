@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from harness4h3.adapters.wan import FakeWanDiTAdapter
-from harness4h3.evolution.evaluator import WanVideoEvaluationConfig, WanVideoEvaluator
+from harness4h3.evolution.evaluator import WanEvaluationError, WanVideoEvaluationConfig, WanVideoEvaluator
 from harness4h3.student.quality import QualityEvidence
 
 
@@ -19,6 +19,32 @@ def test_real_evaluator_config_requires_trusted_inputs(tmp_path):
         assert "evaluation_manifest" in str(exc)
     else:
         raise AssertionError("missing real evaluator inputs were accepted")
+
+
+def test_real_evaluator_rejects_manifest_smaller_than_requested_budget(tmp_path):
+    wan_config = tmp_path / "wan.yaml"
+    wan_config.write_text(
+        "width: 8\nheight: 8\nnum_frames: 4\nnative_fps: 8\n"
+        "num_inference_steps: 1\nguidance_scale: 1.0\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"cases": [{"case_id": "only", "caption": "test", "seeds": [7]}]}), encoding="utf-8")
+    config = WanVideoEvaluationConfig(
+        wan_config=wan_config,
+        evaluation_manifest=manifest,
+        clip_model_path=tmp_path / "clip",
+        output_root=tmp_path / "evaluation",
+        max_cases=2,
+    )
+    adapter = FakeWanDiTAdapter(block_count=2, hidden_size=8, ffn_width=16)
+    baseline = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "baseline")
+    try:
+        WanVideoEvaluator(config, baseline)
+    except WanEvaluationError as exc:
+        assert "insufficient_cases" in str(exc)
+    else:
+        raise AssertionError("undersized manifest was accepted for a larger budget")
 
 
 def test_real_evaluator_records_video_and_quality_evidence(tmp_path, monkeypatch):
