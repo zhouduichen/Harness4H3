@@ -35,3 +35,4 @@ def test_evolution_loop_keeps_failed_algorithm_as_experience(tmp_path):
     record = list(loop.experience_store.read())[0]
     assert record.status == "failed"
     assert record.decision["failure_type"] == "sandbox_policy"
+    assert record.decision["search_policy"]["exploit_ratio"] == 0.6

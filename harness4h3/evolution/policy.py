@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 
 @dataclass
@@ -15,11 +15,14 @@ class SearchPolicy:
     def __post_init__(self) -> None:
         if not 0.0 <= float(self.exploit_ratio) <= 1.0:
             raise ValueError("exploit_ratio must be in [0, 1]")
-        self._random = random.Random(int(self.seed))
 
     def choose(self, *, has_best: bool) -> str:
         self.rounds += 1
-        if not has_best or self._random.random() >= float(self.exploit_ratio):
+        # Derive the draw from the persisted round number instead of keeping
+        # an in-memory RNG state.  A resumed process therefore makes the same
+        # next choice as an uninterrupted process.
+        draw = random.Random(int(self.seed) + self.rounds).random()
+        if not has_best or draw >= float(self.exploit_ratio):
             self.explore_rounds += 1
             return "explore"
         self.exploit_rounds += 1

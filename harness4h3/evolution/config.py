@@ -22,6 +22,8 @@ class CompressionConfig:
     fake: Mapping[str, Any] = field(default_factory=dict)
     controller: Mapping[str, Any] = field(default_factory=dict)
     evaluator: Mapping[str, Any] = field(default_factory=dict)
+    memory_enabled: bool = True
+    adapt_search_policy: bool = True
     sandbox_timeout_s: float = 10.0
     exploit_ratio: float = 0.7
     seed: int = 7
@@ -47,7 +49,7 @@ class CompressionConfig:
             raise CompressionConfigError("unable to read compression config: %s" % exc) from exc
         if not isinstance(raw, Mapping):
             raise CompressionConfigError("compression config must be a mapping")
-        allowed = {"backend", "checkpoint", "output_root", "device", "dtype", "local_files_only", "fake", "controller", "evaluator", "sandbox_timeout_s", "exploit_ratio", "seed"}
+        allowed = {"backend", "checkpoint", "output_root", "device", "dtype", "local_files_only", "fake", "controller", "evaluator", "memory_enabled", "adapt_search_policy", "sandbox_timeout_s", "exploit_ratio", "seed"}
         unknown = sorted(set(raw) - allowed)
         if unknown:
             raise CompressionConfigError("unsupported compression config field(s): %s" % ", ".join(unknown))
@@ -74,6 +76,8 @@ class CompressionConfig:
             fake=dict(fake),
             controller=dict(controller),
             evaluator=dict(evaluator),
+            memory_enabled=bool(raw.get("memory_enabled", True)),
+            adapt_search_policy=bool(raw.get("adapt_search_policy", True)),
             sandbox_timeout_s=float(raw.get("sandbox_timeout_s", 10.0)),
             exploit_ratio=float(raw.get("exploit_ratio", 0.7)),
             seed=int(raw.get("seed", 7)),

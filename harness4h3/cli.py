@@ -150,6 +150,8 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         agent=agent,
         evaluator=evaluator,
         search_policy=search_policy,
+        memory_enabled=config.memory_enabled,
+        adapt_search_policy=config.adapt_search_policy,
     )
     outcomes = [loop.run_round().to_dict() for _ in range(int(args.rounds))]
     failed = sum(1 for item in outcomes if item["status"] == "failed")

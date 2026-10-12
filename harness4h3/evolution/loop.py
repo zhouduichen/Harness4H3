@@ -58,6 +58,8 @@ class EvolutionLoop:
         registry: Optional[WanCompressionRegistry] = None,
         evaluator: Optional[EvaluationFn] = None,
         search_policy: Optional[SearchPolicy] = None,
+        memory_enabled: bool = True,
+        adapt_search_policy: bool = True,
     ) -> None:
         self.adapter = adapter
         self.output_root = Path(output_root)
@@ -73,6 +75,8 @@ class EvolutionLoop:
         self.registry = registry or build_wan_compression_registry()
         self.evaluator = evaluator or self._default_evaluator
         self.search_policy = search_policy or self._load_search_policy()
+        self.memory_enabled = bool(memory_enabled)
+        self.adapt_search_policy = bool(adapt_search_policy)
         self.parent = parent
         self._initialize_parent()
 
@@ -105,7 +109,7 @@ class EvolutionLoop:
         profile_path = round_dir / "profile.json"
         profile.write_json(profile_path)
         architecture = str(profile.model["architecture"])
-        skills = self.skill_hub.search(architecture=architecture, limit=8)
+        skills = self.skill_hub.search(architecture=architecture, limit=8) if self.memory_enabled else []
         algorithm_id = self.algorithm_store.next_id()
         # The initial parent already has a measured structural state.  Let the
         # policy decide whether to exploit it or open an exploration branch.
@@ -126,14 +130,14 @@ class EvolutionLoop:
         sandbox_path = round_dir / "sandbox.json"
         _write_json(sandbox_path, _sandbox_dict(sandbox_result))
         if sandbox_result.status != "success" or sandbox_result.plan is None:
-            return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, "sandbox", sandbox_result.failure_type or "sandbox_failed", sandbox_result.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path)})
+            return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "sandbox", sandbox_result.failure_type or "sandbox_failed", sandbox_result.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path)})
 
         compression_dir = round_dir / "checkpoint"
         compression = self.registry.execute(algorithm_plan_operator(sandbox_result), self.adapter, parent_artifact, sandbox_result.plan.args, compression_dir)
         compression_path = round_dir / "compression.json"
         _write_json(compression_path, compression.to_dict())
         if compression.status != "success" or compression.child_checkpoint is None:
-            return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, "compression", compression.failure_type or "compression_failed", compression.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "compression": str(compression_path)})
+            return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "compression", compression.failure_type or "compression_failed", compression.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "compression": str(compression_path)})
 
         evaluation = dict(self.evaluator(compression.child_checkpoint, profile.to_dict()))
         evaluation_path = round_dir / "evaluation.json"
@@ -150,7 +154,7 @@ class EvolutionLoop:
         decision_status = "promoted" if feasible else "rejected"
         previous_score = float(parent_candidate.state.measured_metrics.get("search_score", parent_candidate.state.measured_metrics.get("quality_score", 0.0)))
         current_score = float(evaluation.get("search_score", evaluation.get("quality_score", 0.0)))
-        self.search_policy.update(feasible=feasible, improved=current_score > previous_score)
+        self._update_search_policy(feasible=feasible, improved=current_score > previous_score)
         self._persist_search_policy()
         decision = {
             "status": decision_status,
@@ -174,8 +178,17 @@ class EvolutionLoop:
             self.model_store.set_active(child_candidate.id)
         return EvolutionRound(round_id, parent_candidate.id, algorithm.algorithm_id, decision_status, child_candidate.id, decision, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "compression": str(compression_path), "evaluation": str(evaluation_path), "decision": str(decision_path)})
 
-    def _finish_failure(self, round_id: str, round_dir: Path, parent: ModelCandidate, algorithm: AlgorithmCandidate, stage: str, failure_type: str, message: str, paths: Mapping[str, str]) -> EvolutionRound:
-        decision = {"status": "failed", "stage": stage, "failure_type": failure_type, "message": message, "parent_model_id": parent.id, "algorithm_id": algorithm.algorithm_id}
+    def _finish_failure(self, round_id: str, round_dir: Path, parent: ModelCandidate, algorithm: AlgorithmCandidate, search_choice: str, stage: str, failure_type: str, message: str, paths: Mapping[str, str]) -> EvolutionRound:
+        self._update_search_policy(feasible=False, improved=False)
+        decision = {
+            "status": "failed",
+            "stage": stage,
+            "failure_type": failure_type,
+            "message": message,
+            "parent_model_id": parent.id,
+            "algorithm_id": algorithm.algorithm_id,
+            "search_policy": {"choice": search_choice, **self.search_policy.to_dict()},
+        }
         decision_path = round_dir / "decision.json"
         _write_json(decision_path, decision)
         self._record_experience(round_id, parent, None, algorithm, None, decision, "failed", decision_path)
@@ -253,6 +266,11 @@ class EvolutionLoop:
 
     def _persist_search_policy(self) -> None:
         _write_json(self.output_root / "search-policy.json", self.search_policy.to_dict())
+
+    def _update_search_policy(self, *, feasible: bool, improved: bool) -> None:
+        if self.adapt_search_policy:
+            self.search_policy.update(feasible=feasible, improved=improved)
+        self._persist_search_policy()
 
     @staticmethod
     def _default_evaluator(child: CheckpointArtifact, profile: Mapping[str, Any]) -> Mapping[str, Any]:

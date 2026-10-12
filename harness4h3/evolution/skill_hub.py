@@ -49,7 +49,11 @@ class SkillHub:
                 "operator": record_operator or operator_text,
                 "status": record.status,
                 "reward": record.reward,
-                "failure_reason": record.decision.get("failure_reason") if isinstance(record.decision, Mapping) else None,
+                "failure_reason": (
+                    record.decision.get("failure_reason", record.decision.get("failure_type"))
+                    if isinstance(record.decision, Mapping)
+                    else None
+                ),
                 "training": training,
                 "evaluation": dict(record.evaluation or {}),
                 "provenance": dict(record.provenance),
@@ -57,4 +61,3 @@ class SkillHub:
             matches.append(((exact_architecture, exact_operator, reward, record.created_at), item))
         matches.sort(key=lambda pair: pair[0], reverse=True)
         return [item for _, item in matches[:limit]]
-

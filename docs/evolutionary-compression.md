@@ -62,6 +62,31 @@ GPU，T5 encoder 和 VAE 留在 CPU。
 exploit 比例，失败轮次降低 exploit 比例。真实 adapter 对未知 Wan 模块布局
 fail closed，不会把未知结构当作可安全裁剪的 Transformer block。
 
+## 对比实验协议
+
+要验证“算法演化”本身的收益，使用同一 checkpoint、manifest、seed、预算
+和输出指标，分别建立四个独立 `output_root`：
+
+1. `fixed-algorithm`：deterministic agent，`exploit_ratio: 1.0`，关闭策略更新；
+2. `coding-agent`：只接入结构化 provider，不传入历史经验；
+3. `agent-memory`：接入 SkillHub/ExperienceStore，但固定搜索策略；
+4. `algorithm-evolution`：当前默认路径，算法 provider、经验检索和
+   exploit/explore 策略都启用。
+
+对应配置开关是 `memory_enabled` 和 `adapt_search_policy`；前三个 baseline
+只需在各自 YAML 中关闭相应能力，且必须使用独立的 `output_root`。
+
+每个 run 至少记录：最终 `quality_score`、`quality_delta`、压缩后参数/模型
+大小、平均生成耗时、有效实验数、失败实验数、总 GPU wall time，以及在新
+prompt/新 seed manifest 上的迁移结果。`rounds/*/decision.json`、
+`experiences.jsonl` 和 `search-policy.json` 是对比实验的机器可读输入；不要
+把不同 manifest 或不同质量阈值的结果直接横向比较。
+
+当前仓库先完成 Wan2.1-1.3B 的真实闭环；H3 迁移只依赖同一组
+`WanModelAdapter`/`CompressionOperator`/`EvaluationFn` 边界，待 Wan 的
+算法候选、质量证据和策略演化稳定后，再新增 H3 adapter，不修改现有 H3
+operator 和 student training 路径。
+
 不要让两个命令共享同一个 `output_root` 并发运行；每个实验使用独立的
 output root，避免 parent checkpoint 和 round artifacts 互相覆盖。
 

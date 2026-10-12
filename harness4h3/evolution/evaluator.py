@@ -197,6 +197,7 @@ class WanVideoEvaluator:
             scores = [float(item["quality"]["aggregate"]) for item in cases]
             result = {
                 "status": "success",
+                "evaluation_status": "measured_video",
                 "valid": all(bool(item["validity"]["valid"]) for item in cases),
                 "promotable": all(bool(item["validity"]["valid"]) for item in cases),
                 "offline_simulation": False,

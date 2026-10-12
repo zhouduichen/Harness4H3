@@ -48,6 +48,14 @@ def test_search_policy_uses_seeded_explore_ratio():
     assert policy.to_dict()["exploit_ratio"] == 0.7
 
 
+def test_search_policy_resume_preserves_next_choice():
+    running = SearchPolicy(exploit_ratio=0.7, seed=11)
+    running.choose(has_best=True)
+    running.choose(has_best=True)
+    restored = SearchPolicy.from_dict(running.to_dict())
+    assert running.choose(has_best=True) == restored.choose(has_best=True)
+
+
 def test_deterministic_agent_generates_source_from_low_sensitivity_block():
     candidate = AlgorithmAgent().generate(
         "A0001",
