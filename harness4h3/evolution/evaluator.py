@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import math
 import statistics
@@ -16,6 +17,9 @@ from ..adapters.wan.contracts import CheckpointArtifact, stable_digest
 
 class WanEvaluationError(RuntimeError):
     """A real evaluation could not produce trusted evidence."""
+
+
+EVALUATOR_VERSION = "wan-video-evaluator-v3"
 
 
 @dataclass(frozen=True)
@@ -224,12 +228,15 @@ class WanVideoEvaluator:
         self._quality_backend = quality_backend
         self._pipeline_loader = pipeline_loader
         self._cache: dict[str, Mapping[str, Any]] = {}
+        self.manifest_sha256 = hashlib.sha256(Path(config.evaluation_manifest).read_bytes()).hexdigest()
         self._manifest = self._load_manifest(config.evaluation_manifest)
         self._wan_spec = self._load_wan_spec(config.wan_config)
         self.recipe_digest = stable_digest(
             {
                 "manifest": self._manifest,
+                "manifest_sha256": self.manifest_sha256,
                 "wan_spec": self._wan_spec,
+                "evaluator_version": EVALUATOR_VERSION,
                 "device": config.device,
                 "dtype": config.dtype,
                 "max_cases": config.max_cases,
@@ -375,6 +382,9 @@ class WanVideoEvaluator:
             scores = [float(item["quality"]["aggregate"]) for item in cases]
             result = {
                 "status": "success",
+                "checkpoint_sha256": artifact.sha256,
+                "evaluator_version": EVALUATOR_VERSION,
+                "evaluation_manifest_sha256": self.manifest_sha256,
                 "evaluation_status": "measured_video",
                 "valid": all(bool(item["validity"]["valid"]) for item in cases),
                 "promotable": all(bool(item["validity"]["valid"]) for item in cases),

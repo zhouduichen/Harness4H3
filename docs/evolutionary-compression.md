@@ -100,6 +100,20 @@ prompt/新 seed manifest 上的迁移结果。`rounds/*/decision.json`、
 `experiences.jsonl` 和 `search-policy.json` 是对比实验的机器可读输入；不要
 把不同 manifest 或不同质量阈值的结果直接横向比较。
 
+完成四路 run 后，用只读汇总器检查协议一致性并生成机器可读对比：
+
+```bash
+.venv/bin/python tools/compare_evolution_runs.py --json \
+  --expected-cases 16 \
+  --run fixed-algorithm=var/rsi/fixed-algorithm \
+  --run coding-agent=var/rsi/coding-agent \
+  --run agent-memory=var/rsi/agent-memory \
+  --run algorithm-evolution=var/rsi/algorithm-evolution
+```
+
+汇总器不会把缺失指标填成零，也不会把被拒绝候选当作 active model；不同
+`evaluator_recipe_sha256` 或 case 数量不一致时，结果会标记为不可直接比较。
+
 当前仓库先完成 Wan2.1-1.3B 的真实闭环；H3 迁移只依赖同一组
 `WanModelAdapter`/`CompressionOperator`/`EvaluationFn` 边界，待 Wan 的
 算法候选、质量证据和策略演化稳定后，再新增 H3 adapter，不修改现有 H3
