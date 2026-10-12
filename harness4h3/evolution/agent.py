@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -7,6 +11,18 @@ from .candidate import AlgorithmCandidate
 
 
 Provider = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+
+
+ALGORITHM_RESPONSE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["source", "hypothesis", "parent_id"],
+    "properties": {
+        "source": {"type": "string"},
+        "hypothesis": {"type": "string"},
+        "parent_id": {"type": ["string", "null"]},
+    },
+}
 
 
 def _seed_source(block_id: str, algorithm_id: str) -> str:
@@ -78,3 +94,103 @@ class AlgorithmAgent:
             if isinstance(item, Mapping) and isinstance(item.get("block_id"), str):
                 return str(item["block_id"])
         return "block.0"
+
+
+def build_algorithm_provider(
+    provider_name: str,
+    model_name: str,
+    *,
+    endpoint: str,
+    api_key_env: str = "OPENAI_API_KEY",
+    timeout_s: float = 180.0,
+) -> Provider:
+    """Build an LLM callable that returns only the bounded algorithm fields."""
+
+    provider = str(provider_name).strip().lower().replace("-", "_")
+    if provider in {"deterministic", "offline", "mock"}:
+        raise ValueError("deterministic provider does not need an HTTP callable")
+    if not str(model_name).strip() or timeout_s <= 0:
+        raise ValueError("algorithm provider model and timeout are required")
+    if provider == "ollama":
+        url = endpoint.rstrip("/")
+        url = url if url.endswith("/api/chat") else url + "/api/chat"
+    elif provider in {"vllm", "openai_compatible", "openai"}:
+        url = endpoint
+        if provider in {"vllm", "openai_compatible"} and not url.rstrip("/").endswith("/chat/completions"):
+            url = url.rstrip("/") + "/v1/chat/completions"
+    else:
+        raise ValueError("unsupported_algorithm_provider: %s" % provider_name)
+
+    def call(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        prompt = (
+            "Generate one compression algorithm for a trusted Wan DiT harness. "
+            "Return JSON only with source, hypothesis, and parent_id. The source must define "
+            "propose(profile, history) and return only a bounded operator/args plan. "
+            "Never output paths, devices, shell commands, imports outside the sandbox allowlist, "
+            "or evaluator settings.\n\n"
+            + json.dumps(dict(payload), ensure_ascii=False, sort_keys=True)
+        )
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        if provider in {"openai", "openai_compatible", "vllm"} and api_key_env:
+            token = os.environ.get(api_key_env, "").strip()
+            if token:
+                headers["Authorization"] = "Bearer " + token
+        if provider == "ollama":
+            request_payload = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "think": False,
+                "format": ALGORITHM_RESPONSE_SCHEMA,
+                "options": {"temperature": 0.2},
+            }
+        elif provider in {"vllm", "openai_compatible"}:
+            request_payload = {
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": "Return JSON only; do not call tools or output unsafe execution instructions."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.2,
+                "stream": False,
+                "response_format": {"type": "json_schema", "json_schema": {"name": "compression_algorithm", "strict": True, "schema": ALGORITHM_RESPONSE_SCHEMA}},
+            }
+        else:
+            request_payload = {
+                "model": model_name,
+                "instructions": "Return JSON only; do not call tools or output unsafe execution instructions.",
+                "input": prompt,
+                "store": False,
+                "text": {"format": {"type": "json_schema", "name": "compression_algorithm", "strict": True, "schema": ALGORITHM_RESPONSE_SCHEMA}},
+            }
+        request = urllib.request.Request(url, data=json.dumps(request_payload).encode("utf-8"), headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=float(timeout_s)) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+            raise RuntimeError("algorithm_provider_request_failed: %s" % exc) from exc
+        if not isinstance(raw, Mapping):
+            raise ValueError("algorithm_provider_response_invalid: response must be an object")
+        if provider == "ollama":
+            content = raw.get("message", {}).get("content") if isinstance(raw.get("message"), Mapping) else None
+        elif provider in {"vllm", "openai_compatible"}:
+            choices = raw.get("choices")
+            content = choices[0].get("message", {}).get("content") if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else None
+        else:
+            content = raw.get("output_text")
+            if not content:
+                for item in raw.get("output", []):
+                    for part in item.get("content", []) if isinstance(item, Mapping) else []:
+                        if isinstance(part, Mapping) and part.get("type") == "output_text":
+                            content = part.get("text")
+                            break
+                    if content:
+                        break
+        if not isinstance(content, str):
+            raise ValueError("algorithm_provider_response_invalid: no JSON content")
+        parsed = json.loads(content)
+        if not isinstance(parsed, Mapping):
+            raise ValueError("algorithm_provider_response_invalid: content must be an object")
+        return dict(parsed)
+
+    return call

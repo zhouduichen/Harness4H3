@@ -1,0 +1,15 @@
+backend: diffusers
+checkpoint: /models/Wan2.1-T2V-1.3B-Diffusers
+output_root: ../var/evolutionary-compression-wan
+device: cuda
+dtype: bfloat16
+local_files_only: true
+sandbox_timeout_s: 10
+exploit_ratio: 0.7
+seed: 7
+controller:
+  provider: vllm
+  model: qwen3.5-controller
+  endpoint: http://127.0.0.1:8000/v1/chat/completions
+  api_key_env: ""
+  timeout_s: 180

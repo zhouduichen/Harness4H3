@@ -71,6 +71,12 @@ from .student.wan_experiment import (
     WanRealExperimentConfig,
     WanTrainingExperimentConfig,
 )
+from .adapters.wan import build_wan_adapter
+from .evolution import CompressionConfig, EvolutionLoop, SearchPolicy
+from .evolution.agent import AlgorithmAgent, build_algorithm_provider
+from .operators.wan import build_wan_compression_registry
+from .profiler import profile_model
+from .sandbox import AlgorithmSandbox
 
 
 def _emit(value: Any, json_mode: bool) -> None:
@@ -80,6 +86,77 @@ def _emit(value: Any, json_mode: bool) -> None:
         print(value)
     else:
         print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _compression_config(args: argparse.Namespace) -> CompressionConfig:
+    return CompressionConfig.from_path(Path(args.compression_config).resolve())
+
+
+def _compression_context(config: CompressionConfig):
+    if config.backend == "diffusers":
+        adapter = build_wan_adapter(config.backend, local_files_only=config.local_files_only)
+    else:
+        adapter = build_wan_adapter(config.backend, **dict(config.fake))
+    model = adapter.load_model(config.checkpoint, device=config.device, dtype=config.dtype)
+    parent = adapter.save_model(model, config.output_root / "parent")
+    return adapter, parent
+
+
+def cmd_profile_wan(args: argparse.Namespace) -> int:
+    config = _compression_config(args)
+    adapter, parent = _compression_context(config)
+    report = profile_model(adapter, adapter.reload_model(parent), seed=config.seed)
+    output = Path(args.output).resolve() if args.output else config.output_root / "profile.json"
+    report.write_json(output)
+    _emit({"status": "success", "profile": str(output), "model": report.model, "provenance": report.provenance}, args.json)
+    return 0
+
+
+def cmd_compress_wan(args: argparse.Namespace) -> int:
+    config = _compression_config(args)
+    adapter, parent = _compression_context(config)
+    source = Path(args.algorithm).read_text(encoding="utf-8")
+    sandbox = AlgorithmSandbox(config.output_root / "sandbox", timeout_s=config.sandbox_timeout_s)
+    profile = profile_model(adapter, adapter.reload_model(parent), seed=config.seed)
+    result = sandbox.run(source, profile.to_dict(), [])
+    if result.status != "success" or result.plan is None:
+        _emit({"status": "failed", "failure_type": result.failure_type, "message": result.message}, args.json)
+        return 1
+    compression = build_wan_compression_registry().execute(result.plan.operator, adapter, parent, result.plan.args, config.output_root / "compressed")
+    _emit(compression.to_dict(), args.json)
+    return 0 if compression.status == "success" else 1
+
+
+def cmd_evolve_compression(args: argparse.Namespace) -> int:
+    config = _compression_config(args)
+    if int(args.rounds) <= 0:
+        raise ValueError("rounds must be positive")
+    adapter, parent = _compression_context(config)
+    controller = dict(config.controller)
+    provider_name = str(controller.get("provider", "deterministic"))
+    agent = AlgorithmAgent()
+    if provider_name.strip().lower() not in {"deterministic", "offline", "mock"}:
+        agent = AlgorithmAgent(
+            provider=build_algorithm_provider(
+                provider_name,
+                str(controller.get("model", "")),
+                endpoint=str(controller.get("endpoint", "http://127.0.0.1:8000/v1/chat/completions")),
+                api_key_env=str(controller.get("api_key_env", "OPENAI_API_KEY")),
+                timeout_s=float(controller.get("timeout_s", 180.0)),
+            )
+        )
+    loop = EvolutionLoop(
+        adapter=adapter,
+        parent=parent,
+        output_root=config.output_root,
+        sandbox=AlgorithmSandbox(config.output_root / "sandbox", timeout_s=config.sandbox_timeout_s),
+        agent=agent,
+        search_policy=SearchPolicy(exploit_ratio=config.exploit_ratio, seed=config.seed),
+    )
+    outcomes = [loop.run_round().to_dict() for _ in range(int(args.rounds))]
+    failed = sum(1 for item in outcomes if item["status"] == "failed")
+    _emit({"status": "success" if failed == 0 else "failed", "rounds": outcomes, "failed_rounds": failed}, args.json)
+    return 0 if failed == 0 else 1
 
 
 def _config(args: argparse.Namespace) -> AppConfig:
@@ -740,6 +817,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--json", action="store_true", help="emit one machine-readable JSON object")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    profile_wan = subparsers.add_parser("profile-wan", help="profile a fake or Diffusers Wan DiT checkpoint")
+    profile_wan.add_argument("--config", dest="compression_config", default="configs/evolutionary-compression.fake.yaml")
+    profile_wan.add_argument("--output")
+    _json_flag(profile_wan)
+    profile_wan.set_defaults(handler=cmd_profile_wan)
+
+    compress_wan = subparsers.add_parser("compress-wan", help="execute one sandboxed Wan compression algorithm")
+    compress_wan.add_argument("--config", dest="compression_config", default="configs/evolutionary-compression.fake.yaml")
+    compress_wan.add_argument("--algorithm", required=True, help="Python source defining propose(profile, history)")
+    _json_flag(compress_wan)
+    compress_wan.set_defaults(handler=cmd_compress_wan)
+
+    evolve_compression = subparsers.add_parser("evolve-compression", help="generate, sandbox, execute, evaluate, and archive Wan compression algorithms")
+    evolve_compression.add_argument("--config", dest="compression_config", default="configs/evolutionary-compression.fake.yaml")
+    evolve_compression.add_argument("--rounds", type=int, default=1)
+    _json_flag(evolve_compression)
+    evolve_compression.set_defaults(handler=cmd_evolve_compression)
 
     validate = subparsers.add_parser("validate-config", help="validate configuration, workflow, and tasks without calling ComfyUI")
     validate.add_argument("--tasks")
