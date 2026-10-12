@@ -12,7 +12,11 @@ def test_evolution_loop_runs_fake_round_and_persists_evidence(tmp_path):
     assert outcome.status == "promoted"
     assert outcome.child_model_id == "M0001"
     assert (tmp_path / "run" / "rounds" / outcome.round_id / "decision.json").exists()
-    assert list(loop.experience_store.read())
+    records = list(loop.experience_store.read())
+    assert records
+    assert records[0].operator == "prune_blocks"
+    assert records[0].operator_args["block_ids"]
+    assert (tmp_path / "run" / "search-policy.json").exists()
     assert loop.model_store.active_id == "M0001"
 
 
@@ -31,4 +35,3 @@ def test_evolution_loop_keeps_failed_algorithm_as_experience(tmp_path):
     record = list(loop.experience_store.read())[0]
     assert record.status == "failed"
     assert record.decision["failure_type"] == "sandbox_policy"
-

@@ -34,3 +34,12 @@ class SearchPolicy:
             "explore_rounds": int(self.explore_rounds),
         }
 
+    @classmethod
+    def from_dict(cls, raw: dict[str, object]) -> "SearchPolicy":
+        return cls(
+            exploit_ratio=float(raw.get("exploit_ratio", 0.7)),
+            seed=int(raw.get("seed", 7)),
+            rounds=int(raw.get("rounds", 0)),
+            exploit_rounds=int(raw.get("exploit_rounds", 0)),
+            explore_rounds=int(raw.get("explore_rounds", 0)),
+        )

@@ -72,7 +72,7 @@ class EvolutionLoop:
         self.sandbox = sandbox or AlgorithmSandbox(self.output_root / "sandbox")
         self.registry = registry or build_wan_compression_registry()
         self.evaluator = evaluator or self._default_evaluator
-        self.search_policy = search_policy or SearchPolicy()
+        self.search_policy = search_policy or self._load_search_policy()
         self.parent = parent
         self._initialize_parent()
 
@@ -131,6 +131,8 @@ class EvolutionLoop:
         child_candidate = self._create_child(parent_candidate, compression.child_checkpoint, algorithm, evaluation)
         feasible = bool(evaluation.get("feasible", False)) and not bool(evaluation.get("critical_regression", False))
         decision_status = "promoted" if feasible else "rejected"
+        policy_choice = self.search_policy.choose(has_best=feasible)
+        self._persist_search_policy()
         decision = {
             "status": decision_status,
             "parent_model_id": parent_candidate.id,
@@ -140,7 +142,7 @@ class EvolutionLoop:
             "operator_args": dict(sandbox_result.plan.args),
             "feasible": feasible,
             "evaluation": evaluation,
-            "search_policy": self.search_policy.choose(has_best=feasible),
+            "search_policy": {"choice": policy_choice, **self.search_policy.to_dict()},
         }
         decision_path = round_dir / "decision.json"
         _write_json(decision_path, decision)
@@ -217,6 +219,19 @@ class EvolutionLoop:
             except ValueError:
                 continue
         return "R%04d" % (max(numbers, default=0) + 1)
+
+    def _load_search_policy(self) -> SearchPolicy:
+        path = self.output_root / "search-policy.json"
+        if not path.exists():
+            return SearchPolicy()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return SearchPolicy.from_dict(dict(raw))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return SearchPolicy()
+
+    def _persist_search_policy(self) -> None:
+        _write_json(self.output_root / "search-policy.json", self.search_policy.to_dict())
 
     @staticmethod
     def _default_evaluator(child: CheckpointArtifact, profile: Mapping[str, Any]) -> Mapping[str, Any]:
