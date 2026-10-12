@@ -115,10 +115,16 @@ class ModalSchedule:
 class Conditioning:
     text: Tensor
     negative_text: Optional[Tensor] = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _validate_tensor("text conditioning", self.text)
         _validate_tensor("negative text conditioning", self.negative_text)
+        if not isinstance(self.metadata, Mapping):
+            raise TypeError("conditioning metadata must be a mapping")
+        if not isinstance(self.metadata, Mapping):
+            raise TypeError("conditioning metadata must be a mapping")
 
 
 @dataclass(frozen=True)
