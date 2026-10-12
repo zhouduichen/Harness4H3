@@ -931,7 +931,6 @@ EOF
         --host 127.0.0.1 \
         --port 8000 \
         --served-model-name qwen3.5-controller \
-        --device cuda \
         --tensor-parallel-size "$tensor_parallel" \
         --gpu-memory-utilization "$gpu_memory_utilization" \
         --max-model-len "$MAX_MODEL_LEN" \
