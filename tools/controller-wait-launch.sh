@@ -660,11 +660,11 @@ gpu_memory_snapshot() {
     if printf '%s\n' "$probe" | awk -F, '
         BEGIN { valid=0 }
         {
-            index=$1; free=$2; total=$3
-            gsub(/[[:space:]]/, "", index)
+            gpu_index=$1; free=$2; total=$3
+            gsub(/[[:space:]]/, "", gpu_index)
             gsub(/[[:space:]]/, "", free)
             gsub(/[[:space:]]/, "", total)
-            if (index ~ /^[0-9]+$/ && free ~ /^[0-9]+([.][0-9]+)?$/ && total ~ /^[0-9]+([.][0-9]+)?$/) valid++
+            if (gpu_index ~ /^[0-9]+$/ && free ~ /^[0-9]+([.][0-9]+)?$/ && total ~ /^[0-9]+([.][0-9]+)?$/) valid++
         }
         END { exit(valid > 0 ? 0 : 1) }'; then
         printf '%s\n' "$probe"
@@ -929,6 +929,7 @@ EOF
         --host 127.0.0.1 \
         --port 8000 \
         --served-model-name qwen3.5-controller \
+        --device cuda \
         --tensor-parallel-size "$tensor_parallel" \
         --gpu-memory-utilization "$gpu_memory_utilization" \
         --max-model-len "$MAX_MODEL_LEN" \
