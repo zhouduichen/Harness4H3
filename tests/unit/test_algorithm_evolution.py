@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 from harness4h3.evolution.agent import AlgorithmAgent
+from harness4h3.evolution.agent import build_algorithm_provider
 from harness4h3.evolution.policy import SearchPolicy
 from harness4h3.evolution.skill_hub import SkillHub
 from harness4h3.memory.experience import ExperienceRecord
@@ -66,3 +68,20 @@ def test_provider_agent_rejects_parent_override():
     else:
         raise AssertionError("provider parent override was accepted")
 
+
+def test_vllm_algorithm_provider_parses_structured_json_without_network(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps({"source": "def propose(profile, history):\\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\\n", "hypothesis": "test", "parent_id": "M0000"})}}]}).encode()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: Response())
+    provider = build_algorithm_provider("vllm", "test-model", endpoint="http://127.0.0.1:8000/v1/chat/completions")
+    result = provider({"parent_id": "M0000", "profile": {}, "history": [], "skills": []})
+    assert result["parent_id"] == "M0000"
+    assert "def propose" in result["source"]
