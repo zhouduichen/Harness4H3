@@ -68,7 +68,7 @@ class AlgorithmAgent:
                 metadata={"generator": "deterministic_seed", "operator": ("prune_ffn_channels" if search_choice == "explore" else "prune_blocks"), "search_choice": search_choice},
             )
         payload = {
-            "profile": dict(profile),
+            "profile": _compact_profile(profile),
             "history": [dict(item) for item in history],
             "skills": [dict(item) for item in skills],
             "parent_id": parent_id,
@@ -105,6 +105,46 @@ class AlgorithmAgent:
             if isinstance(item, Mapping) and isinstance(item.get("block_id"), str):
                 return str(item["block_id"])
         return "block.0"
+
+
+def _compact_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep provider prompts bounded while retaining compression evidence."""
+
+    compact: dict[str, Any] = {}
+    for key in ("model", "provenance", "schema_version", "timestep_sensitivity"):
+        if key in profile:
+            compact[key] = profile[key]
+    compact["layers"] = [
+        {
+            field: item[field]
+            for field in ("block_id", "index", "parameter_count", "estimated_flops", "latency_ms", "memory_delta_bytes", "module_path", "measurement")
+            if field in item
+        }
+        for item in profile.get("layers", [])
+        if isinstance(item, Mapping)
+    ]
+    compact["block_sensitivity"] = [
+        {field: item[field] for field in ("block_id", "importance_score", "available", "method") if field in item}
+        for item in profile.get("block_sensitivity", [])
+        if isinstance(item, Mapping)
+    ]
+    channel_records = []
+    for item in profile.get("channel_sensitivity", []):
+        if not isinstance(item, Mapping):
+            continue
+        record = {field: item[field] for field in ("block_id", "width", "available", "method") if field in item}
+        channels = [channel for channel in item.get("channels", []) if isinstance(channel, Mapping)]
+        record["channel_count"] = len(channels)
+        record["channels"] = sorted(
+            (
+                {field: channel[field] for field in ("channel", "importance_score", "available") if field in channel}
+                for channel in channels
+            ),
+            key=lambda channel: float(channel.get("importance_score", 0.0)),
+        )[:16]
+        channel_records.append(record)
+    compact["channel_sensitivity"] = channel_records
+    return compact
 
 
 def build_algorithm_provider(
@@ -183,7 +223,14 @@ def build_algorithm_provider(
         try:
             with urllib.request.urlopen(request, timeout=float(timeout_s)) as response:
                 raw = json.loads(response.read().decode("utf-8"))
-        except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:500]
+            except OSError:
+                detail = ""
+            suffix = ": " + detail if detail else ""
+            raise RuntimeError("algorithm_provider_request_failed: %s%s" % (exc, suffix)) from exc
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             raise RuntimeError("algorithm_provider_request_failed: %s" % exc) from exc
         if not isinstance(raw, Mapping):
             raise ValueError("algorithm_provider_response_invalid: response must be an object")
