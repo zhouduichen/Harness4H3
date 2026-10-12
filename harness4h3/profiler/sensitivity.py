@@ -38,9 +38,15 @@ def measure_block_sensitivity(adapter: WanModelAdapter, model: Any, *, sample: A
     records = []
     for block in adapter.get_blocks(model):
         try:
-            candidate = copy.deepcopy(model)
-            adapter.remove_blocks(candidate, (block.block_id,))
-            distance = _distance(base, _forward(candidate, sample, forward_fn))
+            probe = getattr(adapter, "probe_block_removal", None)
+            if callable(probe):
+                callback = forward_fn or (lambda current_model, current_sample: _forward(current_model, current_sample, None))
+                removed = probe(model, block.block_id, sample, callback)
+            else:
+                candidate = copy.deepcopy(model)
+                adapter.remove_blocks(candidate, (block.block_id,))
+                removed = _forward(candidate, sample, forward_fn)
+            distance = _distance(base, removed)
             records.append({"block_id": block.block_id, "importance_score": distance, "available": distance is not None, "method": "leave_one_block_out"})
         except (RuntimeError, TypeError, ValueError, AttributeError):
             records.append({"block_id": block.block_id, "importance_score": None, "available": False, "method": "leave_one_block_out"})
@@ -54,13 +60,25 @@ def _resolve(root: Any, path: str) -> Any:
     return value
 
 
+def _paired_ffn(block: Any) -> tuple[Any, Any]:
+    candidates = (("up_proj", "down_proj"), ("ffn.up_proj", "ffn.down_proj"), ("ffn.net.0.proj", "ffn.net.2"))
+    for up_path, down_path in candidates:
+        try:
+            up = _resolve(block, up_path)
+            down = _resolve(block, down_path)
+        except (AttributeError, IndexError, TypeError):
+            continue
+        if all(hasattr(module, attribute) for module in (up, down) for attribute in ("in_features", "out_features")):
+            return up, down
+    raise AttributeError("paired FFN projections unavailable")
+
+
 def measure_channel_sensitivity(adapter: WanModelAdapter, model: Any, *, max_probes: int = 32) -> tuple[Mapping[str, Any], ...]:
     records = []
     for block in adapter.get_blocks(model):
         try:
             module = _resolve(model, block.module_path)
-            up = getattr(module, "up_proj")
-            down = getattr(module, "down_proj")
+            up, down = _paired_ffn(module)
             width = int(up.out_features)
             limit = min(width, max(1, int(max_probes)))
             values = []
@@ -87,4 +105,3 @@ def measure_timestep_sensitivity(model: Any, *, sample: Any = None, forward_fn: 
         except (RuntimeError, TypeError, ValueError, AttributeError):
             records[name] = {"timestep": value, "importance_score": None, "available": False, "method": "timestep_probe"}
     return records
-

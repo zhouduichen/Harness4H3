@@ -20,6 +20,9 @@ def _parameter_count(module: Any) -> int:
 
 
 def _default_sample(adapter: WanModelAdapter, model: Any, seed: int) -> Any:
+    profile_sample = getattr(adapter, "profile_sample", None)
+    if callable(profile_sample):
+        return profile_sample(model, seed)
     try:
         import torch
     except ImportError:
@@ -41,6 +44,16 @@ def _default_forward(model: Any, sample: Any) -> Any:
         return None
 
 
+def _adapter_forward(adapter: WanModelAdapter, model: Any, sample: Any) -> Any:
+    forward_profile = getattr(adapter, "forward_profile", None)
+    if callable(forward_profile):
+        try:
+            return forward_profile(model, sample)
+        except (RuntimeError, TypeError, ValueError, AttributeError):
+            return None
+    return _default_forward(model, sample)
+
+
 def _resolve(root: Any, path: str) -> Any:
     value = root
     for part in path.split("."):
@@ -51,18 +64,30 @@ def _resolve(root: Any, path: str) -> Any:
 def _estimate_flops(model: Any, module_path: str) -> Optional[int]:
     try:
         block = _resolve(model, module_path)
-        up = getattr(block, "up_proj")
-        down = getattr(block, "down_proj")
+        up, down = _paired_ffn(block)
         return 2 * (int(up.in_features) * int(up.out_features) + int(down.in_features) * int(down.out_features))
     except (AttributeError, IndexError, TypeError, ValueError):
         return None
+
+
+def _paired_ffn(block: Any) -> tuple[Any, Any]:
+    candidates = (("up_proj", "down_proj"), ("ffn.up_proj", "ffn.down_proj"), ("ffn.net.0.proj", "ffn.net.2"))
+    for up_path, down_path in candidates:
+        try:
+            up = _resolve(block, up_path)
+            down = _resolve(block, down_path)
+        except (AttributeError, IndexError, TypeError):
+            continue
+        if all(hasattr(module, attribute) for module in (up, down) for attribute in ("in_features", "out_features")):
+            return up, down
+    raise AttributeError("paired FFN projections unavailable")
 
 
 def profile_layers(adapter: WanModelAdapter, model: Any, *, sample: Any = None, forward_fn: Optional[ForwardFn] = None, measure_latency: bool = True, seed: int = 7) -> tuple[Mapping[str, Any], ...]:
     """Collect structural layer records without claiming unavailable metrics."""
 
     sample = _default_sample(adapter, model, seed) if sample is None else sample
-    forward = forward_fn or _default_forward
+    forward = forward_fn or (lambda current_model, current_sample: _adapter_forward(adapter, current_model, current_sample))
     records = []
     for block in adapter.get_blocks(model):
         latency_ms: Optional[float] = None
@@ -104,10 +129,16 @@ def profile_model(
 ) -> ProfileReport:
     structure = adapter.inspect(model)
     sample = _default_sample(adapter, model, seed)
-    layers = profile_layers(adapter, model, sample=sample, forward_fn=forward_fn, measure_latency=measure_latency, seed=seed)
-    block_sensitivity = measure_block_sensitivity(adapter, model, sample=sample, forward_fn=forward_fn)
+    effective_forward = forward_fn or (lambda current_model, current_sample: _adapter_forward(adapter, current_model, current_sample))
+    layers = profile_layers(adapter, model, sample=sample, forward_fn=effective_forward, measure_latency=measure_latency, seed=seed)
+    block_sensitivity = measure_block_sensitivity(adapter, model, sample=sample, forward_fn=effective_forward)
     channel_sensitivity = measure_channel_sensitivity(adapter, model, max_probes=max_channel_probes)
-    timestep_sensitivity = measure_timestep_sensitivity(model, sample=sample, forward_fn=timestep_fn or _default_timestep_forward)
+    default_timestep = getattr(adapter, "forward_timestep_profile", None)
+    if callable(default_timestep):
+        timestep_forward = default_timestep
+    else:
+        timestep_forward = timestep_fn or _default_timestep_forward
+    timestep_sensitivity = measure_timestep_sensitivity(model, sample=sample, forward_fn=timestep_forward)
     offline = bool(structure.metadata.get("offline_simulation", False))
     return ProfileReport(
         model=structure.to_dict(),
@@ -120,7 +151,7 @@ def profile_model(
             "seed": int(seed),
             "latency_available": any(item["measurement"]["latency_available"] for item in layers),
             "memory_available": False,
-            "flops_available": False,
+            "flops_available": any(item["estimated_flops"] is not None for item in layers),
             "channel_probe_limit": int(max_channel_probes),
         },
     )

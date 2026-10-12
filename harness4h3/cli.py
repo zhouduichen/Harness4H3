@@ -74,11 +74,14 @@ def _compression_config(args: argparse.Namespace) -> CompressionConfig:
     return CompressionConfig.from_path(Path(args.compression_config).resolve())
 
 
-def _compression_context(config: CompressionConfig):
+def _build_compression_adapter(config: CompressionConfig):
     if config.backend == "diffusers":
-        adapter = build_wan_adapter(config.backend, local_files_only=config.local_files_only)
-    else:
-        adapter = build_wan_adapter(config.backend, **dict(config.fake))
+        return build_wan_adapter(config.backend, local_files_only=config.local_files_only)
+    return build_wan_adapter(config.backend, **dict(config.fake))
+
+
+def _compression_context(config: CompressionConfig):
+    adapter = _build_compression_adapter(config)
     model = adapter.load_model(config.checkpoint, device=config.device, dtype=config.dtype)
     parent = adapter.save_model(model, config.output_root / "parent")
     return adapter, parent
@@ -86,8 +89,9 @@ def _compression_context(config: CompressionConfig):
 
 def cmd_profile_wan(args: argparse.Namespace) -> int:
     config = _compression_config(args)
-    adapter, parent = _compression_context(config)
-    report = profile_model(adapter, adapter.reload_model(parent), seed=config.seed)
+    adapter = _build_compression_adapter(config)
+    model = adapter.load_model(config.checkpoint, device=config.device, dtype=config.dtype)
+    report = profile_model(adapter, model, seed=config.seed)
     output = Path(args.output).resolve() if args.output else config.output_root / "profile.json"
     report.write_json(output)
     _emit({"status": "success", "profile": str(output), "model": report.model, "provenance": report.provenance}, args.json)
