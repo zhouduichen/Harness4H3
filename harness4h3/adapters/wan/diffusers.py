@@ -84,13 +84,30 @@ def _copy_shared_components(source: Path, target: Path) -> bool:
             source,
             target,
             ignore=shutil.ignore_patterns("transformer"),
-            copy_function=os.link,
+            copy_function=_hardlink_or_copy,
         )
     except (OSError, shutil.Error):
         if target.exists():
             shutil.rmtree(target)
         return False
     return True
+
+
+def _hardlink_or_copy(source: str | Path, target: str | Path) -> None:
+    """Share regular files when possible, but dereference HF cache symlinks."""
+
+    source_path = Path(source)
+    target_path = Path(target)
+    if source_path.is_symlink():
+        shutil.copy2(source_path, target_path, follow_symlinks=True)
+        return
+    try:
+        os.link(source_path, target_path)
+    except OSError:
+        # Parent checkpoints may live on /home while experiment artifacts use
+        # /data.  A portable byte copy is required when hardlinks cannot span
+        # those filesystems.
+        shutil.copy2(source_path, target_path, follow_symlinks=True)
 
 
 def _copy_full_checkpoint(source: Path, target: Path) -> bool:
