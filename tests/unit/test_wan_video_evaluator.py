@@ -60,3 +60,7 @@ def test_real_evaluator_records_video_and_quality_evidence(tmp_path, monkeypatch
     assert result["feasible"] is True
     assert result["quality_metrics"]["score_type"] == "clip_temporal"
     assert Path(result["cases"][0]["video_path"]).is_file()
+    assert len(result["cases"][0]["latency_samples_s"]) == 3
+    assert result["hardware_metrics"]["gpu_runtime_cost_s"] >= result["hardware_metrics"]["inference_wall_time_s_median"]
+    assert len(result["evaluator_recipe_sha256"]) == 64
+    assert list((tmp_path / "evaluation" / "evaluations" / child.sha256).iterdir())

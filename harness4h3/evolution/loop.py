@@ -17,6 +17,7 @@ from ..profiler import ProfileReport, profile_model
 from ..sandbox.runner import AlgorithmSandbox, SandboxResult
 from .agent import AlgorithmAgent
 from .candidate import AlgorithmCandidate
+from .evaluator import PromotionPolicy
 from .policy import SearchPolicy
 from .skill_hub import SkillHub
 from .store import AlgorithmStore
@@ -60,6 +61,7 @@ class EvolutionLoop:
         search_policy: Optional[SearchPolicy] = None,
         memory_enabled: bool = True,
         adapt_search_policy: bool = True,
+        promotion_policy: Optional[PromotionPolicy] = None,
     ) -> None:
         self.adapter = adapter
         self.output_root = Path(output_root)
@@ -77,12 +79,15 @@ class EvolutionLoop:
         self.search_policy = search_policy or self._load_search_policy()
         self.memory_enabled = bool(memory_enabled)
         self.adapt_search_policy = bool(adapt_search_policy)
+        self.promotion_policy = promotion_policy or PromotionPolicy()
+        self.pareto_path = self.output_root / "pareto-front.json"
         self.parent = parent
         self._initialize_parent()
 
     def _initialize_parent(self) -> None:
         if self.model_store.lineage():
             return
+        self._verify_checkpoint(self.parent, expected_sha256=self.parent.sha256)
         structure = self.parent.structure
         state = ModelState(
             model_id="M0000",
@@ -98,6 +103,7 @@ class EvolutionLoop:
             provenance={"checkpoint_sha256": self.parent.sha256, "offline_simulation": bool(self.parent.metadata.get("offline_simulation", False))},
         )
         self.model_store.initialize(ModelCandidate("M0000", None, 0, self.parent.path, state, None, "active", {"adapter": "wan"}))
+        _write_json(self.output_root / "initial-baseline.json", self.parent.to_dict())
 
     def run_round(self) -> EvolutionRound:
         round_id = self._next_round_id()
@@ -114,17 +120,35 @@ class EvolutionLoop:
         # The initial parent already has a measured structural state.  Let the
         # policy decide whether to exploit it or open an exploration branch.
         search_choice = self.search_policy.choose(has_best=bool(parent_candidate.state.measured_metrics))
-        algorithm = self.agent.generate(
-            algorithm_id,
-            parent_id=parent_candidate.id,
-            profile=profile.to_dict(),
-            history=skills,
-            skills=skills,
-            search_choice=search_choice,
-        )
-        self.algorithm_store.create(algorithm)
+        parent_algorithm_id = parent_candidate.created_by_experiment_id
+        try:
+            algorithm = self.agent.generate(
+                algorithm_id,
+                parent_id=parent_candidate.id,
+                parent_algorithm_id=parent_algorithm_id,
+                profile=profile.to_dict(),
+                history=skills,
+                skills=skills,
+                search_choice=search_choice,
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            algorithm = AlgorithmCandidate.from_source(
+                algorithm_id,
+                "# algorithm generation failed\ndef propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': []}}\n",
+                parent_id=parent_candidate.id,
+                parent_algorithm_id=parent_algorithm_id,
+                hypothesis="generation failed: %s" % exc,
+                metadata={"generator_failure": True},
+            )
+            algorithm_path = round_dir / "algorithm.json"
+            _write_json(algorithm_path, algorithm.to_dict())
+            return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "generation", "algorithm_generation_failed", str(exc), {"profile": str(profile_path), "algorithm": str(algorithm_path)}, algorithm_persisted=False)
         algorithm_path = round_dir / "algorithm.json"
         _write_json(algorithm_path, algorithm.to_dict())
+        try:
+            self.algorithm_store.create(algorithm)
+        except ValueError as exc:
+            return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "generation", "duplicate_algorithm", str(exc), {"profile": str(profile_path), "algorithm": str(algorithm_path)}, algorithm_persisted=False)
 
         sandbox_result = self.sandbox.run(algorithm.source, profile.to_dict(), skills)
         sandbox_path = round_dir / "sandbox.json"
@@ -139,18 +163,38 @@ class EvolutionLoop:
         if compression.status != "success" or compression.child_checkpoint is None:
             return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "compression", compression.failure_type or "compression_failed", compression.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "compression": str(compression_path)})
 
-        evaluation = dict(self.evaluator(compression.child_checkpoint, profile.to_dict()))
+        try:
+            child_integrity = self._verify_checkpoint(compression.child_checkpoint, expected_sha256=compression.child_checkpoint.sha256, parent_sha256=parent_artifact.sha256)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            child_integrity = False
+            integrity_error = str(exc)
+        else:
+            integrity_error = None
+        try:
+            evaluation = dict(self.evaluator(compression.child_checkpoint, profile.to_dict()))
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            evaluation = {"valid": False, "evaluation_status": "failed", "failure_type": "evaluator_failed", "failure_message": str(exc), "offline_simulation": False}
+        if not child_integrity:
+            evaluation = {
+                **evaluation,
+                "valid": False,
+                "evaluation_status": "child_integrity_failed",
+                "failure_type": "child_integrity_failed",
+                "failure_message": integrity_error or "child checkpoint is identical to parent",
+            }
         evaluation_path = round_dir / "evaluation.json"
         _write_json(evaluation_path, evaluation)
         child_candidate = self._create_child(parent_candidate, compression.child_checkpoint, algorithm, evaluation)
         evaluation_offline = bool(evaluation.get("offline_simulation", False))
         parent_offline = bool(parent_candidate.state.provenance.get("offline_simulation", False))
         offline_mismatch = evaluation_offline and not parent_offline
-        feasible = (
-            bool(evaluation.get("feasible", False))
-            and not bool(evaluation.get("critical_regression", False))
-            and not offline_mismatch
+        promotion = self.promotion_policy.decide(
+            parent=parent_candidate.state.measured_metrics,
+            evaluation=evaluation,
+            child_integrity=child_integrity,
+            pareto_front=tuple(self._load_pareto_front()),
         )
+        feasible = bool(promotion.get("accepted", False)) and not offline_mismatch and not bool(evaluation.get("critical_regression", False))
         decision_status = "promoted" if feasible else "rejected"
         previous_score = float(parent_candidate.state.measured_metrics.get("search_score", parent_candidate.state.measured_metrics.get("quality_score", 0.0)))
         current_score = float(evaluation.get("search_score", evaluation.get("quality_score", 0.0)))
@@ -167,6 +211,8 @@ class EvolutionLoop:
             "evaluation_offline": evaluation_offline,
             "offline_mismatch": offline_mismatch,
             "evaluation": evaluation,
+            "promotion": dict(promotion),
+            "pareto_front_before": self._load_pareto_front(),
             "search_policy": {"choice": search_choice, **self.search_policy.to_dict()},
         }
         decision_path = round_dir / "decision.json"
@@ -175,11 +221,12 @@ class EvolutionLoop:
         self._record_experience(round_id, parent_candidate, child_candidate, algorithm, evaluation, decision, status, decision_path)
         self.algorithm_store.update(replace(algorithm, status=status, experiment_ids=(round_id,)))
         if feasible:
+            self._update_pareto_front(child_candidate.id, evaluation)
             self.model_store.set_active(child_candidate.id)
         return EvolutionRound(round_id, parent_candidate.id, algorithm.algorithm_id, decision_status, child_candidate.id, decision, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "compression": str(compression_path), "evaluation": str(evaluation_path), "decision": str(decision_path)})
 
-    def _finish_failure(self, round_id: str, round_dir: Path, parent: ModelCandidate, algorithm: AlgorithmCandidate, search_choice: str, stage: str, failure_type: str, message: str, paths: Mapping[str, str]) -> EvolutionRound:
-        self._update_search_policy(feasible=False, improved=False)
+    def _finish_failure(self, round_id: str, round_dir: Path, parent: ModelCandidate, algorithm: AlgorithmCandidate, search_choice: str, stage: str, failure_type: str, message: str, paths: Mapping[str, str], *, algorithm_persisted: bool = True) -> EvolutionRound:
+        self._update_search_policy(feasible=False, improved=False, failure_type=failure_type)
         decision = {
             "status": "failed",
             "stage": stage,
@@ -192,7 +239,8 @@ class EvolutionLoop:
         decision_path = round_dir / "decision.json"
         _write_json(decision_path, decision)
         self._record_experience(round_id, parent, None, algorithm, None, decision, "failed", decision_path)
-        self.algorithm_store.update(replace(algorithm, status="failed", experiment_ids=(round_id,), failure_reasons=(failure_type,)))
+        if algorithm_persisted:
+            self.algorithm_store.update(replace(algorithm, status="failed", experiment_ids=(round_id,), failure_reasons=(failure_type,)))
         all_paths = dict(paths)
         all_paths["decision"] = str(decision_path)
         return EvolutionRound(round_id, parent.id, algorithm.algorithm_id, "failed", None, decision, all_paths)
@@ -210,7 +258,7 @@ class EvolutionLoop:
             hidden_size=structure.hidden_size,
             ffn_width=structure.ffn_width,
             measured_metrics=dict(evaluation),
-            provenance={"checkpoint_sha256": artifact.sha256, "algorithm_id": algorithm.algorithm_id, "offline_simulation": bool(artifact.metadata.get("offline_simulation", False))},
+            provenance={"checkpoint_sha256": artifact.sha256, "algorithm_id": algorithm.algorithm_id, "algorithm_parent_id": algorithm.parent_algorithm_id, "parent_checkpoint_sha256": parent.state.provenance.get("checkpoint_sha256"), "offline_simulation": bool(artifact.metadata.get("offline_simulation", False))},
         )
         child = ModelCandidate(model_id, parent.id, parent.generation + 1, artifact.path, state, algorithm.algorithm_id, "evaluated", {"algorithm_id": algorithm.algorithm_id})
         self.model_store.create(child)
@@ -228,7 +276,7 @@ class EvolutionLoop:
             child_model_id=child.id if child else None,
             operator=str(decision.get("operator")) if decision.get("operator") else None,
             operator_args=dict(decision.get("operator_args") or {}),
-            training={"architecture": parent.state.architecture_name, "algorithm_id": algorithm.algorithm_id},
+            training={"architecture": parent.state.architecture_name, "algorithm_id": algorithm.algorithm_id, "algorithm_parent_id": algorithm.parent_algorithm_id, "hypothesis": algorithm.hypothesis, "predicted_gain": dict(algorithm.metadata.get("predicted_gain") or {})},
             evaluation=dict(evaluation) if evaluation is not None else None,
             decision=dict(decision),
             reward=float(evaluation.get("search_score", evaluation.get("quality_score", 0.0))) if evaluation else None,
@@ -241,9 +289,42 @@ class EvolutionLoop:
     def _artifact_for_candidate(self, candidate: ModelCandidate) -> CheckpointArtifact:
         model = self.adapter.load_model(candidate.checkpoint_path)
         structure = self.adapter.inspect(model)
-        digest = str(candidate.state.provenance.get("checkpoint_sha256", structure.checkpoint_sha256))
-        structure = ModelStructure(structure.architecture, structure.block_count, structure.hidden_size, structure.ffn_width, structure.parameter_count, digest, structure.metadata)
+        digest = structure.checkpoint_sha256
+        expected = str(candidate.state.provenance.get("checkpoint_sha256", digest))
+        if digest != expected:
+            raise ValueError("model_checkpoint_hash_mismatch: %s" % candidate.id)
         return CheckpointArtifact(candidate.checkpoint_path, digest, structure.architecture, structure, {"offline_simulation": bool(candidate.state.provenance.get("offline_simulation", False))})
+
+    def _verify_checkpoint(self, artifact: CheckpointArtifact, *, expected_sha256: str, parent_sha256: Optional[str] = None) -> bool:
+        if parent_sha256 is not None and artifact.sha256 == parent_sha256:
+            return False
+        model = self.adapter.reload_model(artifact)
+        structure = self.adapter.inspect(model)
+        if structure.checkpoint_sha256 != expected_sha256 or structure.checkpoint_sha256 != artifact.sha256:
+            raise ValueError("checkpoint_content_hash_mismatch")
+        return True
+
+    def _load_pareto_front(self) -> list[Mapping[str, Any]]:
+        if not self.pareto_path.exists():
+            return []
+        try:
+            raw = json.loads(self.pareto_path.read_text(encoding="utf-8"))
+            return [dict(item) for item in raw.get("entries", []) if isinstance(item, Mapping)]
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return []
+
+    def _update_pareto_front(self, candidate_id: str, evaluation: Mapping[str, Any]) -> None:
+        entries = self._load_pareto_front()
+        entries.append({"candidate_id": candidate_id, **dict(evaluation)})
+        front = [
+            item for item in entries
+            if not any(
+                other.get("candidate_id") != item.get("candidate_id")
+                and PromotionPolicy._dominates(other, item)
+                for other in entries
+            )
+        ]
+        _write_json(self.pareto_path, {"entries": front})
 
     def _next_round_id(self) -> str:
         numbers = []
@@ -267,9 +348,9 @@ class EvolutionLoop:
     def _persist_search_policy(self) -> None:
         _write_json(self.output_root / "search-policy.json", self.search_policy.to_dict())
 
-    def _update_search_policy(self, *, feasible: bool, improved: bool) -> None:
+    def _update_search_policy(self, *, feasible: bool, improved: bool, failure_type: Optional[str] = None) -> None:
         if self.adapt_search_policy:
-            self.search_policy.update(feasible=feasible, improved=improved)
+            self.search_policy.update(feasible=feasible, improved=improved, failure_type=failure_type)
         self._persist_search_policy()
 
     @staticmethod
@@ -277,12 +358,19 @@ class EvolutionLoop:
         before = int(profile["model"]["block_count"])
         after = int(child.structure.block_count)
         ratio = float(after) / float(max(before, 1))
+        baseline_quality = 0.99
+        quality = max(0.0, baseline_quality - (1.0 - ratio) * 0.01)
+        baseline_hardware = {"latency_s": 1.0, "peak_memory_gb": 1.0, "model_size_gb": 1.0}
         return {
             "evaluation_status": "structural_proxy",
-            "quality_score": max(0.0, 0.98 - (1.0 - ratio) * 0.06),
+            "quality_score": quality,
+            "baseline_quality_score": baseline_quality,
+            "baseline_hardware_metrics": baseline_hardware,
             "latency_s": 1.0 * ratio,
             "peak_memory_gb": 1.0 * ratio,
             "model_size_gb": max(0.01, 1.0 * ratio),
+            "hardware_metrics": {"latency_s": 1.0 * ratio, "peak_memory_gb": 1.0 * ratio, "model_size_gb": max(0.01, 1.0 * ratio)},
+            "valid": True,
             "feasible": True,
             "critical_regression": False,
             "offline_simulation": True,

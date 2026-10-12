@@ -24,6 +24,7 @@ class ProfileReport:
     channel_sensitivity: tuple[Mapping[str, Any], ...]
     timestep_sensitivity: Mapping[str, Mapping[str, Any]]
     provenance: Mapping[str, Any]
+    hardware: Mapping[str, Any] = field(default_factory=dict)
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -36,6 +37,8 @@ class ProfileReport:
             raise ValueError("profile must contain high_noise, middle, and low_noise timestep records")
         if not isinstance(self.provenance, Mapping) or "offline_simulation" not in self.provenance:
             raise ValueError("profile provenance must declare offline_simulation")
+        if not isinstance(self.hardware, Mapping):
+            raise ValueError("profile hardware must be a mapping")
 
     def to_dict(self) -> dict[str, Any]:
         return _jsonable(asdict(self))
@@ -55,6 +58,7 @@ class ProfileReport:
             channel_sensitivity=tuple(dict(item) for item in raw["channel_sensitivity"]),
             timestep_sensitivity={str(key): dict(value) for key, value in dict(raw["timestep_sensitivity"]).items()},
             provenance=dict(raw["provenance"]),
+            hardware=dict(raw.get("hardware") or {}),
             schema_version=int(raw.get("schema_version", 1)),
         )
 
@@ -76,4 +80,3 @@ class ProfileReport:
     @classmethod
     def read_json(cls, path: Path) -> "ProfileReport":
         return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
-

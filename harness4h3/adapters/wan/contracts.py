@@ -22,6 +22,37 @@ def stable_digest(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def checkpoint_content_sha256(path: str | Path) -> str:
+    """Hash checkpoint bytes and relative filenames, never model labels.
+
+    Directory checkpoints (such as Diffusers pipelines) are canonicalized by
+    sorted relative paths.  This is deliberately separate from a state-dict
+    key digest: a parent/child identity must change when the actual weights or
+    config bytes change.
+    """
+
+    root = Path(path)
+    digest = hashlib.sha256()
+    if root.is_file():
+        with root.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    if not root.is_dir():
+        raise FileNotFoundError(str(root))
+    files = sorted(item for item in root.rglob("*") if item.is_file())
+    if not files:
+        raise ValueError("checkpoint directory is empty: %s" % root)
+    for item in files:
+        relative = item.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        with item.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class ModelStructure:
     architecture: str
@@ -155,4 +186,3 @@ class WanModelAdapter(Protocol):
 
     def reload_model(self, artifact: CheckpointArtifact) -> Any:
         ...
-

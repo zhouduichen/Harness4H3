@@ -5,16 +5,152 @@ from __future__ import annotations
 import gc
 import json
 import math
+import statistics
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from ..adapters.wan.contracts import CheckpointArtifact
+from ..adapters.wan.contracts import CheckpointArtifact, stable_digest
 
 
 class WanEvaluationError(RuntimeError):
     """A real evaluation could not produce trusted evidence."""
+
+
+@dataclass(frozen=True)
+class PromotionPolicy:
+    """Independent promotion gate for measured candidate evidence."""
+
+    quality_floor_ratio: float = 0.98
+    min_efficiency_improvement: float = 0.05
+    min_model_size_improvement: float = 0.10
+    max_metric_regression_ratio: float = 0.05
+
+    def __post_init__(self) -> None:
+        for name in ("quality_floor_ratio", "min_efficiency_improvement", "min_model_size_improvement", "max_metric_regression_ratio"):
+            value = float(getattr(self, name))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError("%s must be in [0, 1]" % name)
+
+    @classmethod
+    def from_mapping(cls, raw: Optional[Mapping[str, Any]] = None) -> "PromotionPolicy":
+        value = dict(raw or {})
+        return cls(
+            quality_floor_ratio=float(value.get("quality_floor_ratio", value.get("min_quality_ratio", 0.98))),
+            min_efficiency_improvement=float(value.get("min_efficiency_improvement", 0.05)),
+            min_model_size_improvement=float(value.get("min_model_size_improvement", 0.10)),
+            max_metric_regression_ratio=float(value.get("max_metric_regression_ratio", value.get("max_hardware_regression", 0.05))),
+        )
+
+    @staticmethod
+    def _number(value: Any) -> Optional[float]:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        value = float(value)
+        return value if math.isfinite(value) and value >= 0.0 else None
+
+    @classmethod
+    def _metric(cls, mapping: Mapping[str, Any], names: tuple[str, ...]) -> Optional[float]:
+        for name in names:
+            value = cls._number(mapping.get(name))
+            if value is not None:
+                return value
+        return None
+
+    @classmethod
+    def _hardware(cls, mapping: Mapping[str, Any]) -> Mapping[str, Any]:
+        value = mapping.get("hardware_metrics")
+        return value if isinstance(value, Mapping) else mapping
+
+    @classmethod
+    def _dominates(cls, left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+        compared = False
+        strict = False
+        left_quality = cls._number(left.get("quality_score"))
+        right_quality = cls._number(right.get("quality_score"))
+        if left_quality is None or right_quality is None or left_quality < right_quality:
+            return False
+        strict = left_quality > right_quality
+        for names in (("latency_s", "inference_wall_time_s_mean"), ("peak_memory_gb", "peak_memory_gb_max"), ("model_size_gb",)):
+            left_value = cls._metric(cls._hardware(left), names)
+            right_value = cls._metric(cls._hardware(right), names)
+            if left_value is None or right_value is None:
+                continue
+            compared = True
+            if left_value > right_value:
+                return False
+            strict = strict or left_value < right_value
+        return compared and strict
+
+    def decide(
+        self,
+        *,
+        parent: Mapping[str, Any],
+        evaluation: Mapping[str, Any],
+        child_integrity: bool,
+        pareto_front: tuple[Mapping[str, Any], ...] = (),
+    ) -> Mapping[str, Any]:
+        """Return an auditable decision; never trust evaluator ``feasible``."""
+
+        reasons: list[str] = []
+        if not child_integrity:
+            reasons.append("child_integrity_failed")
+        if evaluation.get("valid") is not True:
+            reasons.append("independent_evaluation_invalid_or_missing")
+        candidate_quality = self._number(evaluation.get("quality_score"))
+        parent_quality = self._number(evaluation.get("baseline_quality_score"))
+        if parent_quality is None:
+            parent_quality = self._number(parent.get("quality_score"))
+        if candidate_quality is None or parent_quality is None:
+            reasons.append("quality_data_missing")
+        elif candidate_quality < parent_quality * self.quality_floor_ratio:
+            reasons.append("quality_floor_failed")
+
+        candidate_hw = self._hardware(evaluation)
+        baseline_hw = evaluation.get("baseline_hardware_metrics")
+        if not isinstance(baseline_hw, Mapping):
+            baseline_hw = self._hardware(parent)
+        metric_specs = (
+            (("latency_s", "inference_wall_time_s_mean"), self.min_efficiency_improvement),
+            (("peak_memory_gb", "peak_memory_gb_max"), self.min_efficiency_improvement),
+            (("model_size_gb",), self.min_model_size_improvement),
+        )
+        improvements: dict[str, float] = {}
+        comparable = 0
+        for names, minimum in metric_specs:
+            before = self._metric(baseline_hw, names)
+            after = self._metric(candidate_hw, names)
+            if before is None or after is None or before <= 0.0:
+                continue
+            comparable += 1
+            ratio = (before - after) / before
+            improvements[names[0]] = ratio
+            if ratio < -self.max_metric_regression_ratio:
+                reasons.append("hardware_regression:%s" % names[0])
+        if comparable == 0:
+            reasons.append("hardware_data_missing")
+        elif not any(
+            improvements.get(names[0], -1.0) >= minimum
+            for names, minimum in metric_specs
+        ):
+            reasons.append("no_substantial_efficiency_improvement")
+
+        # A candidate must not be dominated by the current independent front.
+        if pareto_front and any(self._dominates(front, evaluation) for front in pareto_front):
+            reasons.append("pareto_dominated")
+
+        accepted = not reasons
+        return {
+            "accepted": accepted,
+            "reasons": reasons,
+            "quality_floor_ratio": self.quality_floor_ratio,
+            "min_efficiency_improvement": self.min_efficiency_improvement,
+            "min_model_size_improvement": self.min_model_size_improvement,
+            "max_metric_regression_ratio": self.max_metric_regression_ratio,
+            "improvements": improvements,
+            "independent_evaluation": True,
+        }
 
 
 @dataclass(frozen=True)
@@ -30,13 +166,15 @@ class WanVideoEvaluationConfig:
     seed_count: int = 1
     sample_frames: int = 4
     max_quality_drop: float = 0.05
+    latency_warmup: int = 1
+    latency_repeats: int = 3
 
     def __post_init__(self) -> None:
         if not str(self.wan_config).strip() or not str(self.evaluation_manifest).strip():
             raise ValueError("real Wan evaluation requires wan_config and evaluation_manifest")
         if not str(self.clip_model_path).strip():
             raise ValueError("real Wan evaluation requires clip_model_path")
-        if self.max_cases <= 0 or self.seed_count <= 0 or self.sample_frames < 2:
+        if self.max_cases <= 0 or self.seed_count <= 0 or self.sample_frames < 2 or self.latency_warmup < 0 or self.latency_repeats <= 0:
             raise ValueError("real Wan evaluation budgets must be positive")
         if not 0.0 <= float(self.max_quality_drop) <= 1.0:
             raise ValueError("max_quality_drop must be in [0, 1]")
@@ -59,6 +197,8 @@ class WanVideoEvaluationConfig:
             seed_count=int(raw.get("seed_count", 1)),
             sample_frames=int(raw.get("sample_frames", 4)),
             max_quality_drop=float(raw.get("max_quality_drop", 0.05)),
+            latency_warmup=int(raw.get("latency_warmup", 1)),
+            latency_repeats=int(raw.get("latency_repeats", 3)),
         )
 
 
@@ -80,6 +220,21 @@ class WanVideoEvaluator:
         self._cache: dict[str, Mapping[str, Any]] = {}
         self._manifest = self._load_manifest(config.evaluation_manifest)
         self._wan_spec = self._load_wan_spec(config.wan_config)
+        self.recipe_digest = stable_digest(
+            {
+                "manifest": self._manifest,
+                "wan_spec": self._wan_spec,
+                "device": config.device,
+                "dtype": config.dtype,
+                "max_cases": config.max_cases,
+                "seed_count": config.seed_count,
+                "sample_frames": config.sample_frames,
+                "latency_warmup": config.latency_warmup,
+                "latency_repeats": config.latency_repeats,
+                "quality_backend": type(quality_backend).__name__ if quality_backend is not None else "ClipTemporalQualityBackend",
+                "clip_model_path": str(config.clip_model_path),
+            }
+        )
 
     @staticmethod
     def _load_manifest(path: Path) -> tuple[Mapping[str, Any], ...]:
@@ -124,6 +279,7 @@ class WanVideoEvaluator:
                 "critical_regression": True,
                 "offline_simulation": False,
                 "search_score": 0.0,
+                "evaluator_recipe_sha256": self.recipe_digest,
             }
         baseline_quality = float(baseline["quality_score"])
         candidate_quality = float(candidate["quality_score"])
@@ -138,19 +294,21 @@ class WanVideoEvaluator:
         return {
             **dict(candidate),
             "baseline_quality_score": baseline_quality,
+            "baseline_hardware_metrics": dict(baseline.get("hardware_metrics") or {}),
             "quality_delta": candidate_quality - baseline_quality,
             "latency_ratio": latency_ratio,
             "feasible": feasible,
             "critical_regression": quality_regression or not bool(candidate.get("valid", False)),
             "offline_simulation": False,
             "search_score": search_score,
+            "evaluator_recipe_sha256": self.recipe_digest,
         }
 
     def _evaluate_artifact(self, artifact: CheckpointArtifact) -> Mapping[str, Any]:
         cached = self._cache.get(artifact.sha256)
         if cached is not None:
             return cached
-        result_dir = self.config.output_root / "evaluations" / artifact.sha256
+        result_dir = self.config.output_root / "evaluations" / artifact.sha256 / self.recipe_digest
         result_path = result_dir / "evaluation.json"
         if result_path.exists():
             try:
@@ -176,9 +334,19 @@ class WanVideoEvaluator:
                     case_dir = result_dir / "videos" / case_id / ("seed_%d" % seed)
                     video_path = case_dir / "wan.mp4"
                     self._reset_peak_memory(torch)
-                    started = time.perf_counter()
-                    frames = self._generate(pipeline, torch, caption, seed)
-                    inference_wall = time.perf_counter() - started
+                    for _ in range(int(self.config.latency_warmup)):
+                        self._generate(pipeline, torch, caption, seed)
+                    latency_samples: list[float] = []
+                    frames = None
+                    for _ in range(int(self.config.latency_repeats)):
+                        started = time.perf_counter()
+                        current = self._generate(pipeline, torch, caption, seed)
+                        latency_samples.append(time.perf_counter() - started)
+                        if frames is None:
+                            frames = current
+                    inference_wall = float(statistics.median(latency_samples))
+                    if frames is None:
+                        raise WanEvaluationError("video_generation_empty")
                     self._write_video(frames, video_path, float(self._wan_spec["native_fps"]))
                     validity = self._validate_video(video_path, frames)
                     evidence = quality.evaluate(video_path, caption)
@@ -189,6 +357,8 @@ class WanVideoEvaluator:
                             "caption": caption,
                             "video_path": str(video_path),
                             "generation_wall_time_s": inference_wall,
+                            "latency_samples_s": latency_samples,
+                            "latency_warmup": int(self.config.latency_warmup),
                             "peak_memory_gb": self._peak_memory_gb(torch),
                             "validity": validity,
                             "quality": evidence.to_dict(),
@@ -212,7 +382,9 @@ class WanVideoEvaluator:
                 },
                 "hardware_metrics": {
                     "inference_wall_time_s_mean": sum(float(item["generation_wall_time_s"]) for item in cases) / len(cases),
+                    "inference_wall_time_s_median": float(statistics.median(float(item["generation_wall_time_s"]) for item in cases)),
                     "inference_wall_time_s_total": sum(float(item["generation_wall_time_s"]) for item in cases),
+                    "gpu_runtime_cost_s": sum(sum(float(value) for value in item["latency_samples_s"]) for item in cases),
                     "peak_memory_gb_max": max(float(item["peak_memory_gb"]) for item in cases),
                     "model_size_gb": self._checkpoint_size_gb(artifact.path),
                     "parameter_count": int(artifact.structure.parameter_count),

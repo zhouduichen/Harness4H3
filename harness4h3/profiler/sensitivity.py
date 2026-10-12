@@ -47,9 +47,9 @@ def measure_block_sensitivity(adapter: WanModelAdapter, model: Any, *, sample: A
                 adapter.remove_blocks(candidate, (block.block_id,))
                 removed = _forward(candidate, sample, forward_fn)
             distance = _distance(base, removed)
-            records.append({"block_id": block.block_id, "importance_score": distance, "available": distance is not None, "method": "leave_one_block_out"})
+            records.append({"block_id": block.block_id, "importance_score": distance, "available": distance is not None, "method": "leave_one_block_out", "input_fixed": sample is not None, "score_semantics": "mean_absolute_output_difference"})
         except (RuntimeError, TypeError, ValueError, AttributeError):
-            records.append({"block_id": block.block_id, "importance_score": None, "available": False, "method": "leave_one_block_out"})
+            records.append({"block_id": block.block_id, "importance_score": None, "available": False, "method": "leave_one_block_out", "input_fixed": sample is not None, "score_semantics": "mean_absolute_output_difference"})
     return tuple(records)
 
 
@@ -85,23 +85,43 @@ def measure_channel_sensitivity(adapter: WanModelAdapter, model: Any, *, max_pro
             for channel in range(limit):
                 weight = float(up.weight[channel].detach().float().abs().mean().item() + down.weight[:, channel].detach().float().abs().mean().item())
                 values.append({"channel": channel, "importance_score": weight, "available": True})
-            records.append({"block_id": block.block_id, "width": width, "channels": values, "method": "paired_ffn_weight_contribution", "available": True})
+            records.append({"block_id": block.block_id, "width": width, "channels": values, "method": "paired_ffn_weight_contribution", "available": True, "approximation": True, "score_semantics": "paired_weight_absolute_mean_not_activation_perturbation"})
         except (AttributeError, IndexError, TypeError, RuntimeError):
-            records.append({"block_id": block.block_id, "width": None, "channels": [], "method": "paired_ffn_weight_contribution", "available": False})
+            records.append({"block_id": block.block_id, "width": None, "channels": [], "method": "paired_ffn_weight_contribution", "available": False, "approximation": True, "score_semantics": "paired_weight_absolute_mean_not_activation_perturbation"})
     return tuple(records)
 
 
-def measure_timestep_sensitivity(model: Any, *, sample: Any = None, forward_fn: Optional[Callable[[Any, str, Any], Any]] = None) -> dict[str, Mapping[str, Any]]:
+def measure_timestep_sensitivity(
+    adapter: Any,
+    model: Any = None,
+    *,
+    sample: Any = None,
+    forward_fn: Optional[Callable[[Any, str, Any], Any]] = None,
+) -> dict[str, Mapping[str, Any]]:
+    # Keep the old positional form usable for callers outside the profiler.
+    if model is None:
+        model = adapter
+        adapter = None
     buckets = (("high_noise", 0.9), ("middle", 0.5), ("low_noise", 0.1))
     records: dict[str, Mapping[str, Any]] = {}
+    blocks = tuple(adapter.get_blocks(model)) if adapter is not None else ()
+    reference_block = blocks[0].block_id if blocks else None
     for name, value in buckets:
-        if forward_fn is None or sample is None:
-            records[name] = {"timestep": value, "importance_score": None, "available": False, "method": "timestep_probe"}
+        if forward_fn is None or sample is None or adapter is None or reference_block is None:
+            records[name] = {"timestep": value, "importance_score": None, "available": False, "method": "structural_timestep_delta", "reference_block_id": reference_block, "score_semantics": "removed_block_output_difference"}
             continue
         try:
-            output = forward_fn(model, name, sample)
-            score = float(output.detach().float().abs().mean().item()) if hasattr(output, "detach") else float(abs(output))
-            records[name] = {"timestep": value, "importance_score": score, "available": True, "method": "timestep_probe"}
+            base = forward_fn(model, name, sample)
+            probe = getattr(adapter, "probe_block_removal", None)
+            callback = lambda current_model, current_sample: forward_fn(current_model, name, current_sample)
+            if callable(probe):
+                modified = probe(model, reference_block, sample, callback)
+            else:
+                candidate = copy.deepcopy(model)
+                adapter.remove_blocks(candidate, (reference_block,))
+                modified = callback(candidate, sample)
+            score = _distance(base, modified)
+            records[name] = {"timestep": value, "importance_score": score, "available": score is not None, "method": "structural_timestep_delta", "reference_block_id": reference_block, "score_semantics": "removed_block_output_difference"}
         except (RuntimeError, TypeError, ValueError, AttributeError):
-            records[name] = {"timestep": value, "importance_score": None, "available": False, "method": "timestep_probe"}
+            records[name] = {"timestep": value, "importance_score": None, "available": False, "method": "structural_timestep_delta", "reference_block_id": reference_block, "score_semantics": "removed_block_output_difference"}
     return records

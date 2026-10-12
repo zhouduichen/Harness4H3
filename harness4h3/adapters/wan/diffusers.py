@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange
+from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange, checkpoint_content_sha256
 
 
 def _torch_modules() -> tuple[Any, Any]:
@@ -69,6 +69,7 @@ class DiffusersWanAdapter:
         self._device = str(device)
         self._dtype = str(dtype)
         pipe._harness4h3_checkpoint_root = str(checkpoint)
+        pipe._harness4h3_checkpoint_sha256 = checkpoint_content_sha256(checkpoint)
         return pipe
 
     @classmethod
@@ -228,18 +229,18 @@ class DiffusersWanAdapter:
             model.save_pretrained(str(target))
         else:
             raise ValueError("unsupported_model_layout: model cannot save_pretrained")
-        digest = hashlib.sha256()
-        for path in sorted(item for item in target.rglob("*") if item.is_file()):
-            digest.update(str(path.relative_to(target)).encode("utf-8"))
-            digest.update(path.read_bytes())
-        value = digest.hexdigest()
+        value = checkpoint_content_sha256(target)
         model._harness4h3_checkpoint_sha256 = value
         structure = self.inspect(model)
         return CheckpointArtifact(str(target), value, self.architecture_name, structure, {"offline_simulation": False})
 
     def reload_model(self, artifact: CheckpointArtifact) -> Any:
+        actual = checkpoint_content_sha256(artifact.path)
+        if actual != artifact.sha256:
+            raise ValueError("checkpoint_reload_failed: digest mismatch")
         model = self.load_model(artifact.path, device=self._device, dtype=self._dtype)
-        model._harness4h3_checkpoint_sha256 = artifact.sha256
+        if getattr(model, "_harness4h3_checkpoint_sha256", None) != artifact.sha256:
+            raise ValueError("checkpoint_reload_failed: loaded digest mismatch")
         return model
 
 

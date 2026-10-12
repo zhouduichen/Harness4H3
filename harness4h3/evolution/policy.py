@@ -11,6 +11,8 @@ class SearchPolicy:
     rounds: int = 0
     exploit_rounds: int = 0
     explore_rounds: int = 0
+    duplicate_rounds: int = 0
+    costly_failure_rounds: int = 0
 
     def __post_init__(self) -> None:
         if not 0.0 <= float(self.exploit_ratio) <= 1.0:
@@ -28,13 +30,18 @@ class SearchPolicy:
         self.exploit_rounds += 1
         return "exploit"
 
-    def update(self, *, feasible: bool, improved: bool) -> None:
+    def update(self, *, feasible: bool, improved: bool, failure_type: str | None = None) -> None:
         """Adapt the next allocation from measured round feedback."""
 
         if feasible and improved:
             self.exploit_ratio = min(0.9, float(self.exploit_ratio) + 0.05)
         elif not feasible:
             self.exploit_ratio = max(0.3, float(self.exploit_ratio) - 0.10)
+        if failure_type == "duplicate_algorithm":
+            self.duplicate_rounds += 1
+            self.exploit_ratio = max(0.2, float(self.exploit_ratio) - 0.10)
+        if failure_type in {"evaluator_failed", "child_integrity_failed", "compression_failed", "sandbox_timeout"}:
+            self.costly_failure_rounds += 1
 
     def to_dict(self) -> dict[str, int | float]:
         return {
@@ -43,6 +50,8 @@ class SearchPolicy:
             "rounds": int(self.rounds),
             "exploit_rounds": int(self.exploit_rounds),
             "explore_rounds": int(self.explore_rounds),
+            "duplicate_rounds": int(self.duplicate_rounds),
+            "costly_failure_rounds": int(self.costly_failure_rounds),
         }
 
     @classmethod
@@ -53,4 +62,6 @@ class SearchPolicy:
             rounds=int(raw.get("rounds", 0)),
             exploit_rounds=int(raw.get("exploit_rounds", 0)),
             explore_rounds=int(raw.get("explore_rounds", 0)),
+            duplicate_rounds=int(raw.get("duplicate_rounds", 0)),
+            costly_failure_rounds=int(raw.get("costly_failure_rounds", 0)),
         )

@@ -21,6 +21,7 @@ ALGORITHM_RESPONSE_SCHEMA = {
         "source": {"type": "string"},
         "hypothesis": {"type": "string"},
         "parent_id": {"type": ["string", "null"]},
+        "predicted_gain": {"type": "object"},
     },
 }
 
@@ -52,20 +53,24 @@ class AlgorithmAgent:
         algorithm_id: str,
         *,
         parent_id: Optional[str],
+        parent_algorithm_id: Optional[str] = None,
         profile: Mapping[str, Any],
         history: Sequence[Mapping[str, Any]],
         skills: Sequence[Mapping[str, Any]] = (),
         search_choice: str = "exploit",
     ) -> AlgorithmCandidate:
         if self.provider is None:
-            block_id = self._least_sensitive_block(profile)
+            previously_selected = self._previously_selected_blocks(history)
+            block_id = self._least_sensitive_block(profile, excluded=previously_selected)
             source = _seed_source(block_id, algorithm_id, search_choice)
+            operator = "prune_ffn_channels" if search_choice == "explore" else "prune_blocks"
             return AlgorithmCandidate.from_source(
                 algorithm_id,
                 source,
                 parent_id=parent_id,
+                parent_algorithm_id=parent_algorithm_id,
                 hypothesis=("explore paired FFN width pruning" if search_choice == "explore" else "remove the lowest measured leave-one-block-out sensitivity block"),
-                metadata={"generator": "deterministic_seed", "operator": ("prune_ffn_channels" if search_choice == "explore" else "prune_blocks"), "search_choice": search_choice},
+                metadata={"generator": "deterministic_seed", "operator": operator, "search_choice": search_choice, "predicted_gain": {"latency": 0.05, "model_size": 0.10, "basis": "profile_sensitivity_and_operator_proxy"}},
             )
         payload = {
             "profile": _compact_profile(profile),
@@ -77,7 +82,7 @@ class AlgorithmAgent:
         raw = self.provider(payload)
         if not isinstance(raw, Mapping):
             raise ValueError("algorithm_generation_invalid: provider response must be an object")
-        unknown = sorted(set(raw) - {"source", "hypothesis", "parent_id"})
+        unknown = sorted(set(raw) - {"source", "hypothesis", "parent_id", "predicted_gain"})
         if unknown:
             raise ValueError("algorithm_generation_invalid: unsupported field(s): %s" % ", ".join(unknown))
         response_parent = raw.get("parent_id", parent_id)
@@ -88,23 +93,40 @@ class AlgorithmAgent:
             raise ValueError("algorithm_generation_invalid: source must be text")
         return AlgorithmCandidate.from_source(
             algorithm_id,
-            source,
-            parent_id=parent_id,
+                source,
+                parent_id=parent_id,
+                parent_algorithm_id=parent_algorithm_id,
             hypothesis=str(raw.get("hypothesis", "")),
-            metadata={"generator": "structured_provider", "search_choice": search_choice},
+            metadata={"generator": "structured_provider", "search_choice": search_choice, "predicted_gain": dict(raw.get("predicted_gain") or {})},
         )
 
     @staticmethod
-    def _least_sensitive_block(profile: Mapping[str, Any]) -> str:
+    def _least_sensitive_block(profile: Mapping[str, Any], excluded: Optional[set[str]] = None) -> str:
         records = profile.get("block_sensitivity", [])
-        candidates = [item for item in records if isinstance(item, Mapping) and isinstance(item.get("block_id"), str) and isinstance(item.get("importance_score"), (int, float))]
+        excluded = excluded or set()
+        candidates = [item for item in records if isinstance(item, Mapping) and isinstance(item.get("block_id"), str) and item.get("block_id") not in excluded and isinstance(item.get("importance_score"), (int, float))]
         if candidates:
             return str(min(candidates, key=lambda item: float(item["importance_score"]))["block_id"])
         layers = profile.get("layers", [])
         for item in layers:
+            if isinstance(item, Mapping) and isinstance(item.get("block_id"), str) and item.get("block_id") not in excluded:
+                return str(item["block_id"])
+        for item in records:
             if isinstance(item, Mapping) and isinstance(item.get("block_id"), str):
                 return str(item["block_id"])
         return "block.0"
+
+    @staticmethod
+    def _previously_selected_blocks(history: Sequence[Mapping[str, Any]]) -> set[str]:
+        selected: set[str] = set()
+        for item in history:
+            decision = item.get("decision") if isinstance(item, Mapping) else None
+            args = decision.get("operator_args") if isinstance(decision, Mapping) else None
+            if not isinstance(args, Mapping):
+                args = item.get("training", {}).get("operator_args") if isinstance(item, Mapping) and isinstance(item.get("training"), Mapping) else None
+            if isinstance(args, Mapping) and isinstance(args.get("block_ids"), list):
+                selected.update(str(value) for value in args["block_ids"])
+        return selected
 
 
 def _compact_profile(profile: Mapping[str, Any]) -> dict[str, Any]:

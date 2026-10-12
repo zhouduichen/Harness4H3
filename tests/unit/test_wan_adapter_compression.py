@@ -26,6 +26,15 @@ def test_fake_adapter_save_reload_preserves_forward_shape(tmp_path):
     assert tuple(reloaded(torch.zeros(2, 8)).shape) == (2, 8)
 
 
+def test_fake_adapter_rejects_parent_or_child_bytes_changed_after_save(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=3, hidden_size=8, ffn_width=16)
+    artifact = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "checkpoint")
+    model_path = tmp_path / "checkpoint" / "model.pt"
+    model_path.write_bytes(model_path.read_bytes() + b"tampered")
+    with pytest.raises(ValueError, match="digest mismatch"):
+        adapter.reload_model(artifact)
+
+
 def test_block_pruning_updates_structure_and_parent_digest(tmp_path):
     adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
     parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")

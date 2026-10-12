@@ -56,6 +56,7 @@ class SkillHub:
                 ),
                 "training": training,
                 "evaluation": dict(record.evaluation or {}),
+                "decision": dict(record.decision),
                 "provenance": dict(record.provenance),
             }
             matches.append(((exact_architecture, exact_operator, reward, record.created_at), item))

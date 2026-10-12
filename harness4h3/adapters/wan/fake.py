@@ -14,7 +14,7 @@ from .contracts import (
     ChannelPruningConfig,
     ModelStructure,
     StructuralChange,
-    stable_digest,
+    checkpoint_content_sha256,
 )
 
 
@@ -42,6 +42,22 @@ class FakeWanBlock:
         return self._module
 
 
+def _fake_block_module(hidden_size: int, width: int) -> Any:
+    _, nn = _torch()
+
+    class Block(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.up_proj = nn.Linear(hidden_size, width)
+            self.down_proj = nn.Linear(width, hidden_size)
+            self.activation = nn.GELU()
+
+        def forward(self, value: Any) -> Any:
+            return self.down_proj(self.activation(self.up_proj(value)))
+
+    return Block()
+
+
 def _copy_module(module: Any) -> Any:
     return deepcopy(module)
 
@@ -61,11 +77,7 @@ class FakeWanDiT:
         self.ffn_widths = [int(width) for width in widths]
         self.blocks = nn.ModuleList()
         for width in self.ffn_widths:
-            block = nn.Module()
-            block.up_proj = nn.Linear(self.hidden_size, width)
-            block.down_proj = nn.Linear(width, self.hidden_size)
-            block.activation = nn.GELU()
-            self.blocks.append(block)
+            self.blocks.append(_fake_block_module(self.hidden_size, width))
         self.output = nn.Linear(self.hidden_size, self.hidden_size)
         self._artifact_sha256 = "0" * 64
 
@@ -74,7 +86,7 @@ class FakeWanDiT:
 
     def forward(self, value: Any) -> Any:
         for block in self.blocks:
-            value = value + block.down_proj(block.activation(block.up_proj(value)))
+            value = value + block(value)
         return self.output(value)
 
     def parameters(self) -> Iterable[Any]:
@@ -142,6 +154,7 @@ class FakeWanDiTAdapter:
                 ffn_widths=config["ffn_widths"],
             )
             model.load_state_dict(torch.load(root / "model.pt", map_location="cpu", weights_only=True))
+            model._artifact_sha256 = checkpoint_content_sha256(root)
         model.to(device=device)
         if dtype != "float32":
             model.to(dtype=getattr(torch, str(dtype)))
@@ -250,7 +263,7 @@ class FakeWanDiTAdapter:
             "block_ids": list(model.block_ids),
         }
         config_path.write_text(json.dumps(config, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        digest = hashlib.sha256(state_path.read_bytes() + config_path.read_bytes()).hexdigest()
+        digest = checkpoint_content_sha256(target)
         model._artifact_sha256 = digest
         structure = self.inspect(model)
         if structure.checkpoint_sha256 != digest:
@@ -264,7 +277,7 @@ class FakeWanDiTAdapter:
             # The loader has no need to know the original digest before it has
             # read both files, so compare the canonical artifact files here.
             root = Path(artifact.path)
-            actual = hashlib.sha256((root / "model.pt").read_bytes() + (root / "config.json").read_bytes()).hexdigest()
+            actual = checkpoint_content_sha256(root)
             if actual != artifact.sha256:
                 raise ValueError("checkpoint_reload_failed: digest mismatch")
             model._artifact_sha256 = actual

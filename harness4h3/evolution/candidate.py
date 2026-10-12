@@ -21,6 +21,7 @@ class AlgorithmCandidate:
     parent_id: Optional[str]
     source: str
     source_sha256: str
+    parent_algorithm_id: Optional[str] = None
     entrypoint: str = "propose"
     status: str = "proposed"
     hypothesis: str = ""
@@ -32,6 +33,8 @@ class AlgorithmCandidate:
     def __post_init__(self) -> None:
         if not self.algorithm_id.startswith("A") or not self.source.strip():
             raise ValueError("algorithm candidate requires an id and source")
+        if self.parent_algorithm_id is not None and not str(self.parent_algorithm_id).startswith("A"):
+            raise ValueError("algorithm parent must be an algorithm id")
         actual = hashlib.sha256(self.source.encode("utf-8")).hexdigest()
         if actual != self.source_sha256:
             raise ValueError("algorithm source digest mismatch")
@@ -43,8 +46,8 @@ class AlgorithmCandidate:
             object.__setattr__(self, "created_at", datetime.now(timezone.utc).isoformat())
 
     @classmethod
-    def from_source(cls, algorithm_id: str, source: str, *, parent_id: Optional[str] = None, hypothesis: str = "", metadata: Optional[Mapping[str, Any]] = None) -> "AlgorithmCandidate":
-        return cls(algorithm_id, parent_id, source, hashlib.sha256(source.encode("utf-8")).hexdigest(), hypothesis=hypothesis, metadata=dict(metadata or {}))
+    def from_source(cls, algorithm_id: str, source: str, *, parent_id: Optional[str] = None, parent_algorithm_id: Optional[str] = None, hypothesis: str = "", metadata: Optional[Mapping[str, Any]] = None) -> "AlgorithmCandidate":
+        return cls(algorithm_id, parent_id, source, hashlib.sha256(source.encode("utf-8")).hexdigest(), parent_algorithm_id=parent_algorithm_id, hypothesis=hypothesis, metadata=dict(metadata or {}))
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -56,6 +59,7 @@ class AlgorithmCandidate:
             parent_id=str(raw["parent_id"]) if raw.get("parent_id") else None,
             source=str(raw["source"]),
             source_sha256=str(raw["source_sha256"]),
+            parent_algorithm_id=str(raw["parent_algorithm_id"]) if raw.get("parent_algorithm_id") else None,
             entrypoint=str(raw.get("entrypoint", "propose")),
             status=str(raw.get("status", "proposed")),
             hypothesis=str(raw.get("hypothesis", "")),
@@ -64,4 +68,3 @@ class AlgorithmCandidate:
             created_at=str(raw.get("created_at", "")),
             metadata=dict(raw.get("metadata") or {}),
         )
-

@@ -54,7 +54,7 @@ from .executor.local import LocalProcessExecutor
 from .target.profile import load_target_profile
 from research.experiments.remote_h3_closed_loop import RemoteCampaign
 from .adapters.wan import build_wan_adapter
-from .evolution import CompressionConfig, EvolutionLoop, SearchPolicy, WanVideoEvaluationConfig, WanVideoEvaluator
+from .evolution import CompressionConfig, EvolutionLoop, PromotionPolicy, SearchPolicy, WanVideoEvaluationConfig, WanVideoEvaluator
 from .evolution.agent import AlgorithmAgent, build_algorithm_provider
 from .operators.wan import build_wan_compression_registry
 from .profiler import profile_model
@@ -149,6 +149,7 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         sandbox=AlgorithmSandbox(config.output_root / "sandbox", timeout_s=config.sandbox_timeout_s),
         agent=agent,
         evaluator=evaluator,
+        promotion_policy=PromotionPolicy.from_mapping(config.evaluator),
         search_policy=search_policy,
         memory_enabled=config.memory_enabled,
         adapt_search_policy=config.adapt_search_policy,

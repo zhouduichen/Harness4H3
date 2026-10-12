@@ -67,6 +67,26 @@ def test_deterministic_agent_generates_source_from_low_sensitivity_block():
     assert "block.1" in candidate.source
 
 
+def test_memory_feedback_changes_deterministic_selection_logic():
+    profile = {
+        "block_sensitivity": [
+            {"block_id": "block.0", "importance_score": 0.2},
+            {"block_id": "block.1", "importance_score": 0.1},
+        ]
+    }
+    agent = AlgorithmAgent()
+    without_memory = agent.generate("A0001", parent_id="M0000", profile=profile, history=[])
+    with_memory = agent.generate(
+        "A0002",
+        parent_id="M0000",
+        profile=profile,
+        history=[{"decision": {"operator_args": {"block_ids": ["block.1"]}}}],
+    )
+    assert "block.1" in without_memory.source
+    assert "block.0" in with_memory.source
+    assert without_memory.source != with_memory.source
+
+
 def test_provider_agent_rejects_parent_override():
     agent = AlgorithmAgent(provider=lambda payload: {"source": "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n", "parent_id": "M9999"})
     try:

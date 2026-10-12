@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import ast
+import hashlib
 import tempfile
 from pathlib import Path
 from typing import Iterator
@@ -28,7 +30,8 @@ class AlgorithmStore:
 
     def create(self, candidate: AlgorithmCandidate) -> AlgorithmCandidate:
         self._ensure()
-        if any(item.source_sha256 == candidate.source_sha256 for item in self.read()):
+        candidate_logic = _algorithm_logic_digest(candidate.source)
+        if any(item.source_sha256 == candidate.source_sha256 or _algorithm_logic_digest(item.source) == candidate_logic for item in self.read()):
             raise ValueError("duplicate_algorithm_source")
         source_path = self.candidates_dir / (candidate.algorithm_id + ".py")
         metadata_path = self.candidates_dir / (candidate.algorithm_id + ".json")
@@ -37,6 +40,13 @@ class AlgorithmStore:
         self._atomic_write(source_path, candidate.source)
         self._atomic_write(metadata_path, json.dumps(candidate.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n")
         return candidate
+
+    def duplicate_of(self, candidate: AlgorithmCandidate) -> AlgorithmCandidate | None:
+        logic = _algorithm_logic_digest(candidate.source)
+        return next(
+            (item for item in self.read() if item.source_sha256 == candidate.source_sha256 or _algorithm_logic_digest(item.source) == logic),
+            None,
+        )
 
     def get(self, algorithm_id: str) -> AlgorithmCandidate:
         path = self.candidates_dir / (str(algorithm_id) + ".json")
@@ -75,3 +85,16 @@ class AlgorithmStore:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+
+
+def _algorithm_logic_digest(source: str) -> str:
+    """Ignore comments/algorithm IDs when detecting repeated selection logic."""
+
+    try:
+        tree = ast.parse(source, mode="exec")
+        functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "propose"]
+        node = functions[0] if functions else tree
+        normalized = ast.dump(node, annotate_fields=True, include_attributes=False)
+    except SyntaxError:
+        normalized = source
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()

@@ -93,8 +93,26 @@ class SandboxResult:
 
 RUNNER_SOURCE = r'''
 import json
+import math
 import sys
 import traceback
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows has no resource module
+    resource = None
+
+try:
+    if resource is None:
+        raise OSError("resource limits unavailable")
+    _cpu_seconds = max(1, int(math.ceil(float(sys.argv[5]))))
+    resource.setrlimit(resource.RLIMIT_CPU, (_cpu_seconds, _cpu_seconds + 1))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))
+    resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
+    # The algorithm receives summaries only; it has no reason to allocate
+    # hundreds of megabytes while choosing a plan.
+    resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+except (AttributeError, OSError, ValueError):
+    pass
 
 ALLOWED = {
     "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict,
@@ -111,7 +129,7 @@ def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 ALLOWED["__import__"] = safe_import
 
-source_path, profile_path, history_path, output_path = sys.argv[1:5]
+source_path, profile_path, history_path, output_path, _timeout_s = sys.argv[1:6]
 source = open(source_path, "r", encoding="utf-8").read()
 profile = json.loads(open(profile_path, "r", encoding="utf-8").read())
 history = json.loads(open(history_path, "r", encoding="utf-8").read())
@@ -152,7 +170,7 @@ class AlgorithmSandbox:
         history_path.write_text(json.dumps(list(history), sort_keys=True), encoding="utf-8")
         runner_path = run_root / "runner.py"
         runner_path.write_text(RUNNER_SOURCE, encoding="utf-8")
-        result = self.executor.execute((sys.executable, "-I", str(runner_path), str(source_path), str(profile_path), str(history_path), str(output_path)), run_root)
+        result = self.executor.execute((sys.executable, "-I", str(runner_path), str(source_path), str(profile_path), str(history_path), str(output_path), str(self.timeout_s)), run_root)
         if result.status != "success":
             return SandboxResult("failed", validated.sha256, failure_type=result.failure_type or "sandbox_process", message=result.message, stdout_path=result.stdout_path, stderr_path=result.stderr_path)
         if not output_path.exists() or output_path.stat().st_size > self.max_output_bytes:
@@ -162,4 +180,16 @@ class AlgorithmSandbox:
             plan = CompressionPlan.from_mapping(raw)
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             return SandboxResult("failed", validated.sha256, failure_type="algorithm_output_invalid", message=str(exc), stdout_path=result.stdout_path, stderr_path=result.stderr_path)
-        return SandboxResult("success", validated.sha256, plan=plan, stdout_path=result.stdout_path, stderr_path=result.stderr_path, metadata={"offline_simulation": True})
+        return SandboxResult(
+            "success",
+            validated.sha256,
+            plan=plan,
+            stdout_path=result.stdout_path,
+            stderr_path=result.stderr_path,
+            metadata={
+                "offline_simulation": True,
+                "process_isolation": "python-isolated-process",
+                "resource_limits": {"timeout_s": self.timeout_s, "cpu_s": max(1, int(self.timeout_s)), "address_space_bytes": 512 * 1024 * 1024, "file_size_bytes": 1024 * 1024, "open_files": 32},
+                "network_policy": "socket/subprocess imports denied; host network namespace not assumed",
+            },
+        )
