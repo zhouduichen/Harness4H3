@@ -178,6 +178,10 @@ def build_algorithm_provider(
             "Return JSON only with source, hypothesis, and parent_id. The source must define "
             "a complete Python function `def propose(profile, history): ...` and return only "
             "a bounded operator/args plan; never return a function name or pseudocode. "
+            "Allowed operators are exactly `prune_blocks` with args `{" 
+            "block_ids: list[str]}` or `prune_ffn_channels` with args "
+            "`{block_ids: list[str], retained_indices: list[int]}`. "
+            "The returned parent_id must exactly match the supplied parent_id. "
             "Never output paths, devices, shell commands, imports outside the sandbox allowlist, "
             "or evaluator settings.\n\n"
             + json.dumps(dict(payload), ensure_ascii=False, sort_keys=True)
@@ -254,6 +258,12 @@ def build_algorithm_provider(
         parsed = json.loads(content)
         if not isinstance(parsed, Mapping):
             raise ValueError("algorithm_provider_response_invalid: content must be an object")
-        return dict(parsed)
+        normalized = dict(parsed)
+        # JSON mode does not enforce the response schema.  Treat an omitted
+        # or null parent as the trusted request parent, but never accept a
+        # different non-null parent.
+        if normalized.get("parent_id") is None and payload.get("parent_id") is not None:
+            normalized["parent_id"] = payload["parent_id"]
+        return normalized
 
     return call
