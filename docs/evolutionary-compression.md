@@ -78,6 +78,13 @@ fail closed，不会把未知结构当作可安全裁剪的 Transformer block。
 case/seed 原子写入 `progress.json`；进程中断后会复用已完成且视频仍存在的记录，
 不会把未完成 case 当作有效证据。
 
+当前 evaluator 的延迟方法是
+`denoising+vae_decode_with_case_cached_prompt_embeddings`：固定 case 的正/负 Prompt
+embedding 只编码一次，warmup 和 3 次 repeat 测量扩散 Transformer 与 VAE decode，
+并在硬件指标中明确 `prompt_encoding_included=false`。T5 未被压缩，排除其重复编码
+可以避免把未优化组件的 CPU 时间误归因给候选 Transformer；recipe digest 会随测量
+方法变化，旧缓存不会被错误复用。
+
 EvolutionLoop 也会复用没有 `decision.json` 的最早未完成 round；已写入的
 `profile.json`、`algorithm.json`、`sandbox.json` 和 `compression.json` 会先校验并
 继续使用，避免进程崩溃后无条件新建 round 或重复执行相同算法。

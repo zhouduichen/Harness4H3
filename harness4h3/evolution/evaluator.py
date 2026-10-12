@@ -20,7 +20,8 @@ class WanEvaluationError(RuntimeError):
     """A real evaluation could not produce trusted evidence."""
 
 
-EVALUATOR_VERSION = "wan-video-evaluator-v4"
+EVALUATOR_VERSION = "wan-video-evaluator-v5"
+LATENCY_MEASUREMENT_METHOD = "denoising+vae_decode_with_case_cached_prompt_embeddings"
 
 DEFAULT_VISUAL_QUALITY_GATE = {
     "enabled": True,
@@ -288,6 +289,7 @@ class WanVideoEvaluator:
                 "sample_frames": config.sample_frames,
                 "latency_warmup": config.latency_warmup,
                 "latency_repeats": config.latency_repeats,
+                "latency_measurement_method": LATENCY_MEASUREMENT_METHOD,
                 "visual_quality_gate": dict(config.visual_quality_gate),
                 "quality_device": config.quality_device,
                 "quality_backend": type(quality_backend).__name__ if quality_backend is not None else "ClipTemporalQualityBackend",
@@ -412,14 +414,15 @@ class WanVideoEvaluator:
                         continue
                     case_dir = result_dir / "videos" / case_id / ("seed_%d" % seed)
                     video_path = case_dir / "wan.mp4"
+                    prompt_embeddings = self._prepare_prompt_embeddings(pipeline, torch, caption)
                     self._reset_peak_memory(torch)
                     for _ in range(int(self.config.latency_warmup)):
-                        self._generate(pipeline, torch, caption, seed)
+                        self._generate_case(pipeline, torch, caption, seed, prompt_embeddings)
                     latency_samples: list[float] = []
                     frames = None
                     for _ in range(int(self.config.latency_repeats)):
                         started = time.perf_counter()
-                        current = self._generate(pipeline, torch, caption, seed)
+                        current = self._generate_case(pipeline, torch, caption, seed, prompt_embeddings)
                         latency_samples.append(time.perf_counter() - started)
                         if frames is None:
                             frames = current
@@ -441,6 +444,8 @@ class WanVideoEvaluator:
                         "generation_wall_time_s": inference_wall,
                         "latency_samples_s": latency_samples,
                         "latency_warmup": int(self.config.latency_warmup),
+                        "latency_measurement_method": LATENCY_MEASUREMENT_METHOD if prompt_embeddings is not None else "full_generate",
+                        "prompt_embeddings_cached": prompt_embeddings is not None,
                         "peak_memory_gb": self._peak_memory_gb(torch),
                         "validity": validity,
                         "quality": quality_record,
@@ -482,6 +487,8 @@ class WanVideoEvaluator:
                     "inference_wall_time_s_median": float(statistics.median(float(item["generation_wall_time_s"]) for item in cases)),
                     "inference_wall_time_s_total": sum(float(item["generation_wall_time_s"]) for item in cases),
                     "gpu_runtime_cost_s": sum(sum(float(value) for value in item["latency_samples_s"]) for item in cases),
+                    "latency_measurement_method": LATENCY_MEASUREMENT_METHOD,
+                    "prompt_encoding_included": False,
                     "peak_memory_gb_max": max(float(item["peak_memory_gb"]) for item in cases),
                     "model_size_gb": self._checkpoint_size_gb(artifact.path),
                     "parameter_count": int(artifact.structure.parameter_count),
@@ -607,17 +614,60 @@ class WanVideoEvaluator:
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             raise WanEvaluationError("wan_pipeline_load_failed: %s" % exc) from exc
 
-    def _generate(self, pipeline: Any, torch: Any, caption: str, seed: int) -> Any:
+    @staticmethod
+    def _prepare_prompt_embeddings(pipeline: Any, torch: Any, caption: str) -> Optional[tuple[Any, Any]]:
+        """Encode fixed text once per case; it is not a compressed component."""
+
+        getter = getattr(pipeline, "_get_t5_prompt_embeds", None)
+        text_encoder = getattr(pipeline, "text_encoder", None)
+        if not callable(getter) or text_encoder is None:
+            return None
+        text_dtype = getattr(text_encoder, "dtype", getattr(torch, "bfloat16"))
+        return (
+            getter(caption, device=torch.device("cpu"), dtype=text_dtype),
+            getter("", device=torch.device("cpu"), dtype=text_dtype),
+        )
+
+    def _generate_case(
+        self,
+        pipeline: Any,
+        torch: Any,
+        caption: str,
+        seed: int,
+        prompt_embeddings: Optional[tuple[Any, Any]],
+    ) -> Any:
+        if prompt_embeddings is None:
+            return self._generate(pipeline, torch, caption, seed)
+        return self._generate(
+            pipeline,
+            torch,
+            caption,
+            seed,
+            prompt_embeds=prompt_embeddings[0],
+            negative_prompt_embeds=prompt_embeddings[1],
+        )
+
+    def _generate(
+        self,
+        pipeline: Any,
+        torch: Any,
+        caption: str,
+        seed: int,
+        *,
+        prompt_embeds: Any = None,
+        negative_prompt_embeds: Any = None,
+    ) -> Any:
         device = torch.device(self.config.device)
-        text_dtype = getattr(pipeline.text_encoder, "dtype", getattr(torch, self.config.dtype))
-        prompt_embeds = pipeline._get_t5_prompt_embeds(caption, device=torch.device("cpu"), dtype=text_dtype)
-        negative_embeds = pipeline._get_t5_prompt_embeds("", device=torch.device("cpu"), dtype=text_dtype)
+        if prompt_embeds is None or negative_prompt_embeds is None:
+            text_dtype = getattr(pipeline.text_encoder, "dtype", getattr(torch, self.config.dtype))
+            prompt_embeds = pipeline._get_t5_prompt_embeds(caption, device=torch.device("cpu"), dtype=text_dtype)
+            negative_prompt_embeds = pipeline._get_t5_prompt_embeds("", device=torch.device("cpu"), dtype=text_dtype)
         generator = torch.Generator(device=str(device)).manual_seed(int(seed))
         with torch.inference_mode():
             output = pipeline(
                 prompt=None,
                 prompt_embeds=prompt_embeds.to(device),
-                negative_prompt_embeds=negative_embeds.to(device),
+                negative_prompt_embeds=negative_prompt_embeds.to(device),
                 height=int(self._wan_spec["height"]),
                 width=int(self._wan_spec["width"]),
                 num_frames=int(self._wan_spec["num_frames"]),
