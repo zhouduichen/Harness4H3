@@ -4,6 +4,7 @@ import json
 
 from harness4h3.adapters.wan import FakeWanDiTAdapter
 from harness4h3.evolution import EvolutionLoop
+from harness4h3.evolution.policy import SearchPolicy
 
 
 def test_evolution_loop_runs_fake_round_and_persists_evidence(tmp_path):
@@ -67,6 +68,31 @@ def test_evolution_loop_restarts_from_persisted_parent_and_search_policy(tmp_pat
     assert restarted.model_store.active_id == "M0001"
     assert restarted.search_policy.rounds == 2
     assert (tmp_path / "run" / "initial-baseline.json").is_file()
+
+
+def test_deterministic_baseline_avoids_duplicate_selection_across_three_rounds(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=8, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    loop = EvolutionLoop(
+        adapter=adapter,
+        parent=parent,
+        output_root=tmp_path / "run",
+        memory_enabled=False,
+        adapt_search_policy=False,
+        search_policy=SearchPolicy(exploit_ratio=1.0, seed=0),
+    )
+
+    outcomes = [loop.run_round() for _ in range(3)]
+
+    assert all(outcome.status in {"promoted", "rejected"} for outcome in outcomes)
+    assert loop.search_policy.duplicate_rounds == 0
+    selected = []
+    for outcome in outcomes:
+        decision = json.loads(
+            (tmp_path / "run" / "rounds" / outcome.round_id / "decision.json").read_text()
+        )
+        selected.append(decision["operator_args"]["block_ids"][0])
+    assert len(set(selected)) == 3
 
 
 def test_duplicate_algorithm_is_recorded_without_overwriting_active_parent(tmp_path):

@@ -117,6 +117,13 @@ class EvolutionLoop:
         profile = self._load_or_profile(profile_path, parent_artifact)
         architecture = str(profile.model["architecture"])
         skills = self.skill_hub.search(architecture=architecture, limit=8) if self.memory_enabled else []
+        selection_history = self._selection_history()
+        # Local round history is not evaluator Memory.  It only lets a
+        # deterministic baseline avoid proposing the same selection logic
+        # after a rejected round, while Memory remains disabled for that
+        # baseline.  Retrieved skills are the separate, optional evidence
+        # channel used by memory-enabled runs.
+        agent_history = [*selection_history, *skills]
         algorithm_path = round_dir / "algorithm.json"
         persisted_algorithm = self._read_json(algorithm_path) if algorithm_path.exists() else None
         algorithm_id = str(persisted_algorithm.get("algorithm_id", "")).strip() if persisted_algorithm else self.algorithm_store.next_id()
@@ -139,7 +146,7 @@ class EvolutionLoop:
                     parent_id=parent_candidate.id,
                     parent_algorithm_id=parent_algorithm_id,
                     profile=profile.to_dict(),
-                    history=skills,
+                    history=agent_history,
                     skills=skills,
                     search_choice=search_choice,
                 )
@@ -455,6 +462,35 @@ class EvolutionLoop:
         profile = profile_model(self.adapter, self.adapter.reload_model(parent), seed=7)
         profile.write_json(path)
         return profile
+
+    def _selection_history(self) -> list[Mapping[str, Any]]:
+        """Return local operator selections without exposing evaluator evidence.
+
+        A fixed deterministic baseline still needs to know which structural
+        choices it already tried; otherwise duplicate-source protection ends
+        the campaign after the first rejected round.  This is deliberately a
+        narrow artifact view: quality, hardware, reward, and other experience
+        fields are supplied only through ``skills`` when Memory is enabled.
+        """
+
+        history: list[Mapping[str, Any]] = []
+        for decision_path in sorted(self.rounds_root.glob("R*/decision.json")):
+            try:
+                decision = self._read_json(decision_path)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            history.append(
+                {
+                    "round_id": decision_path.parent.name,
+                    "algorithm_id": decision.get("algorithm_id"),
+                    "status": decision.get("status"),
+                    "decision": {
+                        "operator": decision.get("operator"),
+                        "operator_args": dict(decision.get("operator_args") or {}),
+                    },
+                }
+            )
+        return history
 
     @classmethod
     def _load_sandbox(cls, path: Path) -> Optional[SandboxResult]:
