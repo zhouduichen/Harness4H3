@@ -93,3 +93,20 @@ def test_vllm_algorithm_provider_parses_structured_json_without_network(monkeypa
     result = provider({"parent_id": "M0000", "profile": {}, "history": [], "skills": []})
     assert result["parent_id"] == "M0000"
     assert "def propose" in result["source"]
+
+
+def test_vllm_provider_binds_missing_parent_to_request_context(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps({"source": "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n", "hypothesis": "test", "parent_id": None})}}]}).encode()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: Response())
+    provider = build_algorithm_provider("vllm", "test-model", endpoint="http://127.0.0.1:8000/v1/chat/completions")
+    result = provider({"parent_id": "M0007", "profile": {}, "history": [], "skills": []})
+    assert result["parent_id"] == "M0007"
