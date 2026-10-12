@@ -11,6 +11,7 @@ def test_sandbox_accepts_bounded_plan(tmp_path):
     assert result.status == "success"
     assert result.plan is not None
     assert result.plan.operator == "prune_blocks"
+    assert result.metadata["runtime_audit"] == "deny-file-network-process-dynamic-code"
 
 
 def test_sandbox_rejects_filesystem_import(tmp_path):
