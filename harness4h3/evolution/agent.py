@@ -26,16 +26,16 @@ ALGORITHM_RESPONSE_SCHEMA = {
 }
 
 
-def _seed_source(block_id: str, algorithm_id: str, search_choice: str) -> str:
+def _seed_source(block_id: str, algorithm_id: str, search_choice: str, *, retention_ratio: float = 0.25) -> str:
     if search_choice == "explore":
         return (
             "def propose(profile, history):\n"
             "    # Explore seed %s: a paired FFN-width hypothesis across all profiled blocks.\n"
             "    block_ids = [item['block_id'] for item in profile.get('layers', [])]\n"
             "    width = int(profile['model']['ffn_width'])\n"
-            "    retained_indices = list(range(max(1, width // 2)))\n"
+            "    retained_indices = list(range(max(1, int(width * %.6f))))\n"
             "    return {'operator': 'prune_ffn_channels', 'args': {'block_ids': block_ids, 'retained_indices': retained_indices}}\n"
-        ) % algorithm_id
+        ) % (algorithm_id, retention_ratio)
     return (
         "def propose(profile, history):\n"
         "    # Seed algorithm %s selects the least output-sensitive block reported by the profiler.\n"
@@ -47,6 +47,14 @@ def _seed_source(block_id: str, algorithm_id: str, search_choice: str) -> str:
 @dataclass(frozen=True)
 class AlgorithmAgent:
     provider: Optional[Provider] = None
+
+    # Retention ratio is an algorithm-design budget, not a model mutation
+    # supplied by the controller.  It is bounded before source generation.
+    explore_ffn_retention_ratio: float = 0.25
+
+    def __post_init__(self) -> None:
+        if not 0.0 < float(self.explore_ffn_retention_ratio) < 1.0:
+            raise ValueError("explore_ffn_retention_ratio must be in (0, 1)")
 
     def generate(
         self,
@@ -62,15 +70,16 @@ class AlgorithmAgent:
         if self.provider is None:
             previously_selected = self._previously_selected_blocks(history)
             block_id = self._least_sensitive_block(profile, excluded=previously_selected)
-            source = _seed_source(block_id, algorithm_id, search_choice)
+            retention_ratio = self._explore_retention_ratio(history)
+            source = _seed_source(block_id, algorithm_id, search_choice, retention_ratio=retention_ratio)
             operator = "prune_ffn_channels" if search_choice == "explore" else "prune_blocks"
             return AlgorithmCandidate.from_source(
                 algorithm_id,
                 source,
                 parent_id=parent_id,
                 parent_algorithm_id=parent_algorithm_id,
-                hypothesis=("explore paired FFN width pruning" if search_choice == "explore" else "remove the lowest measured leave-one-block-out sensitivity block"),
-                metadata={"generator": "deterministic_seed", "operator": operator, "search_choice": search_choice, "predicted_gain": {"latency": 0.05, "model_size": 0.10, "basis": "profile_sensitivity_and_operator_proxy"}},
+                hypothesis=("explore paired FFN width pruning at %.1f%% retention" % (retention_ratio * 100.0) if search_choice == "explore" else "remove the lowest measured leave-one-block-out sensitivity block"),
+                metadata={"generator": "deterministic_seed", "operator": operator, "search_choice": search_choice, "retention_ratio": retention_ratio if search_choice == "explore" else None, "predicted_gain": {"latency": 0.05, "model_size": 0.10, "basis": "profile_sensitivity_and_operator_proxy"}},
             )
         payload = {
             "profile": _compact_profile(profile),
@@ -127,6 +136,27 @@ class AlgorithmAgent:
             if isinstance(args, Mapping) and isinstance(args.get("block_ids"), list):
                 selected.update(str(value) for value in args["block_ids"])
         return selected
+
+    def _explore_retention_ratio(self, history: Sequence[Mapping[str, Any]]) -> float:
+        """Tighten exploration after Memory records a model-size miss."""
+
+        ratio = float(self.explore_ffn_retention_ratio)
+        for item in history:
+            evaluation = item.get("evaluation") if isinstance(item, Mapping) else None
+            if not isinstance(evaluation, Mapping):
+                continue
+            hardware = evaluation.get("hardware_metrics")
+            baseline = evaluation.get("baseline_hardware_metrics")
+            if not isinstance(hardware, Mapping) or not isinstance(baseline, Mapping):
+                continue
+            try:
+                before = float(baseline["model_size_gb"])
+                after = float(hardware["model_size_gb"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if before > 0.0 and (before - after) / before < 0.10:
+                ratio = max(0.10, ratio * 0.75)
+        return ratio
 
 
 def _compact_profile(profile: Mapping[str, Any]) -> dict[str, Any]:

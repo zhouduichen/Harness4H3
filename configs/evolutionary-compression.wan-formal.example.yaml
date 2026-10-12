@@ -1,0 +1,26 @@
+backend: diffusers
+checkpoint: /models/Wan2.1-T2V-1.3B-Diffusers
+output_root: ../var/evolutionary-compression-wan-formal
+device: cuda:0
+dtype: bfloat16
+local_files_only: true
+sandbox_timeout_s: 10
+exploit_ratio: 0.7
+seed: 7
+controller:
+  provider: deterministic
+  explore_ffn_retention_ratio: 0.25
+evaluator:
+  backend: wan_video
+  wan_config: /path/to/wan-student-1.3b.yaml
+  evaluation_manifest: /path/to/evaluation-manifest.wan-rsi-dev.json
+  clip_model_path: /path/to/clip-vit-large-patch14-336
+  device: cuda:0
+  dtype: bfloat16
+  local_files_only: true
+  max_cases: 8
+  seed_count: 2
+  sample_frames: 4
+  latency_warmup: 1
+  latency_repeats: 3
+  max_quality_drop: 0.05

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "split": "test",
+  "cases": [
+    {"case_id": "test_0001", "caption": "A blue kite rises above a grassy hill as clouds drift across the sky, gentle motion, cinematic.", "seeds": [20261008, 20261009]},
+    {"case_id": "test_0002", "caption": "A brown horse trots through a sunlit field beside a wooden fence, realistic natural motion.", "seeds": [20261008, 20261009]},
+    {"case_id": "test_0003", "caption": "A ceramic bowl spins slowly on a studio table under soft light, detailed close-up.", "seeds": [20261008, 20261009]},
+    {"case_id": "test_0004", "caption": "A tram moves through a rainy city street with colorful reflections, cinematic camera movement.", "seeds": [20261008, 20261009]},
+    {"case_id": "test_0005", "caption": "A green parrot flies between tropical branches in bright daylight, wildlife documentary style.", "seeds": [20261008, 20261009]},
+    {"case_id": "test_0006", "caption": "A paper lantern sways over a quiet courtyard at dusk, warm glowing light, smooth motion.", "seeds": [20261008, 20261009]},
+    {"case_id": "test_0007", "caption": "A mountain waterfall pours into a clear pool surrounded by moss and ferns, realistic.", "seeds": [20261008, 20261009]},
+    {"case_id": "test_0008", "caption": "A silver robot walks through a futuristic greenhouse filled with moving plants, cinematic wide shot.", "seeds": [20261008, 20261009]}
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "split": "development",
+  "cases": [
+    {"case_id": "dev_0001", "caption": "A red paper airplane glides slowly through a sunlit blue sky, smooth natural motion, cinematic.", "seeds": [20261008, 20261009]},
+    {"case_id": "dev_0002", "caption": "A small orange cat walks across a quiet garden path with leaves moving in a gentle breeze, realistic.", "seeds": [20261008, 20261009]},
+    {"case_id": "dev_0003", "caption": "A glass marble rolls across a wooden table toward a warm window, close-up cinematic camera movement.", "seeds": [20261008, 20261009]},
+    {"case_id": "dev_0004", "caption": "A yellow train travels through green mountains under changing clouds, wide establishing shot, realistic.", "seeds": [20261008, 20261009]},
+    {"case_id": "dev_0005", "caption": "A white sailboat crosses a calm lake at sunrise, reflections shimmering on the water, cinematic.", "seeds": [20261008, 20261009]},
+    {"case_id": "dev_0006", "caption": "A red fox pauses in a snowy forest while soft flakes fall around it, natural wildlife film.", "seeds": [20261008, 20261009]},
+    {"case_id": "dev_0007", "caption": "A cup of tea steams beside an open book on a wooden desk, warm afternoon light, close-up.", "seeds": [20261008, 20261009]},
+    {"case_id": "dev_0008", "caption": "A cyclist rides along a coastal road with waves breaking below, smooth tracking camera, realistic.", "seeds": [20261008, 20261009]}
+  ]
+}

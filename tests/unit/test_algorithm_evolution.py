@@ -87,6 +87,21 @@ def test_memory_feedback_changes_deterministic_selection_logic():
     assert without_memory.source != with_memory.source
 
 
+def test_memory_feedback_tightens_ffn_exploration_after_size_miss():
+    agent = AlgorithmAgent(explore_ffn_retention_ratio=0.5)
+    profile = {"model": {"ffn_width": 100}, "layers": [{"block_id": "block.0"}]}
+    history = [{
+        "evaluation": {
+            "baseline_hardware_metrics": {"model_size_gb": 10.0},
+            "hardware_metrics": {"model_size_gb": 9.5},
+        },
+        "decision": {"status": "rejected"},
+    }]
+    candidate = agent.generate("A0001", parent_id="M0000", profile=profile, history=history, search_choice="explore")
+    assert candidate.metadata["retention_ratio"] == 0.375
+    assert "int(width * 0.375000)" in candidate.source
+
+
 def test_provider_agent_rejects_parent_override():
     agent = AlgorithmAgent(provider=lambda payload: {"source": "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n", "parent_id": "M9999"})
     try:

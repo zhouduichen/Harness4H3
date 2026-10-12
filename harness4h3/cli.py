@@ -120,7 +120,9 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
     adapter, parent = _compression_context(config)
     controller = dict(config.controller)
     provider_name = str(controller.get("provider", "deterministic"))
-    agent = AlgorithmAgent()
+    agent = AlgorithmAgent(
+        explore_ffn_retention_ratio=float(controller.get("explore_ffn_retention_ratio", 0.25))
+    )
     if provider_name.strip().lower() not in {"deterministic", "offline", "mock"}:
         agent = AlgorithmAgent(
             provider=build_algorithm_provider(

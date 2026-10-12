@@ -62,6 +62,24 @@ GPU，T5 encoder 和 VAE 留在 CPU。
 exploit 比例，失败轮次降低 exploit 比例。真实 adapter 对未知 Wan 模块布局
 fail closed，不会把未知结构当作可安全裁剪的 Transformer block。
 
+## 正式开发集 / 测试集
+
+仓库提供两个固定 manifest：
+
+- `configs/evaluation-manifest.wan-rsi-dev.json`：8 个 Prompt、每个 2 个 Seed；
+- `configs/evaluation-manifest.wan-rsi-test.json`：独立的 8 个 Prompt、每个 2 个 Seed。
+
+使用 `configs/evolutionary-compression.wan-formal.example.yaml` 作为模板，分别
+为 dev 和 test 建立不同的 `output_root`。正式评测必须保持
+`max_cases: 8`、`seed_count: 2`，并保留每次生成的 `latency_samples_s`、视频有效性、
+质量指标、模型哈希和 evaluator recipe digest。smoke 配置的 1×1 结果只能证明
+真实链路可执行，不能替代正式结果。
+
+确定性探索算法的 FFN 保留比例由
+`controller.explore_ffn_retention_ratio` 控制。Memory 中若发现上一轮模型大小
+改善低于 10%，下一轮探索会自动收紧该比例，形成可审计的算法设计反馈，而不是
+只重新选择一个 Block。
+
 ## 对比实验协议
 
 要验证“算法演化”本身的收益，使用同一 checkpoint、manifest、seed、预算
