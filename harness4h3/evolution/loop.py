@@ -136,6 +136,8 @@ class EvolutionLoop:
             "parent_model_id": parent_candidate.id,
             "child_model_id": child_candidate.id,
             "algorithm_id": algorithm.algorithm_id,
+            "operator": sandbox_result.plan.operator,
+            "operator_args": dict(sandbox_result.plan.args),
             "feasible": feasible,
             "evaluation": evaluation,
             "search_policy": self.search_policy.choose(has_best=feasible),
@@ -189,7 +191,7 @@ class EvolutionLoop:
             parent_model_id=parent.id,
             child_model_id=child.id if child else None,
             operator=str(decision.get("operator")) if decision.get("operator") else None,
-            operator_args={},
+            operator_args=dict(decision.get("operator_args") or {}),
             training={"architecture": parent.state.architecture_name, "algorithm_id": algorithm.algorithm_id},
             evaluation=dict(evaluation) if evaluation is not None else None,
             decision=dict(decision),
@@ -265,4 +267,3 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-
