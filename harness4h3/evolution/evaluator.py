@@ -346,11 +346,20 @@ class WanVideoEvaluator:
             except (OSError, json.JSONDecodeError):
                 pass
         result_dir.mkdir(parents=True, exist_ok=True)
+        progress_path = result_dir / "progress.json"
+        completed_cases = self._load_progress(progress_path, artifact.sha256, self.recipe_digest)
+        completed_keys: set[tuple[str, int]] = set()
+        for item in completed_cases:
+            try:
+                completed_keys.add((str(item["case_id"]), int(item["seed"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        resumed_case_count = len(completed_cases)
         pipeline = None
         try:
             pipeline, torch = self._load_pipeline(artifact.path)
             quality = self._get_quality_backend()
-            cases = []
+            cases = list(completed_cases)
             for raw_case in self._manifest[: self.config.max_cases]:
                 case_id = str(raw_case.get("case_id", "case"))
                 caption = str(raw_case.get("caption", "")).strip()
@@ -358,6 +367,8 @@ class WanVideoEvaluator:
                 if not caption or not seeds:
                     raise WanEvaluationError("evaluation_manifest_invalid: case requires caption and seeds")
                 for seed in seeds:
+                    if (case_id, seed) in completed_keys:
+                        continue
                     case_dir = result_dir / "videos" / case_id / ("seed_%d" % seed)
                     video_path = case_dir / "wan.mp4"
                     self._reset_peak_memory(torch)
@@ -377,19 +388,29 @@ class WanVideoEvaluator:
                     self._write_video(frames, video_path, float(self._wan_spec["native_fps"]))
                     validity = self._validate_video(video_path, frames)
                     evidence = quality.evaluate(video_path, caption)
-                    cases.append(
+                    cases.append({
+                        "case_id": case_id,
+                        "seed": seed,
+                        "caption": caption,
+                        "video_path": str(video_path),
+                        "generation_wall_time_s": inference_wall,
+                        "latency_samples_s": latency_samples,
+                        "latency_warmup": int(self.config.latency_warmup),
+                        "peak_memory_gb": self._peak_memory_gb(torch),
+                        "validity": validity,
+                        "quality": evidence.to_dict(),
+                    })
+                    completed_keys.add((case_id, seed))
+                    _atomic_json(
+                        progress_path,
                         {
-                            "case_id": case_id,
-                            "seed": seed,
-                            "caption": caption,
-                            "video_path": str(video_path),
-                            "generation_wall_time_s": inference_wall,
-                            "latency_samples_s": latency_samples,
-                            "latency_warmup": int(self.config.latency_warmup),
-                            "peak_memory_gb": self._peak_memory_gb(torch),
-                            "validity": validity,
-                            "quality": evidence.to_dict(),
-                        }
+                            "status": "in_progress",
+                            "checkpoint_sha256": artifact.sha256,
+                            "evaluator_recipe_sha256": self.recipe_digest,
+                            "evaluator_version": EVALUATOR_VERSION,
+                            "evaluation_manifest_sha256": self.manifest_sha256,
+                            "cases": cases,
+                        },
                     )
             if not cases:
                 raise WanEvaluationError("evaluation_manifest_invalid: no cases selected")
@@ -420,6 +441,7 @@ class WanVideoEvaluator:
                     "parameter_count": int(artifact.structure.parameter_count),
                     "case_count": len(cases),
                 },
+                "resumed_case_count": resumed_case_count,
                 "cases": cases,
             }
             _atomic_json(result_path, result)
@@ -438,6 +460,34 @@ class WanVideoEvaluator:
                     torch.cuda.empty_cache()
             except (AttributeError, RuntimeError, UnboundLocalError):
                 pass
+
+    @staticmethod
+    def _load_progress(path: Path, checkpoint_sha256: str, recipe_digest: str) -> list[Mapping[str, Any]]:
+        """Load only case records belonging to this artifact and recipe."""
+
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(raw, Mapping) or raw.get("checkpoint_sha256") != checkpoint_sha256:
+            return []
+        if raw.get("evaluator_recipe_sha256") != recipe_digest or not isinstance(raw.get("cases"), list):
+            return []
+        records: list[Mapping[str, Any]] = []
+        for item in raw["cases"]:
+            if not isinstance(item, Mapping):
+                continue
+            if not item.get("case_id") or item.get("seed") is None:
+                continue
+            video_path = item.get("video_path")
+            quality = item.get("quality")
+            validity = item.get("validity")
+            if not isinstance(video_path, str) or not Path(video_path).is_file():
+                continue
+            if not isinstance(quality, Mapping) or not isinstance(validity, Mapping):
+                continue
+            records.append(dict(item))
+        return records
 
     def _get_quality_backend(self) -> Any:
         if self._quality_backend is None:

@@ -73,7 +73,9 @@ fail closed，不会把未知结构当作可安全裁剪的 Transformer block。
 为 dev 和 test 建立不同的 `output_root`。正式评测必须保持
 `max_cases: 8`、`seed_count: 2`，并保留每次生成的 `latency_samples_s`、视频有效性、
 质量指标、模型哈希和 evaluator recipe digest。smoke 配置的 1×1 结果只能证明
-真实链路可执行，不能替代正式结果。
+真实链路可执行，不能替代正式结果。每个 artifact 的评测目录还会按完成的
+case/seed 原子写入 `progress.json`；进程中断后会复用已完成且视频仍存在的记录，
+不会把未完成 case 当作有效证据。
 
 确定性探索算法的 FFN 保留比例由
 `controller.explore_ffn_retention_ratio` 控制。Memory 中若发现上一轮模型大小

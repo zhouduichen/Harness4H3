@@ -93,3 +93,90 @@ def test_real_evaluator_records_video_and_quality_evidence(tmp_path, monkeypatch
     assert len(result["evaluation_manifest_sha256"]) == 64
     assert result["evaluator_version"]
     assert list((tmp_path / "evaluation" / "evaluations" / child.sha256).iterdir())
+
+
+def test_real_evaluator_resumes_completed_case_from_progress(tmp_path, monkeypatch):
+    wan_config = tmp_path / "wan.yaml"
+    wan_config.write_text(
+        "width: 8\nheight: 8\nnum_frames: 4\nnative_fps: 8\n"
+        "num_inference_steps: 1\nguidance_scale: 1.0\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {"case_id": "first", "caption": "first", "seeds": [7]},
+                    {"case_id": "second", "caption": "second", "seeds": [7]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = WanVideoEvaluationConfig(
+        wan_config=wan_config,
+        evaluation_manifest=manifest,
+        clip_model_path=tmp_path / "clip",
+        output_root=tmp_path / "evaluation",
+        max_cases=2,
+    )
+    adapter = FakeWanDiTAdapter(block_count=3, hidden_size=8, ffn_width=16)
+    baseline = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "baseline")
+    child_model = adapter.load_model("fake://baseline")
+    adapter.remove_blocks(child_model, ["block.0"])
+    child = adapter.save_model(child_model, tmp_path / "child")
+    quality = QualityEvidence(
+        semantic=0.8,
+        temporal=0.9,
+        motion=0.2,
+        aggregate=0.75,
+        backend="test",
+        model_path="test",
+    )
+    evaluator = WanVideoEvaluator(
+        config,
+        baseline,
+        quality_backend=SimpleNamespace(evaluate=lambda path, caption: quality),
+        pipeline_loader=lambda checkpoint: (checkpoint, object()),
+    )
+    completed_video = tmp_path / "completed.mp4"
+    completed_video.write_bytes(b"already generated")
+    progress_dir = tmp_path / "evaluation" / "evaluations" / child.sha256 / evaluator.recipe_digest
+    progress_dir.mkdir(parents=True)
+    (progress_dir / "progress.json").write_text(
+        json.dumps(
+            {
+                "status": "in_progress",
+                "checkpoint_sha256": child.sha256,
+                "evaluator_recipe_sha256": evaluator.recipe_digest,
+                "cases": [
+                    {
+                        "case_id": "first",
+                        "seed": 7,
+                        "caption": "first",
+                        "video_path": str(completed_video),
+                        "generation_wall_time_s": 1.0,
+                        "latency_samples_s": [1.0, 1.0, 1.0],
+                        "peak_memory_gb": 1.0,
+                        "validity": {"valid": True},
+                        "quality": quality.to_dict(),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def generate(pipeline, torch, caption, seed):
+        calls.append((pipeline, caption, seed))
+        return np.linspace(0.0, 1.0, 4 * 8 * 8 * 3, dtype=np.float32).reshape(1, 4, 8, 8, 3)
+
+    monkeypatch.setattr(evaluator, "_generate", generate)
+    result = evaluator(child, {})
+
+    # Parent: 2 cases x (warmup + 3 repeats); Child: only the unfinished case.
+    assert len(calls) == 12
+    assert result["resumed_case_count"] == 1
+    assert result["hardware_metrics"]["case_count"] == 2
