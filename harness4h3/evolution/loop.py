@@ -240,6 +240,15 @@ class EvolutionLoop:
         }
         decision_path = round_dir / "decision.json"
         _write_json(decision_path, decision)
+        self._finalize_round_state(
+            round_dir,
+            round_id=round_id,
+            parent_model_id=parent_candidate.id,
+            algorithm_id=algorithm.algorithm_id,
+            child_model_id=child_candidate.id,
+            status=decision_status,
+            decision_path=decision_path,
+        )
         status = "accepted" if feasible else "rejected"
         self._record_experience(round_id, parent_candidate, child_candidate, algorithm, evaluation, decision, status, decision_path)
         self.algorithm_store.update(replace(algorithm, status=status, experiment_ids=(round_id,)))
@@ -261,6 +270,15 @@ class EvolutionLoop:
         }
         decision_path = round_dir / "decision.json"
         _write_json(decision_path, decision)
+        self._finalize_round_state(
+            round_dir,
+            round_id=round_id,
+            parent_model_id=parent.id,
+            algorithm_id=algorithm.algorithm_id,
+            status="failed",
+            failure_type=failure_type,
+            decision_path=decision_path,
+        )
         self._record_experience(round_id, parent, None, algorithm, None, decision, "failed", decision_path)
         if algorithm_persisted:
             self.algorithm_store.update(replace(algorithm, status="failed", experiment_ids=(round_id,), failure_reasons=(failure_type,)))
@@ -389,6 +407,42 @@ class EvolutionLoop:
 
     def _write_round_state(self, round_dir: Path, state: Mapping[str, Any]) -> None:
         _write_json(round_dir / "round.json", dict(state))
+
+    def _finalize_round_state(
+        self,
+        round_dir: Path,
+        *,
+        round_id: str,
+        parent_model_id: str,
+        algorithm_id: str,
+        status: str,
+        decision_path: Path,
+        child_model_id: Optional[str] = None,
+        failure_type: Optional[str] = None,
+    ) -> None:
+        """Persist an auditable terminal state after the decision is durable.
+
+        ``decision.json`` remains the source of the full decision contract, but
+        the round marker must not remain ``in_progress`` after a recoverable
+        round has reached a terminal outcome.  Reading the existing state keeps
+        intermediate resume metadata such as ``search_choice`` intact.
+        """
+
+        state = self._read_json(round_dir / "round.json")
+        state.update(
+            {
+                "round_id": round_id,
+                "parent_model_id": parent_model_id,
+                "algorithm_id": algorithm_id,
+                "status": status,
+                "decision_path": str(decision_path),
+            }
+        )
+        if child_model_id is not None:
+            state["child_model_id"] = child_model_id
+        if failure_type is not None:
+            state["failure_type"] = failure_type
+        self._write_round_state(round_dir, state)
 
     def _load_or_profile(self, path: Path, parent: CheckpointArtifact) -> ProfileReport:
         if path.exists():

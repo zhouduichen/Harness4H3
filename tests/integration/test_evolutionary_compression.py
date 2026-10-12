@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from harness4h3.adapters.wan import FakeWanDiTAdapter
 from harness4h3.evolution import EvolutionLoop
 
@@ -11,7 +13,11 @@ def test_evolution_loop_runs_fake_round_and_persists_evidence(tmp_path):
     outcome = loop.run_round()
     assert outcome.status == "promoted"
     assert outcome.child_model_id == "M0001"
-    assert (tmp_path / "run" / "rounds" / outcome.round_id / "decision.json").exists()
+    round_dir = tmp_path / "run" / "rounds" / outcome.round_id
+    assert (round_dir / "decision.json").exists()
+    round_state = json.loads((round_dir / "round.json").read_text(encoding="utf-8"))
+    assert round_state["status"] == "promoted"
+    assert round_state["child_model_id"] == "M0001"
     records = list(loop.experience_store.read())
     assert records
     assert records[0].operator == "prune_blocks"
@@ -32,6 +38,9 @@ def test_evolution_loop_keeps_failed_algorithm_as_experience(tmp_path):
     loop = EvolutionLoop(adapter=adapter, parent=parent, output_root=tmp_path / "run", agent=AlgorithmAgent(provider=provider))
     outcome = loop.run_round()
     assert outcome.status == "failed"
+    round_state = json.loads((tmp_path / "run" / "rounds" / outcome.round_id / "round.json").read_text(encoding="utf-8"))
+    assert round_state["status"] == "failed"
+    assert round_state["failure_type"] == "sandbox_policy"
     record = list(loop.experience_store.read())[0]
     assert record.status == "failed"
     assert record.decision["failure_type"] == "sandbox_policy"
@@ -53,6 +62,8 @@ def test_evolution_loop_restarts_from_persisted_parent_and_search_policy(tmp_pat
     # fake evaluator does not provide a further 10% size improvement, so the
     # candidate is retained as evidence without replacing M0001.
     assert outcome.status == "rejected"
+    round_state = json.loads((tmp_path / "run" / "rounds" / outcome.round_id / "round.json").read_text(encoding="utf-8"))
+    assert round_state["status"] == "rejected"
     assert restarted.model_store.active_id == "M0001"
     assert restarted.search_policy.rounds == 2
     assert (tmp_path / "run" / "initial-baseline.json").is_file()
