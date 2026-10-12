@@ -128,7 +128,9 @@ output root，避免 parent checkpoint 和 round artifacts 互相覆盖。
 
 - 算法源码只能返回 `operator` 和 `args`，不能指定路径、设备、命令或
   evaluator；
-- sandbox 禁止 shell、网络、文件访问和未 allowlist 的 import；
+- sandbox 先做 AST/import/输出约束，再在独立进程中启用资源上限和 Python audit
+  deny，禁止 shell、网络、文件访问、动态代码和未 allowlist 的 import；当前主机
+  未提供可用的 network namespace，因此正式部署仍必须放在远程主机级隔离环境中；
 - 结构修改必须经过 forward shape、finite parameter 和 save/reload 校验；
 - 失败算法同样写入 ExperienceStore，供后续 SkillHub 避免重复失败；
 - 现有 H3 operator、Wan student training 和 remote campaign 接口保持不变。
