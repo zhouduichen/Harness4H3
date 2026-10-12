@@ -15,6 +15,8 @@ fi
 LOG=/data/models/controller-llm/controller-vllm.log
 PY=/data/models/envs/sglang_h3/bin/vllm
 CONTROLLER_GPU_PYTHON=${CONTROLLER_GPU_PYTHON:-/home/intern/miniconda3/envs/comfy/bin/python}
+CONTROLLER_VLLM_PYTHON=${CONTROLLER_VLLM_PYTHON:-/data/models/envs/sglang_h3/bin/python}
+CONTROLLER_VLLM_WRAPPER=${CONTROLLER_VLLM_WRAPPER:-/home/intern/huangjiahao/Harness4H3-long-video-30s/tools/controller-vllm-cuda-wrapper.py}
 # Leave a small allowance for nvidia-smi rounding/reservation differences.
 # The per-shard guard and dynamic gpu_memory_utilization remain in force.
 TOTAL_MIN_FREE_MIB=${CONTROLLER_TOTAL_MIN_FREE_MIB:-39900}
@@ -925,7 +927,7 @@ EOF
     write_controller_lease "launching" "$$" "$gpus"
     export CUDA_VISIBLE_DEVICES="$gpus"
     child_gpus="$gpus"
-    "$PY" serve "$MODEL" \
+    "$CONTROLLER_VLLM_PYTHON" "$CONTROLLER_VLLM_WRAPPER" serve "$MODEL" \
         --host 127.0.0.1 \
         --port 8000 \
         --served-model-name qwen3.5-controller \
