@@ -136,7 +136,8 @@ def build_algorithm_provider(
         prompt = (
             "Generate one compression algorithm for a trusted Wan DiT harness. "
             "Return JSON only with source, hypothesis, and parent_id. The source must define "
-            "propose(profile, history) and return only a bounded operator/args plan. "
+            "a complete Python function `def propose(profile, history): ...` and return only "
+            "a bounded operator/args plan; never return a function name or pseudocode. "
             "Never output paths, devices, shell commands, imports outside the sandbox allowlist, "
             "or evaluator settings.\n\n"
             + json.dumps(dict(payload), ensure_ascii=False, sort_keys=True)
@@ -164,7 +165,11 @@ def build_algorithm_provider(
                 ],
                 "temperature": 0.2,
                 "stream": False,
-                "response_format": {"type": "json_schema", "json_schema": {"name": "compression_algorithm", "strict": True, "schema": ALGORITHM_RESPONSE_SCHEMA}},
+                # vLLM deployments commonly support JSON mode but not the
+                # OpenAI json_schema extension.  The local sandbox remains
+                # the authoritative validator for the returned source.
+                "response_format": {"type": "json_object"},
+                "max_tokens": 4096,
             }
         else:
             request_payload = {
