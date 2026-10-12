@@ -117,7 +117,7 @@ def _compact_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
     compact["layers"] = [
         {
             field: item[field]
-            for field in ("block_id", "index", "parameter_count", "estimated_flops", "latency_ms", "memory_delta_bytes", "module_path", "measurement")
+            for field in ("block_id", "index", "parameter_count", "estimated_flops", "latency_ms", "memory_delta_bytes")
             if field in item
         }
         for item in profile.get("layers", [])
@@ -141,7 +141,7 @@ def _compact_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
                 for channel in channels
             ),
             key=lambda channel: float(channel.get("importance_score", 0.0)),
-        )[:16]
+        )[:4]
         channel_records.append(record)
     compact["channel_sensitivity"] = channel_records
     return compact
