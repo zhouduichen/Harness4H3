@@ -93,6 +93,20 @@ def _copy_shared_components(source: Path, target: Path) -> bool:
     return True
 
 
+def _copy_full_checkpoint(source: Path, target: Path) -> bool:
+    """Copy a complete pipeline when hardlinks cannot cross filesystems."""
+
+    if not source.is_dir() or not (source / "model_index.json").is_file():
+        return False
+    try:
+        shutil.copytree(source, target, copy_function=shutil.copy2)
+    except (OSError, shutil.Error):
+        if target.exists():
+            shutil.rmtree(target)
+        return False
+    return True
+
+
 class DiffusersWanAdapter:
     """Best-effort structural boundary for real Wan Diffusers checkpoints.
 
@@ -282,6 +296,7 @@ class DiffusersWanAdapter:
             shutil.rmtree(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         shared_components = False
+        saved = False
         transformer = self._transformer(model)
         source_raw = getattr(model, "_harness4h3_checkpoint_root", "")
         source = Path(str(source_raw)) if str(source_raw).strip() else None
@@ -289,14 +304,22 @@ class DiffusersWanAdapter:
             shared_components = _copy_shared_components(source, target)
             if shared_components:
                 transformer.save_pretrained(str(target / "transformer"))
-        if not shared_components and hasattr(model, "save_pretrained"):
-            # This is required for the initial Parent copied from the HF cache
-            # when /home and the experiment volume are different filesystems.
+                saved = True
+            else:
+                # ``DiffusionPipeline.save_pretrained`` is not guaranteed to
+                # materialize components that were loaded with the current
+                # diffusers offload/device policy.  Copy the trusted source
+                # pipeline explicitly, then replace only its Transformer.
+                saved = _copy_full_checkpoint(source, target)
+                if saved:
+                    transformer.save_pretrained(str(target / "transformer"))
+        if not saved and hasattr(model, "save_pretrained"):
             if target.exists():
                 shutil.rmtree(target)
             target.mkdir(parents=True)
             model.save_pretrained(str(target))
-        elif not shared_components:
+            saved = True
+        if not saved:
             raise ValueError("unsupported_model_layout: model cannot save_pretrained")
         value = _transformer_checkpoint_sha256(target)
         model._harness4h3_checkpoint_sha256 = value
