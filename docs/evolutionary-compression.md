@@ -78,6 +78,10 @@ fail closed，不会把未知结构当作可安全裁剪的 Transformer block。
 case/seed 原子写入 `progress.json`；进程中断后会复用已完成且视频仍存在的记录，
 不会把未完成 case 当作有效证据。
 
+EvolutionLoop 也会复用没有 `decision.json` 的最早未完成 round；已写入的
+`profile.json`、`algorithm.json`、`sandbox.json` 和 `compression.json` 会先校验并
+继续使用，避免进程崩溃后无条件新建 round 或重复执行相同算法。
+
 Dev run 完成后，对已存在的 baseline 和最终候选使用独立入口评测 Test manifest，
 不要为了评测重新生成一个压缩候选：
 

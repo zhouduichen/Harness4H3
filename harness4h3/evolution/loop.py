@@ -14,7 +14,7 @@ from ..archive.model_store import ModelStore
 from ..h3.state import ModelState
 from ..memory.experience import ExperienceRecord, ExperienceStore
 from ..profiler import ProfileReport, profile_model
-from ..sandbox.runner import AlgorithmSandbox, SandboxResult
+from ..sandbox.runner import AlgorithmSandbox, CompressionPlan as SandboxCompressionPlan, SandboxResult
 from .agent import AlgorithmAgent
 from .candidate import AlgorithmCandidate
 from .evaluator import PromotionPolicy
@@ -106,64 +106,75 @@ class EvolutionLoop:
         _write_json(self.output_root / "initial-baseline.json", self.parent.to_dict())
 
     def run_round(self) -> EvolutionRound:
-        round_id = self._next_round_id()
-        round_dir = self.rounds_root / round_id
-        round_dir.mkdir(parents=True, exist_ok=False)
-        parent_candidate = self.model_store.active()
+        round_id, round_dir, resuming = self._acquire_round()
+        round_state = self._read_json(round_dir / "round.json") if resuming else {}
+        parent_model_id = str(round_state.get("parent_model_id", "")).strip()
+        parent_candidate = self.model_store.get(parent_model_id) if parent_model_id else self.model_store.active()
         parent_artifact = self._artifact_for_candidate(parent_candidate)
-        profile = profile_model(self.adapter, self.adapter.reload_model(parent_artifact), seed=7)
+        if not resuming:
+            self._write_round_state(round_dir, {"round_id": round_id, "parent_model_id": parent_candidate.id, "status": "in_progress"})
         profile_path = round_dir / "profile.json"
-        profile.write_json(profile_path)
+        profile = self._load_or_profile(profile_path, parent_artifact)
         architecture = str(profile.model["architecture"])
         skills = self.skill_hub.search(architecture=architecture, limit=8) if self.memory_enabled else []
-        algorithm_id = self.algorithm_store.next_id()
+        algorithm_path = round_dir / "algorithm.json"
+        persisted_algorithm = self._read_json(algorithm_path) if algorithm_path.exists() else None
+        algorithm_id = str(persisted_algorithm.get("algorithm_id", "")).strip() if persisted_algorithm else self.algorithm_store.next_id()
         # The initial parent already has a measured structural state.  Let the
         # policy decide whether to exploit it or open an exploration branch.
-        search_choice = self.search_policy.choose(has_best=bool(parent_candidate.state.measured_metrics))
+        search_choice = str(round_state.get("search_choice", "")).strip() or self.search_policy.choose(has_best=bool(parent_candidate.state.measured_metrics))
         # Algorithm lineage is independent from model lineage.  A rejected
         # child must not become the next model parent, but its algorithm is
         # still the version that the next algorithm should inherit from.
         latest_algorithm = self.algorithm_store.latest()
         parent_algorithm_id = latest_algorithm.algorithm_id if latest_algorithm is not None else None
-        try:
-            algorithm = self.agent.generate(
-                algorithm_id,
-                parent_id=parent_candidate.id,
-                parent_algorithm_id=parent_algorithm_id,
-                profile=profile.to_dict(),
-                history=skills,
-                skills=skills,
-                search_choice=search_choice,
-            )
-        except (RuntimeError, TypeError, ValueError) as exc:
-            algorithm = AlgorithmCandidate.from_source(
-                algorithm_id,
-                "# algorithm generation failed\ndef propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': []}}\n",
-                parent_id=parent_candidate.id,
-                parent_algorithm_id=parent_algorithm_id,
-                hypothesis="generation failed: %s" % exc,
-                metadata={"generator_failure": True},
-            )
-            algorithm_path = round_dir / "algorithm.json"
+        if persisted_algorithm:
+            algorithm = AlgorithmCandidate.from_dict(persisted_algorithm)
+            if not any(item.algorithm_id == algorithm.algorithm_id for item in self.algorithm_store.read()):
+                self.algorithm_store.create(algorithm)
+        else:
+            try:
+                algorithm = self.agent.generate(
+                    algorithm_id,
+                    parent_id=parent_candidate.id,
+                    parent_algorithm_id=parent_algorithm_id,
+                    profile=profile.to_dict(),
+                    history=skills,
+                    skills=skills,
+                    search_choice=search_choice,
+                )
+            except (RuntimeError, TypeError, ValueError) as exc:
+                algorithm = AlgorithmCandidate.from_source(
+                    algorithm_id,
+                    "# algorithm generation failed\ndef propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': []}}\n",
+                    parent_id=parent_candidate.id,
+                    parent_algorithm_id=parent_algorithm_id,
+                    hypothesis="generation failed: %s" % exc,
+                    metadata={"generator_failure": True},
+                )
+                _write_json(algorithm_path, algorithm.to_dict())
+                return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "generation", "algorithm_generation_failed", str(exc), {"profile": str(profile_path), "algorithm": str(algorithm_path)}, algorithm_persisted=False)
             _write_json(algorithm_path, algorithm.to_dict())
-            return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "generation", "algorithm_generation_failed", str(exc), {"profile": str(profile_path), "algorithm": str(algorithm_path)}, algorithm_persisted=False)
-        algorithm_path = round_dir / "algorithm.json"
-        _write_json(algorithm_path, algorithm.to_dict())
-        try:
-            self.algorithm_store.create(algorithm)
-        except ValueError as exc:
-            return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "generation", "duplicate_algorithm", str(exc), {"profile": str(profile_path), "algorithm": str(algorithm_path)}, algorithm_persisted=False)
+            try:
+                self.algorithm_store.create(algorithm)
+            except ValueError as exc:
+                return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "generation", "duplicate_algorithm", str(exc), {"profile": str(profile_path), "algorithm": str(algorithm_path)}, algorithm_persisted=False)
+        self._write_round_state(round_dir, {**round_state, "round_id": round_id, "parent_model_id": parent_candidate.id, "search_choice": search_choice, "algorithm_id": algorithm.algorithm_id, "status": "in_progress"})
 
-        sandbox_result = self.sandbox.run(algorithm.source, profile.to_dict(), skills)
         sandbox_path = round_dir / "sandbox.json"
-        _write_json(sandbox_path, _sandbox_dict(sandbox_result))
+        sandbox_result = self._load_sandbox(sandbox_path)
+        if sandbox_result is None:
+            sandbox_result = self.sandbox.run(algorithm.source, profile.to_dict(), skills)
+            _write_json(sandbox_path, _sandbox_dict(sandbox_result))
         if sandbox_result.status != "success" or sandbox_result.plan is None:
             return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "sandbox", sandbox_result.failure_type or "sandbox_failed", sandbox_result.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path)})
 
         compression_dir = round_dir / "checkpoint"
-        compression = self.registry.execute(algorithm_plan_operator(sandbox_result), self.adapter, parent_artifact, sandbox_result.plan.args, compression_dir)
         compression_path = round_dir / "compression.json"
-        _write_json(compression_path, compression.to_dict())
+        compression = self._load_compression(compression_path)
+        if compression is None:
+            compression = self.registry.execute(algorithm_plan_operator(sandbox_result), self.adapter, parent_artifact, sandbox_result.plan.args, compression_dir)
+            _write_json(compression_path, compression.to_dict())
         if compression.status != "success" or compression.child_checkpoint is None:
             return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "compression", compression.failure_type or "compression_failed", compression.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "compression": str(compression_path)})
 
@@ -174,10 +185,13 @@ class EvolutionLoop:
             integrity_error = str(exc)
         else:
             integrity_error = None
-        try:
-            evaluation = dict(self.evaluator(compression.child_checkpoint, profile.to_dict()))
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            evaluation = {"valid": False, "evaluation_status": "failed", "failure_type": "evaluator_failed", "failure_message": str(exc), "offline_simulation": False}
+        evaluation_path = round_dir / "evaluation.json"
+        evaluation = self._read_json(evaluation_path) if evaluation_path.exists() else None
+        if evaluation is None:
+            try:
+                evaluation = dict(self.evaluator(compression.child_checkpoint, profile.to_dict()))
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                evaluation = {"valid": False, "evaluation_status": "failed", "failure_type": "evaluator_failed", "failure_message": str(exc), "offline_simulation": False}
         if not child_integrity:
             evaluation = {
                 **evaluation,
@@ -186,9 +200,9 @@ class EvolutionLoop:
                 "failure_type": "child_integrity_failed",
                 "failure_message": integrity_error or "child checkpoint is identical to parent",
             }
-        evaluation_path = round_dir / "evaluation.json"
-        _write_json(evaluation_path, evaluation)
-        child_candidate = self._create_child(parent_candidate, compression.child_checkpoint, algorithm, evaluation)
+        if not evaluation_path.exists() or not child_integrity:
+            _write_json(evaluation_path, evaluation)
+        child_candidate = self._existing_or_create_child(parent_candidate, compression.child_checkpoint, algorithm, evaluation)
         evaluation_offline = bool(evaluation.get("offline_simulation", False))
         parent_offline = bool(parent_candidate.state.provenance.get("offline_simulation", False))
         offline_mismatch = evaluation_offline and not parent_offline
@@ -304,6 +318,17 @@ class EvolutionLoop:
             raise ValueError("model_checkpoint_hash_mismatch: %s" % candidate.id)
         return CheckpointArtifact(candidate.checkpoint_path, digest, structure.architecture, structure, {"offline_simulation": bool(candidate.state.provenance.get("offline_simulation", False))})
 
+    def _artifact_for_path(self, path: str, *, metadata: Optional[Mapping[str, Any]] = None) -> CheckpointArtifact:
+        model = self.adapter.load_model(str(path))
+        structure = self.adapter.inspect(model)
+        return CheckpointArtifact(str(path), structure.checkpoint_sha256, structure.architecture, structure, dict(metadata or {}))
+
+    def _existing_or_create_child(self, parent: ModelCandidate, artifact: CheckpointArtifact, algorithm: AlgorithmCandidate, evaluation: Mapping[str, Any]) -> ModelCandidate:
+        for candidate in self.model_store.lineage():
+            if candidate.parent_id == parent.id and candidate.created_by_experiment_id == algorithm.algorithm_id and candidate.checkpoint_path == artifact.path:
+                return candidate
+        return self._create_child(parent, artifact, algorithm, evaluation)
+
     def _verify_checkpoint(self, artifact: CheckpointArtifact, *, expected_sha256: str, parent_sha256: Optional[str] = None) -> bool:
         if parent_sha256 is not None and artifact.sha256 == parent_sha256:
             return False
@@ -334,6 +359,91 @@ class EvolutionLoop:
             )
         ]
         _write_json(self.pareto_path, {"entries": front})
+
+    def _acquire_round(self) -> tuple[str, Path, bool]:
+        """Reuse the oldest round without a decision before allocating a new one."""
+
+        incomplete: list[tuple[int, Path]] = []
+        for path in self.rounds_root.glob("R*"):
+            if not path.is_dir() or (path / "decision.json").exists():
+                continue
+            try:
+                incomplete.append((int(path.name[1:]), path))
+            except ValueError:
+                continue
+        if incomplete:
+            _, path = sorted(incomplete, key=lambda item: item[0])[0]
+            return path.name, path, True
+        round_id = self._next_round_id()
+        round_dir = self.rounds_root / round_id
+        round_dir.mkdir(parents=True, exist_ok=False)
+        return round_id, round_dir, False
+
+    @staticmethod
+    def _read_json(path: Path) -> dict[str, Any]:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return dict(value) if isinstance(value, Mapping) else {}
+
+    def _write_round_state(self, round_dir: Path, state: Mapping[str, Any]) -> None:
+        _write_json(round_dir / "round.json", dict(state))
+
+    def _load_or_profile(self, path: Path, parent: CheckpointArtifact) -> ProfileReport:
+        if path.exists():
+            try:
+                profile = ProfileReport.read_json(path)
+                if str(profile.model.get("checkpoint_sha256", "")) == parent.sha256:
+                    return profile
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                pass
+        profile = profile_model(self.adapter, self.adapter.reload_model(parent), seed=7)
+        profile.write_json(path)
+        return profile
+
+    @classmethod
+    def _load_sandbox(cls, path: Path) -> Optional[SandboxResult]:
+        if not path.exists():
+            return None
+        raw = cls._read_json(path)
+        status = str(raw.get("status", ""))
+        plan = None
+        if raw.get("plan") is not None:
+            plan = SandboxCompressionPlan.from_mapping(raw["plan"])
+        return SandboxResult(
+            status=status,
+            source_sha256=str(raw.get("source_sha256", "")),
+            plan=plan,
+            failure_type=str(raw["failure_type"]) if raw.get("failure_type") else None,
+            message=str(raw.get("message", "")),
+            stdout_path=str(raw["stdout_path"]) if raw.get("stdout_path") else None,
+            stderr_path=str(raw["stderr_path"]) if raw.get("stderr_path") else None,
+            metadata=dict(raw.get("metadata") or {}),
+        )
+
+    def _load_compression(self, path: Path) -> Optional[CompressionResult]:
+        if not path.exists():
+            return None
+        raw = self._read_json(path)
+        status = str(raw.get("status", ""))
+        child_raw = raw.get("child_checkpoint")
+        child = None
+        if status == "success":
+            if not isinstance(child_raw, Mapping) or not str(child_raw.get("path", "")).strip():
+                raise ValueError("incomplete compression artifact")
+            child = self._artifact_for_path(str(child_raw["path"]), metadata=dict(child_raw.get("metadata") or {}))
+            if child.sha256 != str(child_raw.get("sha256", "")):
+                raise ValueError("resumed child checkpoint hash mismatch")
+        return CompressionResult(
+            status=status,
+            parent_checkpoint_sha256=str(raw.get("parent_checkpoint_sha256", "")),
+            child_checkpoint=child,
+            structural_change=dict(raw.get("structural_change") or {}),
+            failure_type=str(raw["failure_type"]) if raw.get("failure_type") else None,
+            message=str(raw.get("message", "")),
+            wall_time_s=float(raw.get("wall_time_s", 0.0)),
+        )
 
     def _next_round_id(self) -> str:
         numbers = []

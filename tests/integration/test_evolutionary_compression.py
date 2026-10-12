@@ -109,3 +109,43 @@ def test_algorithm_lineage_advances_after_rejected_model(tmp_path):
     assert loop.run_round().status == "rejected"
     assert loop.run_round().status == "promoted"
     assert loop.algorithm_store.get("A0002").parent_algorithm_id == "A0001"
+
+
+def test_incomplete_round_reuses_persisted_compression_after_process_crash(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=5, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+
+    def crash_evaluator(child, profile):
+        raise KeyboardInterrupt("simulated process crash after compression")
+
+    first = EvolutionLoop(adapter=adapter, parent=parent, output_root=tmp_path / "run", evaluator=crash_evaluator)
+    try:
+        first.run_round()
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("simulated crash should propagate")
+
+    round_dir = tmp_path / "run" / "rounds" / "R0001"
+    assert (round_dir / "compression.json").is_file()
+    assert not (round_dir / "decision.json").exists()
+
+    calls = {"count": 0}
+
+    def recovered_evaluator(child, profile):
+        calls["count"] += 1
+        return {
+            "quality_score": 0.99,
+            "baseline_quality_score": 0.99,
+            "baseline_hardware_metrics": {"latency_s": 1.0, "peak_memory_gb": 1.0, "model_size_gb": 1.0},
+            "hardware_metrics": {"latency_s": 0.5, "peak_memory_gb": 0.5, "model_size_gb": 0.5},
+            "valid": True,
+        }
+
+    restarted = EvolutionLoop(adapter=adapter, parent=parent, output_root=tmp_path / "run", evaluator=recovered_evaluator)
+    outcome = restarted.run_round()
+
+    assert outcome.round_id == "R0001"
+    assert calls["count"] == 1
+    assert not (tmp_path / "run" / "rounds" / "R0002").exists()
+    assert len(list(restarted.algorithm_store.read())) == 1
