@@ -84,7 +84,7 @@ Dev run 完成后，对已存在的 baseline 和最终候选使用独立入口�
 ```bash
 HARNESS4H3_SOURCE_REVISION=$(git rev-parse HEAD) \\
   .venv/bin/python tools/evaluate_wan_checkpoint.py \\
-  --config configs/evolutionary-compression.wan-formal-test.yaml \\
+  --config configs/evolutionary-compression.wan-formal-test.example.yaml \\
   --baseline /path/to/parent \\
   --candidate /path/to/final-child \\
   --output-root var/rsi/test/fixed-algorithm \\
