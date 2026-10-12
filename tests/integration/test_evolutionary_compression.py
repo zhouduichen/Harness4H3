@@ -48,7 +48,12 @@ def test_evolution_loop_restarts_from_persisted_parent_and_search_policy(tmp_pat
     outcome = restarted.run_round()
     assert outcome.round_id == "R0002"
     assert outcome.parent_model_id == "M0001"
-    assert restarted.model_store.active_id == outcome.child_model_id
+    # The restarted loop compares the new candidate with the active measured
+    # Parent, not only with the immutable initial baseline.  The structural
+    # fake evaluator does not provide a further 10% size improvement, so the
+    # candidate is retained as evidence without replacing M0001.
+    assert outcome.status == "rejected"
+    assert restarted.model_store.active_id == "M0001"
     assert restarted.search_policy.rounds == 2
     assert (tmp_path / "run" / "initial-baseline.json").is_file()
 

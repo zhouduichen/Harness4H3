@@ -76,3 +76,24 @@ def test_efficiency_gain_without_required_model_size_gain_does_not_promote():
     )
     assert decision["accepted"] is False
     assert "model_size_improvement_below_threshold" in decision["reasons"]
+
+
+def test_promotion_uses_active_parent_before_initial_baseline():
+    decision = PromotionPolicy().decide(
+        parent={
+            "quality_score": 0.90,
+            "hardware_metrics": {"latency_s": 80.0, "peak_memory_gb": 8.0, "model_size_gb": 8.0},
+        },
+        evaluation={
+            # This is the immutable initial baseline and is intentionally
+            # better than the active Parent after an earlier promotion.
+            "baseline_quality_score": 1.0,
+            "baseline_hardware_metrics": {"latency_s": 100.0, "peak_memory_gb": 10.0, "model_size_gb": 10.0},
+            "quality_score": 0.87,
+            "valid": True,
+            "hardware_metrics": {"latency_s": 70.0, "peak_memory_gb": 7.0, "model_size_gb": 7.0},
+        },
+        child_integrity=True,
+    )
+    assert decision["accepted"] is False
+    assert "quality_floor_failed" in decision["reasons"]

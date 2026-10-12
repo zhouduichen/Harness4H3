@@ -116,23 +116,32 @@ class PromotionPolicy:
         if evaluation.get("valid") is not True:
             reasons.append("independent_evaluation_invalid_or_missing")
         candidate_quality = self._number(evaluation.get("quality_score"))
-        parent_quality = self._number(evaluation.get("baseline_quality_score"))
+        # Once a candidate has been promoted, its measured metrics become the
+        # next Parent.  The evaluator still keeps the immutable initial
+        # baseline for drift reporting, but promotion must compare against the
+        # active Parent first.
+        parent_quality = self._number(parent.get("quality_score"))
         if parent_quality is None:
-            parent_quality = self._number(parent.get("quality_score"))
+            parent_quality = self._number(evaluation.get("baseline_quality_score"))
         if candidate_quality is None or parent_quality is None:
             reasons.append("quality_data_missing")
         elif candidate_quality < parent_quality * self.quality_floor_ratio:
             reasons.append("quality_floor_failed")
 
-        candidate_hw = self._hardware(evaluation)
-        baseline_hw = evaluation.get("baseline_hardware_metrics")
-        if not isinstance(baseline_hw, Mapping):
-            baseline_hw = self._hardware(parent)
         metric_specs = (
             (("latency_s", "inference_wall_time_s_mean"), self.min_efficiency_improvement),
             (("peak_memory_gb", "peak_memory_gb_max"), self.min_efficiency_improvement),
             (("model_size_gb",), self.min_model_size_improvement),
         )
+        candidate_hw = self._hardware(evaluation)
+        parent_hw = self._hardware(parent)
+        has_parent_measurement = any(
+            self._metric(parent_hw, names) is not None
+            for names, _minimum in metric_specs
+        )
+        baseline_hw = parent_hw if has_parent_measurement else evaluation.get("baseline_hardware_metrics")
+        if not isinstance(baseline_hw, Mapping):
+            baseline_hw = parent_hw
         improvements: dict[str, float] = {}
         comparable = 0
         for names, minimum in metric_specs:
