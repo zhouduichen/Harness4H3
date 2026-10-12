@@ -25,7 +25,16 @@ ALGORITHM_RESPONSE_SCHEMA = {
 }
 
 
-def _seed_source(block_id: str, algorithm_id: str) -> str:
+def _seed_source(block_id: str, algorithm_id: str, search_choice: str) -> str:
+    if search_choice == "explore":
+        return (
+            "def propose(profile, history):\n"
+            "    # Explore seed %s: a paired FFN-width hypothesis across all profiled blocks.\n"
+            "    block_ids = [item['block_id'] for item in profile.get('layers', [])]\n"
+            "    width = int(profile['model']['ffn_width'])\n"
+            "    retained_indices = list(range(max(1, width // 2)))\n"
+            "    return {'operator': 'prune_ffn_channels', 'args': {'block_ids': block_ids, 'retained_indices': retained_indices}}\n"
+        ) % algorithm_id
     return (
         "def propose(profile, history):\n"
         "    # Seed algorithm %s selects the least output-sensitive block reported by the profiler.\n"
@@ -46,22 +55,24 @@ class AlgorithmAgent:
         profile: Mapping[str, Any],
         history: Sequence[Mapping[str, Any]],
         skills: Sequence[Mapping[str, Any]] = (),
+        search_choice: str = "exploit",
     ) -> AlgorithmCandidate:
         if self.provider is None:
             block_id = self._least_sensitive_block(profile)
-            source = _seed_source(block_id, algorithm_id)
+            source = _seed_source(block_id, algorithm_id, search_choice)
             return AlgorithmCandidate.from_source(
                 algorithm_id,
                 source,
                 parent_id=parent_id,
-                hypothesis="remove the lowest measured leave-one-block-out sensitivity block",
-                metadata={"generator": "deterministic_seed", "operator": "prune_blocks"},
+                hypothesis=("explore paired FFN width pruning" if search_choice == "explore" else "remove the lowest measured leave-one-block-out sensitivity block"),
+                metadata={"generator": "deterministic_seed", "operator": ("prune_ffn_channels" if search_choice == "explore" else "prune_blocks"), "search_choice": search_choice},
             )
         payload = {
             "profile": dict(profile),
             "history": [dict(item) for item in history],
             "skills": [dict(item) for item in skills],
             "parent_id": parent_id,
+            "search_policy": {"choice": search_choice},
         }
         raw = self.provider(payload)
         if not isinstance(raw, Mapping):
@@ -80,7 +91,7 @@ class AlgorithmAgent:
             source,
             parent_id=parent_id,
             hypothesis=str(raw.get("hypothesis", "")),
-            metadata={"generator": "structured_provider"},
+            metadata={"generator": "structured_provider", "search_choice": search_choice},
         )
 
     @staticmethod

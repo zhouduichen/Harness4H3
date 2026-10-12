@@ -25,6 +25,14 @@ class SearchPolicy:
         self.exploit_rounds += 1
         return "exploit"
 
+    def update(self, *, feasible: bool, improved: bool) -> None:
+        """Adapt the next allocation from measured round feedback."""
+
+        if feasible and improved:
+            self.exploit_ratio = min(0.9, float(self.exploit_ratio) + 0.05)
+        elif not feasible:
+            self.exploit_ratio = max(0.3, float(self.exploit_ratio) - 0.10)
+
     def to_dict(self) -> dict[str, int | float]:
         return {
             "exploit_ratio": float(self.exploit_ratio),

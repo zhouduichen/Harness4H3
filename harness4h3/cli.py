@@ -54,7 +54,7 @@ from .executor.local import LocalProcessExecutor
 from .target.profile import load_target_profile
 from research.experiments.remote_h3_closed_loop import RemoteCampaign
 from .adapters.wan import build_wan_adapter
-from .evolution import CompressionConfig, EvolutionLoop, SearchPolicy
+from .evolution import CompressionConfig, EvolutionLoop, SearchPolicy, WanVideoEvaluationConfig, WanVideoEvaluator
 from .evolution.agent import AlgorithmAgent, build_algorithm_provider
 from .operators.wan import build_wan_compression_registry
 from .profiler import profile_model
@@ -131,13 +131,25 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
                 timeout_s=float(controller.get("timeout_s", 180.0)),
             )
         )
+    evaluator = None
+    evaluator_backend = str(config.evaluator.get("backend", "")).strip().lower()
+    if config.backend == "diffusers":
+        if evaluator_backend != "wan_video":
+            raise ValueError("diffusers evolutionary compression requires evaluator.backend=wan_video; structural proxy is disabled for real checkpoints")
+        evaluator_config = WanVideoEvaluationConfig.from_mapping(config.evaluator, config.output_root / "real-evaluation")
+        evaluator = WanVideoEvaluator(evaluator_config, baseline=parent)
+    elif evaluator_backend and evaluator_backend != "structural_proxy":
+        raise ValueError("fake evolutionary compression supports only the default structural proxy evaluator")
+    policy_path = config.output_root / "search-policy.json"
+    search_policy = None if policy_path.exists() else SearchPolicy(exploit_ratio=config.exploit_ratio, seed=config.seed)
     loop = EvolutionLoop(
         adapter=adapter,
         parent=parent,
         output_root=config.output_root,
         sandbox=AlgorithmSandbox(config.output_root / "sandbox", timeout_s=config.sandbox_timeout_s),
         agent=agent,
-        search_policy=SearchPolicy(exploit_ratio=config.exploit_ratio, seed=config.seed),
+        evaluator=evaluator,
+        search_policy=search_policy,
     )
     outcomes = [loop.run_round().to_dict() for _ in range(int(args.rounds))]
     failed = sum(1 for item in outcomes if item["status"] == "failed")

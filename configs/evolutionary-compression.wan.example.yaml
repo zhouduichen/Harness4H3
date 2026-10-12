@@ -13,3 +13,16 @@ controller:
   endpoint: http://127.0.0.1:8000/v1/chat/completions
   api_key_env: ""
   timeout_s: 180
+evaluator:
+  backend: wan_video
+  # All three paths must exist on the execution host and be local-only.
+  wan_config: /path/to/wan-student-1.3b.yaml
+  evaluation_manifest: /path/to/evaluation-manifest.wan-5s.json
+  clip_model_path: /path/to/clip-vit-large-patch14-336
+  device: cuda:0
+  dtype: bfloat16
+  local_files_only: true
+  max_cases: 1
+  seed_count: 1
+  sample_frames: 4
+  max_quality_drop: 0.05

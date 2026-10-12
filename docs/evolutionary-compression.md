@@ -42,9 +42,25 @@ EvaluationRecord / archive / ExperienceStore
 ## 真实 Wan smoke
 
 编辑 `configs/evolutionary-compression.wan.example.yaml` 中的可信本地
-checkpoint 路径，在安装 `.[wan]` 依赖并具备 CUDA 的机器上运行同样的
-`profile-wan` 或 `evolve-compression` 命令。真实 adapter 对未知 Wan
-模块布局 fail closed，不会把未知结构当作可安全裁剪的 Transformer block。
+checkpoint、Wan 生成配置、评测 manifest 和本地 CLIP 路径，在安装 `.[wan]`
+依赖并具备 CUDA 的机器上运行：
+
+```bash
+python -m harness4h3 evolve-compression \
+  --config configs/evolutionary-compression.wan.example.yaml \
+  --rounds 1 --json
+```
+
+真实 Diffusers checkpoint 必须配置 `evaluator.backend: wan_video`；CLI
+会拒绝用 structural proxy 给真实权重打分。真实 evaluator 使用固定的
+prompt/seed 生成视频，用本地 CLIP-temporal backend 评估语义、时间一致性
+和运动，并把生成耗时、视频有效性和质量证据写入
+`output_root/real-evaluation/`。当前 1.3B smoke 支持把 Transformer 放到
+GPU，T5 encoder 和 VAE 留在 CPU。
+
+`search-policy.json` 会跨次运行保存并恢复；实测可行且有改进的轮次提高
+exploit 比例，失败轮次降低 exploit 比例。真实 adapter 对未知 Wan 模块布局
+fail closed，不会把未知结构当作可安全裁剪的 Transformer block。
 
 不要让两个命令共享同一个 `output_root` 并发运行；每个实验使用独立的
 output root，避免 parent checkpoint 和 round artifacts 互相覆盖。

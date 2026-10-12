@@ -107,7 +107,17 @@ class EvolutionLoop:
         architecture = str(profile.model["architecture"])
         skills = self.skill_hub.search(architecture=architecture, limit=8)
         algorithm_id = self.algorithm_store.next_id()
-        algorithm = self.agent.generate(algorithm_id, parent_id=parent_candidate.id, profile=profile.to_dict(), history=skills, skills=skills)
+        # The initial parent already has a measured structural state.  Let the
+        # policy decide whether to exploit it or open an exploration branch.
+        search_choice = self.search_policy.choose(has_best=bool(parent_candidate.state.measured_metrics))
+        algorithm = self.agent.generate(
+            algorithm_id,
+            parent_id=parent_candidate.id,
+            profile=profile.to_dict(),
+            history=skills,
+            skills=skills,
+            search_choice=search_choice,
+        )
         self.algorithm_store.create(algorithm)
         algorithm_path = round_dir / "algorithm.json"
         _write_json(algorithm_path, algorithm.to_dict())
@@ -129,9 +139,18 @@ class EvolutionLoop:
         evaluation_path = round_dir / "evaluation.json"
         _write_json(evaluation_path, evaluation)
         child_candidate = self._create_child(parent_candidate, compression.child_checkpoint, algorithm, evaluation)
-        feasible = bool(evaluation.get("feasible", False)) and not bool(evaluation.get("critical_regression", False))
+        evaluation_offline = bool(evaluation.get("offline_simulation", False))
+        parent_offline = bool(parent_candidate.state.provenance.get("offline_simulation", False))
+        offline_mismatch = evaluation_offline and not parent_offline
+        feasible = (
+            bool(evaluation.get("feasible", False))
+            and not bool(evaluation.get("critical_regression", False))
+            and not offline_mismatch
+        )
         decision_status = "promoted" if feasible else "rejected"
-        policy_choice = self.search_policy.choose(has_best=feasible)
+        previous_score = float(parent_candidate.state.measured_metrics.get("search_score", parent_candidate.state.measured_metrics.get("quality_score", 0.0)))
+        current_score = float(evaluation.get("search_score", evaluation.get("quality_score", 0.0)))
+        self.search_policy.update(feasible=feasible, improved=current_score > previous_score)
         self._persist_search_policy()
         decision = {
             "status": decision_status,
@@ -141,8 +160,10 @@ class EvolutionLoop:
             "operator": sandbox_result.plan.operator,
             "operator_args": dict(sandbox_result.plan.args),
             "feasible": feasible,
+            "evaluation_offline": evaluation_offline,
+            "offline_mismatch": offline_mismatch,
             "evaluation": evaluation,
-            "search_policy": {"choice": policy_choice, **self.search_policy.to_dict()},
+            "search_policy": {"choice": search_choice, **self.search_policy.to_dict()},
         }
         decision_path = round_dir / "decision.json"
         _write_json(decision_path, decision)
@@ -239,13 +260,14 @@ class EvolutionLoop:
         after = int(child.structure.block_count)
         ratio = float(after) / float(max(before, 1))
         return {
+            "evaluation_status": "structural_proxy",
             "quality_score": max(0.0, 0.98 - (1.0 - ratio) * 0.06),
             "latency_s": 1.0 * ratio,
             "peak_memory_gb": 1.0 * ratio,
             "model_size_gb": max(0.01, 1.0 * ratio),
             "feasible": True,
             "critical_regression": False,
-            "offline_simulation": bool(child.metadata.get("offline_simulation", False)),
+            "offline_simulation": True,
             "search_score": max(0.0, 0.98 - (1.0 - ratio) * 0.06),
         }
 

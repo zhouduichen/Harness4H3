@@ -4,7 +4,7 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange
 
@@ -53,9 +53,11 @@ class DiffusersWanAdapter:
         self._device = "cpu"
         self._dtype = "float32"
 
-    def load_model(self, checkpoint: str, *, device: str = "cpu", dtype: str = "float32") -> Any:
+    def load_model(self, checkpoint: str, *, device: Optional[str] = None, dtype: Optional[str] = None) -> Any:
         torch, _ = _torch_modules()
         pipeline_cls = _import_pipeline()
+        device = str(self._device if device is None else device)
+        dtype = str(self._dtype if dtype is None else dtype)
         pipe = pipeline_cls.from_pretrained(checkpoint, local_files_only=self.local_files_only, torch_dtype=getattr(torch, dtype))
         if not hasattr(pipe, "transformer"):
             raise ValueError("unsupported_model_layout: Wan pipeline has no transformer")
