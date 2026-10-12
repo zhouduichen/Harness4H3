@@ -175,6 +175,7 @@ class WanVideoEvaluator:
                 for seed in seeds:
                     case_dir = result_dir / "videos" / case_id / ("seed_%d" % seed)
                     video_path = case_dir / "wan.mp4"
+                    self._reset_peak_memory(torch)
                     started = time.perf_counter()
                     frames = self._generate(pipeline, torch, caption, seed)
                     inference_wall = time.perf_counter() - started
@@ -188,6 +189,7 @@ class WanVideoEvaluator:
                             "caption": caption,
                             "video_path": str(video_path),
                             "generation_wall_time_s": inference_wall,
+                            "peak_memory_gb": self._peak_memory_gb(torch),
                             "validity": validity,
                             "quality": evidence.to_dict(),
                         }
@@ -211,6 +213,9 @@ class WanVideoEvaluator:
                 "hardware_metrics": {
                     "inference_wall_time_s_mean": sum(float(item["generation_wall_time_s"]) for item in cases) / len(cases),
                     "inference_wall_time_s_total": sum(float(item["generation_wall_time_s"]) for item in cases),
+                    "peak_memory_gb_max": max(float(item["peak_memory_gb"]) for item in cases),
+                    "model_size_gb": self._checkpoint_size_gb(artifact.path),
+                    "parameter_count": int(artifact.structure.parameter_count),
                     "case_count": len(cases),
                 },
                 "cases": cases,
@@ -242,6 +247,35 @@ class WanVideoEvaluator:
                 sample_frames=self.config.sample_frames,
             )
         return self._quality_backend
+
+    @staticmethod
+    def _reset_peak_memory(torch: Any) -> None:
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+        except (AttributeError, RuntimeError):
+            pass
+
+    @staticmethod
+    def _peak_memory_gb(torch: Any) -> float:
+        try:
+            if torch.cuda.is_available():
+                return float(torch.cuda.max_memory_allocated()) / float(1024**3)
+        except (AttributeError, RuntimeError):
+            pass
+        return 0.0
+
+    @staticmethod
+    def _checkpoint_size_gb(path: str) -> float:
+        root = Path(path)
+        try:
+            if root.is_file():
+                total = root.stat().st_size
+            else:
+                total = sum(item.stat().st_size for item in root.rglob("*") if item.is_file())
+        except OSError as exc:
+            raise WanEvaluationError("checkpoint_size_failed: %s" % exc) from exc
+        return float(total) / float(1024**3)
 
     def _load_pipeline(self, checkpoint: str) -> tuple[Any, Any]:
         if self._pipeline_loader is not None:
