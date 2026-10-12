@@ -7,7 +7,7 @@ wan_loop:
   clip_model_path: /data/models/clip-vit-large-patch14-336
   teacher_baseline_result: /data/models/MiniMax-H3/harness4h3/wan-teacher-native-5s-20261009/teacher-baseline-result.json
   parent_checkpoint: /data/models/MiniMax-H3/harness4h3/wan-p1-rollout-seed10-cont-gpu-noise-20261010/seed-20261010/training/student.safetensors
-  output_root: /data/models/MiniMax-H3/harness4h3/wan-native-controller-search-20261011-attempt4
+  output_root: /data/models/MiniMax-H3/harness4h3/wan-native-controller-search-20261011-attempt5
   worker_python: /home/intern/miniconda3/envs/comfy/bin/python
   training_entrypoint: /home/intern/huangjiahao/Harness4H3-long-video-30s/tools/wan_student_train_worker.py
 
