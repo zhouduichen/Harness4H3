@@ -41,6 +41,23 @@ def _default_forward(model: Any, sample: Any) -> Any:
         return None
 
 
+def _resolve(root: Any, path: str) -> Any:
+    value = root
+    for part in path.split("."):
+        value = getattr(value, part) if not part.isdigit() else value[int(part)]
+    return value
+
+
+def _estimate_flops(model: Any, module_path: str) -> Optional[int]:
+    try:
+        block = _resolve(model, module_path)
+        up = getattr(block, "up_proj")
+        down = getattr(block, "down_proj")
+        return 2 * (int(up.in_features) * int(up.out_features) + int(down.in_features) * int(down.out_features))
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return None
+
+
 def profile_layers(adapter: WanModelAdapter, model: Any, *, sample: Any = None, forward_fn: Optional[ForwardFn] = None, measure_latency: bool = True, seed: int = 7) -> tuple[Mapping[str, Any], ...]:
     """Collect structural layer records without claiming unavailable metrics."""
 
@@ -66,7 +83,7 @@ def profile_layers(adapter: WanModelAdapter, model: Any, *, sample: Any = None, 
             "index": block.index,
             "module_path": block.module_path,
             "parameter_count": block.parameter_count,
-            "estimated_flops": None,
+            "estimated_flops": _estimate_flops(model, block.module_path),
             "latency_ms": latency_ms,
             "memory_delta_bytes": None,
             "measurement": {"latency_available": latency_available, "memory_available": False, "flops_available": False},
@@ -90,7 +107,7 @@ def profile_model(
     layers = profile_layers(adapter, model, sample=sample, forward_fn=forward_fn, measure_latency=measure_latency, seed=seed)
     block_sensitivity = measure_block_sensitivity(adapter, model, sample=sample, forward_fn=forward_fn)
     channel_sensitivity = measure_channel_sensitivity(adapter, model, max_probes=max_channel_probes)
-    timestep_sensitivity = measure_timestep_sensitivity(model, sample=sample, forward_fn=timestep_fn or forward_fn)
+    timestep_sensitivity = measure_timestep_sensitivity(model, sample=sample, forward_fn=timestep_fn or _default_timestep_forward)
     offline = bool(structure.metadata.get("offline_simulation", False))
     return ProfileReport(
         model=structure.to_dict(),
@@ -108,3 +125,9 @@ def profile_model(
         },
     )
 
+
+def _default_timestep_forward(model: Any, bucket: str, sample: Any) -> Any:
+    """Use scaled fake inputs for timestep probes; real Wan layouts may fail closed."""
+
+    scale = {"high_noise": 0.9, "middle": 0.5, "low_noise": 0.1}[bucket]
+    return _default_forward(model, sample * scale)

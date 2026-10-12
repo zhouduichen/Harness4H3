@@ -18,6 +18,7 @@ def test_profile_report_contains_required_sections_and_explicit_provenance(tmp_p
     assert set(payload["timestep_sensitivity"]) == {"high_noise", "middle", "low_noise"}
     assert payload["provenance"]["offline_simulation"] is True
     assert len(payload["layers"]) == 3
+    assert all(item["estimated_flops"] > 0 for item in payload["layers"])
     report.write_json(tmp_path / "profile.json")
     assert ProfileReport.read_json(tmp_path / "profile.json").to_dict() == payload
 
@@ -27,5 +28,4 @@ def test_missing_real_measurements_are_explicitly_unavailable():
     report = profile_model(adapter, adapter.load_model("fake://baseline"), measure_latency=False)
     assert report.provenance["latency_available"] is False
     assert all(item["measurement"]["memory_available"] is False for item in report.layers)
-    assert all(item["available"] is False for item in report.timestep_sensitivity.values())
-
+    assert all(item["available"] is True for item in report.timestep_sensitivity.values())
