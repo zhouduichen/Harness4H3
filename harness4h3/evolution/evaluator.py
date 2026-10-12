@@ -409,12 +409,15 @@ class WanVideoEvaluator:
                 seeds = tuple(int(seed) for seed in raw_case.get("seeds", ()))[: self.config.seed_count]
                 if not caption or not seeds:
                     raise WanEvaluationError("evaluation_manifest_invalid: case requires caption and seeds")
+                # Prompt text is fixed across seeds for one manifest case.  It
+                # is not a compressed component, so encode it once and reuse
+                # the tensors for every latency sample and seed.
+                prompt_embeddings = self._prepare_prompt_embeddings(pipeline, torch, caption)
                 for seed in seeds:
                     if (case_id, seed) in completed_keys:
                         continue
                     case_dir = result_dir / "videos" / case_id / ("seed_%d" % seed)
                     video_path = case_dir / "wan.mp4"
-                    prompt_embeddings = self._prepare_prompt_embeddings(pipeline, torch, caption)
                     self._reset_peak_memory(torch)
                     for _ in range(int(self.config.latency_warmup)):
                         self._generate_case(pipeline, torch, caption, seed, prompt_embeddings)

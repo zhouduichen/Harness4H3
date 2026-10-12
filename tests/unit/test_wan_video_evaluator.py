@@ -119,12 +119,13 @@ def test_real_evaluator_caches_prompt_embeddings_for_latency_repeats(tmp_path, m
         encoding="utf-8",
     )
     manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps({"cases": [{"case_id": "cached", "caption": "a test video", "seeds": [7]}]}), encoding="utf-8")
+    manifest.write_text(json.dumps({"cases": [{"case_id": "cached", "caption": "a test video", "seeds": [7, 8]}]}), encoding="utf-8")
     config = WanVideoEvaluationConfig(
         wan_config=wan_config,
         evaluation_manifest=manifest,
         clip_model_path=tmp_path / "clip",
         output_root=tmp_path / "evaluation",
+        seed_count=2,
     )
     adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
     baseline = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "baseline")
@@ -194,8 +195,8 @@ def test_real_evaluator_caches_prompt_embeddings_for_latency_repeats(tmp_path, m
     assert result["hardware_metrics"]["prompt_encoding_included"] is False
     assert result["hardware_metrics"]["peak_memory_gb_max"] == 2.0
     assert FakeCuda.reset_devices
-    assert len(pipeline.embed_calls) == 4  # positive and negative text, once for each artifact
-    assert len(generate_calls) == 8  # baseline and child, warmup plus three repeats
+    assert len(pipeline.embed_calls) == 4  # positive and negative text, once per artifact/case
+    assert len(generate_calls) == 16  # two seeds per artifact, warmup plus three repeats
     assert all(call[2]["prompt_embeds"] is not None for call in generate_calls)
 
 
