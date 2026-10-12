@@ -53,24 +53,6 @@ from .operators.model_evolution import build_external_model_evolution_registry, 
 from .executor.local import LocalProcessExecutor
 from .target.profile import load_target_profile
 from research.experiments.remote_h3_closed_loop import RemoteCampaign
-from .student.campaign import StudentCampaign, build_student_control_plane, build_student_proposal_provider
-from .student.compiler import StudentCompiler
-from .student.config import StudentConfigError, load_student_campaign_config
-from .student.proposal import StudentProposal
-from .student.remote import (
-    RemoteStudentBaseline,
-    RemoteStudentEvaluator,
-    RemoteStudentRetention,
-    RemoteStudentSupervisor,
-    RemoteStudentWorker,
-    RemoteTargetDeviceEvaluator,
-)
-from .student.wan_experiment import (
-    RemoteWanExperiment,
-    RemoteWanTrainingExperiment,
-    WanRealExperimentConfig,
-    WanTrainingExperimentConfig,
-)
 from .adapters.wan import build_wan_adapter
 from .evolution import CompressionConfig, EvolutionLoop, SearchPolicy
 from .evolution.agent import AlgorithmAgent, build_algorithm_provider
@@ -612,6 +594,8 @@ def cmd_remote_campaign(args: argparse.Namespace) -> int:
 
 
 def _student_config(args: argparse.Namespace):
+    from .student.config import load_student_campaign_config
+
     return load_student_campaign_config(Path(args.student_config).resolve())
 
 
@@ -632,6 +616,9 @@ def cmd_student_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_student_compile(args: argparse.Namespace) -> int:
+    from .student.compiler import StudentCompiler
+    from .student.proposal import StudentProposal
+
     config = _student_config(args)
     proposal = StudentProposal.from_dict(json.loads(Path(args.proposal).read_text(encoding="utf-8")))
     manifest = StudentCompiler(config.target).compile(proposal, Path(args.output))
@@ -640,6 +627,18 @@ def cmd_student_compile(args: argparse.Namespace) -> int:
 
 
 def cmd_student_run(args: argparse.Namespace) -> int:
+    from .student.campaign import StudentCampaign, build_student_control_plane, build_student_proposal_provider
+    from .student.config import StudentConfigError
+    from .student.remote import (
+        RemoteStudentBaseline,
+        RemoteStudentEvaluator,
+        RemoteStudentRetention,
+        RemoteStudentSupervisor,
+        RemoteStudentWorker,
+        RemoteTargetDeviceEvaluator,
+    )
+    from .student.compiler import StudentCompiler
+
     config = _student_config(args)
     client = LocalCommandClient(config.remote) if args.local_resources else SSHClient(config.remote)
     if args.detach:
@@ -699,6 +698,8 @@ def cmd_student_run(args: argparse.Namespace) -> int:
 
 
 def cmd_student_status(args: argparse.Namespace) -> int:
+    from .student.remote import RemoteStudentSupervisor
+
     config = _student_config(args)
     client = LocalCommandClient(config.remote) if args.local_resources else SSHClient(config.remote)
     _emit(RemoteStudentSupervisor(config, client).status(), args.json)
@@ -706,6 +707,8 @@ def cmd_student_status(args: argparse.Namespace) -> int:
 
 
 def cmd_wan_student_validate(args: argparse.Namespace) -> int:
+    from .student.wan_experiment import WanRealExperimentConfig
+
     config = WanRealExperimentConfig.from_path(Path(args.wan_config).resolve())
     _emit(
         {
@@ -724,6 +727,8 @@ def cmd_wan_student_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_wan_student_run(args: argparse.Namespace) -> int:
+    from .student.wan_experiment import RemoteWanExperiment, WanRealExperimentConfig
+
     config = WanRealExperimentConfig.from_path(Path(args.wan_config).resolve())
     client = LocalCommandClient(config.remote) if args.local_resources else SSHClient(config.remote)
     result = RemoteWanExperiment(config, client).run()
@@ -732,6 +737,8 @@ def cmd_wan_student_run(args: argparse.Namespace) -> int:
 
 
 def cmd_wan_student_train(args: argparse.Namespace) -> int:
+    from .student.wan_experiment import RemoteWanTrainingExperiment, WanTrainingExperimentConfig
+
     config = WanTrainingExperimentConfig.from_path(Path(args.config).resolve())
     client = LocalCommandClient(config.remote) if args.local_resources else SSHClient(config.remote)
     result = RemoteWanTrainingExperiment(config, client).run()
