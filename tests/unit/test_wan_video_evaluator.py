@@ -21,6 +21,19 @@ def test_real_evaluator_config_requires_trusted_inputs(tmp_path):
         raise AssertionError("missing real evaluator inputs were accepted")
 
 
+def test_real_evaluator_defaults_quality_device_to_generation_device(tmp_path):
+    config = WanVideoEvaluationConfig.from_mapping(
+        {
+            "wan_config": str(tmp_path / "wan.yaml"),
+            "evaluation_manifest": str(tmp_path / "manifest.json"),
+            "clip_model_path": str(tmp_path / "clip"),
+            "device": "cuda:3",
+        },
+        tmp_path / "out",
+    )
+    assert config.quality_device == "cuda:3"
+
+
 def test_real_evaluator_rejects_manifest_smaller_than_requested_budget(tmp_path):
     wan_config = tmp_path / "wan.yaml"
     wan_config.write_text(

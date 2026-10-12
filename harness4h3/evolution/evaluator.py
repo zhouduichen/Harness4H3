@@ -201,6 +201,7 @@ class WanVideoEvaluationConfig:
     latency_warmup: int = 1
     latency_repeats: int = 3
     visual_quality_gate: Mapping[str, Any] = field(default_factory=lambda: dict(DEFAULT_VISUAL_QUALITY_GATE))
+    quality_device: str = "cpu"
 
     def __post_init__(self) -> None:
         if not str(self.wan_config).strip() or not str(self.evaluation_manifest).strip():
@@ -233,6 +234,7 @@ class WanVideoEvaluationConfig:
             latency_warmup=int(raw.get("latency_warmup", 1)),
             latency_repeats=int(raw.get("latency_repeats", 3)),
             visual_quality_gate=dict(raw.get("visual_quality_gate") or DEFAULT_VISUAL_QUALITY_GATE),
+            quality_device=str(raw.get("quality_device", raw.get("device", "cpu"))),
         )
 
 
@@ -281,6 +283,7 @@ class WanVideoEvaluator:
                 "latency_warmup": config.latency_warmup,
                 "latency_repeats": config.latency_repeats,
                 "visual_quality_gate": dict(config.visual_quality_gate),
+                "quality_device": config.quality_device,
                 "quality_backend": type(quality_backend).__name__ if quality_backend is not None else "ClipTemporalQualityBackend",
                 "clip_model_path": str(config.clip_model_path),
             }
@@ -528,7 +531,7 @@ class WanVideoEvaluator:
 
             self._quality_backend = ClipTemporalQualityBackend(
                 self.config.clip_model_path,
-                device="cpu",
+                device=self.config.quality_device,
                 sample_frames=self.config.sample_frames,
                 visual_quality_gate=self.config.visual_quality_gate,
             )

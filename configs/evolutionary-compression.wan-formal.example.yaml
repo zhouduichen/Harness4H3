@@ -16,6 +16,7 @@ evaluator:
   evaluation_manifest: /path/to/evaluation-manifest.wan-rsi-dev.json
   clip_model_path: /path/to/clip-vit-large-patch14-336
   device: cuda:0
+  quality_device: cuda:0
   dtype: bfloat16
   local_files_only: true
   max_cases: 8
