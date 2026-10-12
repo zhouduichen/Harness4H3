@@ -39,5 +39,6 @@ def test_shared_wan_components_dereference_huggingface_cache_symlinks(tmp_path):
     assert _copy_shared_components(source, target) is True
     copied_index = target / "model_index.json"
     assert copied_index.is_file()
-    assert not copied_index.is_symlink()
+    assert copied_index.is_symlink()
+    assert copied_index.resolve() == model_index_blob.resolve()
     assert copied_index.read_text(encoding="utf-8") == "{\"ok\": true}\n"

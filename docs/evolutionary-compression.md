@@ -82,6 +82,12 @@ EvolutionLoop 也会复用没有 `decision.json` 的最早未完成 round；已�
 `profile.json`、`algorithm.json`、`sandbox.json` 和 `compression.json` 会先校验并
 继续使用，避免进程崩溃后无条件新建 round 或重复执行相同算法。
 
+Wan child 只修改 `transformer/`；未修改的 pipeline 组件会优先使用 hardlink，
+跨文件系统时则引用同一台机器上不可变 Hugging Face snapshot 的绝对 symlink，
+以避免在 NFS 上重复复制数十 GB 的 T5/VAE 权重。该策略写入 artifact metadata，
+因此这种 child 是当前主机可重新加载的实验 artifact，不是脱离原始 snapshot 后
+即可搬运的自包含发布包；需要可搬运包时应显式走 full-copy 路径并检查磁盘空间。
+
 Dev run 完成后，对已存在的 baseline 和最终候选使用独立入口评测 Test manifest，
 不要为了评测重新生成一个压缩候选：
 

@@ -72,9 +72,9 @@ def _copy_shared_components(source: Path, target: Path) -> bool:
     """Materialize an unchanged pipeline shell without copying its weights.
 
     EvoCompress only mutates ``transformer``.  Child checkpoints remain
-    reloadable because the unchanged component files are hard-linked when the
-    parent and child are on the same filesystem.  A cross-filesystem source
-    returns ``False`` so the caller can use the portable full-copy path.
+    reloadable because unchanged component files are hard-linked when possible
+    and otherwise reference the immutable local HF snapshot with absolute
+    symlinks.  The sharing policy is recorded in artifact metadata.
     """
 
     if not source.is_dir() or not (source / "model_index.json").is_file():
@@ -84,7 +84,7 @@ def _copy_shared_components(source: Path, target: Path) -> bool:
             source,
             target,
             ignore=shutil.ignore_patterns("transformer"),
-            copy_function=_hardlink_or_copy,
+            copy_function=_hardlink_or_external_symlink,
         )
     except (OSError, shutil.Error):
         if target.exists():
@@ -93,21 +93,21 @@ def _copy_shared_components(source: Path, target: Path) -> bool:
     return True
 
 
-def _hardlink_or_copy(source: str | Path, target: str | Path) -> None:
-    """Share regular files when possible, but dereference HF cache symlinks."""
+def _hardlink_or_external_symlink(source: str | Path, target: str | Path) -> None:
+    """Share files without copying immutable HF components across filesystems."""
 
     source_path = Path(source)
     target_path = Path(target)
     if source_path.is_symlink():
-        shutil.copy2(source_path, target_path, follow_symlinks=True)
+        target_path.symlink_to(source_path.resolve(strict=True))
         return
     try:
         os.link(source_path, target_path)
     except OSError:
         # Parent checkpoints may live on /home while experiment artifacts use
-        # /data.  A portable byte copy is required when hardlinks cannot span
-        # those filesystems.
-        shutil.copy2(source_path, target_path, follow_symlinks=True)
+        # /data.  The source is an immutable local HF snapshot, so an absolute
+        # reference is reloadable on this host and avoids copying many GB.
+        target_path.symlink_to(source_path.resolve(strict=True))
 
 
 def _copy_full_checkpoint(source: Path, target: Path) -> bool:
@@ -349,7 +349,7 @@ class DiffusersWanAdapter:
             {
                 "offline_simulation": False,
                 "checkpoint_hash_scope": "model_index+transformer",
-                "shared_components": "hardlink" if shared_components else "copied",
+                "shared_components": "hardlink-or-external-symlink" if shared_components else "copied",
             },
         )
 
