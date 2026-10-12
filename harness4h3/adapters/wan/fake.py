@@ -78,7 +78,10 @@ class FakeWanDiT:
         return self.output(value)
 
     def parameters(self) -> Iterable[Any]:
-        return self.blocks.parameters()
+        for parameter in self.blocks.parameters():
+            yield parameter
+        for parameter in self.output.parameters():
+            yield parameter
 
     def state_dict(self) -> Any:
         return self.blocks.state_dict() | {"output." + key: value for key, value in self.output.state_dict().items()}
@@ -266,4 +269,3 @@ class FakeWanDiTAdapter:
                 raise ValueError("checkpoint_reload_failed: digest mismatch")
             model._artifact_sha256 = actual
         return model
-

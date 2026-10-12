@@ -14,6 +14,7 @@ def test_fake_adapter_discovers_blocks_and_ffn_width():
     structure = adapter.inspect(model)
     assert structure.block_count == 4
     assert structure.ffn_width == 16
+    assert structure.parameter_count == sum(int(item.numel()) for item in model.blocks.parameters()) + sum(int(item.numel()) for item in model.output.parameters())
     assert tuple(item.block_id for item in adapter.get_blocks(model)) == ("block.0", "block.1", "block.2", "block.3")
 
 
@@ -59,4 +60,3 @@ def test_invalid_structural_mutations_fail_closed(tmp_path):
     empty_channels = FFNChannelPruningOperator().execute(adapter, parent, {"block_ids": ["block.0"], "retained_indices": []}, tmp_path / "empty")
     assert removed_all.failure_type == "invalid_block_selection"
     assert empty_channels.failure_type == "invalid_channel_selection"
-
