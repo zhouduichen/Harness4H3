@@ -9,6 +9,7 @@ from typing import Iterable
 ALLOWED_IMPORTS = frozenset({"math", "statistics", "json", "collections"})
 FORBIDDEN_ROOTS = frozenset({"os", "sys", "subprocess", "socket", "pathlib", "shutil", "requests", "torch", "site"})
 FORBIDDEN_CALLS = frozenset({"eval", "exec", "compile", "open", "input", "__import__", "breakpoint"})
+FORBIDDEN_REFLECTION_NAMES = frozenset({"__builtins__", "__loader__", "__spec__", "__file__", "__package__", "__import__"})
 MAX_SOURCE_BYTES = 64 * 1024
 
 
@@ -61,10 +62,12 @@ def validate_source(source: str) -> ValidatedSource:
             if root in FORBIDDEN_ROOTS:
                 raise SourcePolicyError("forbidden_attribute_root: %s" % root)
         elif isinstance(node, ast.Attribute):
+            if node.attr.startswith("__"):
+                raise SourcePolicyError("forbidden_dunder_attribute: %s" % node.attr)
             root = _root_name(node)
             if root in FORBIDDEN_ROOTS:
                 raise SourcePolicyError("forbidden_attribute_root: %s" % root)
-        elif isinstance(node, ast.Name) and node.id in {"__builtins__", "__loader__", "__spec__", "__file__", "__package__", "__import__"}:
+        elif isinstance(node, ast.Name) and node.id in FORBIDDEN_REFLECTION_NAMES:
             raise SourcePolicyError("forbidden_name: %s" % node.id)
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             raise SourcePolicyError("forbidden_scope_declaration")
@@ -72,4 +75,3 @@ def validate_source(source: str) -> ValidatedSource:
         raise SourcePolicyError("missing_entrypoint: propose")
     digest = hashlib.sha256(encoded).hexdigest()
     return ValidatedSource(source, digest, tuple(functions))
-

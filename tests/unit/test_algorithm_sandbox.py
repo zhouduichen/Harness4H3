@@ -20,6 +20,19 @@ def test_sandbox_rejects_filesystem_import(tmp_path):
     assert result.failure_type == "sandbox_policy"
 
 
+def test_sandbox_rejects_dunder_introspection_escape(tmp_path):
+    source = """def propose(profile, history):
+    for candidate in ().__class__.__base__.__subclasses__():
+        if candidate.__name__ == 'catch_warnings':
+            return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.1']}}
+    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.1']}}
+"""
+    result = AlgorithmSandbox(tmp_path).run(source, {}, [])
+    assert result.status == "failed"
+    assert result.failure_type == "sandbox_policy"
+    assert "dunder" in result.message
+
+
 def test_sandbox_rejects_unbounded_output(tmp_path):
     source = "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'path': '/tmp'}}\n"
     result = AlgorithmSandbox(tmp_path).run(source, {}, [])
@@ -39,4 +52,3 @@ def test_algorithm_store_persists_source_and_rejects_duplicate(tmp_path):
         assert str(exc) == "duplicate_algorithm_source"
     else:
         raise AssertionError("duplicate source was accepted")
-

@@ -101,6 +101,56 @@ try:
 except ImportError:  # pragma: no cover - Windows has no resource module
     resource = None
 
+
+_ALGORITHM_PHASE = False
+_ALLOWED_AUDIT_IMPORTS = {"math", "statistics", "json", "collections"}
+_BLOCKED_AUDIT_PREFIXES = (
+    "os.",
+    "pty.",
+    "socket.",
+    "subprocess.",
+    "ctypes.",
+    "shutil.",
+)
+
+
+def _algorithm_audit(event, args):
+    """Fail closed for operations that the source policy cannot express.
+
+    The source runs with a reduced builtins table, but Python object graphs can
+    otherwise recover the interpreter's real builtins.  Audit hooks provide a
+    second, runtime boundary for file, network, process, and dynamic-code
+    operations.  Trusted runner I/O is performed outside ``_ALGORITHM_PHASE``.
+    """
+
+    if not _ALGORITHM_PHASE:
+        return
+    if event == "import":
+        name = str(args[0]) if args else ""
+        if name.split(".", 1)[0] not in _ALLOWED_AUDIT_IMPORTS:
+            raise PermissionError("sandbox import denied: " + name)
+        return
+    if event in {"open", "exec", "compile", "sys.setprofile", "sys.settrace", "sys.addaudithook"}:
+        raise PermissionError("sandbox audit denied: " + event)
+    if event.startswith(_BLOCKED_AUDIT_PREFIXES) or event in {
+        "os.system",
+        "os.exec",
+        "os.fork",
+        "os.posix_spawn",
+        "os.spawn",
+        "os.remove",
+        "os.rename",
+        "os.unlink",
+        "os.mkdir",
+        "os.rmdir",
+        "os.chdir",
+        "os.chmod",
+        "os.chown",
+        "os.link",
+        "os.symlink",
+    }:
+        raise PermissionError("sandbox audit denied: " + event)
+
 try:
     if resource is None:
         raise OSError("resource limits unavailable")
@@ -108,6 +158,8 @@ try:
     resource.setrlimit(resource.RLIMIT_CPU, (_cpu_seconds, _cpu_seconds + 1))
     resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))
     resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
+    if hasattr(resource, "RLIMIT_CORE"):
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     # The algorithm receives summaries only; it has no reason to allocate
     # hundreds of megabytes while choosing a plan.
     resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
@@ -134,11 +186,17 @@ source = open(source_path, "r", encoding="utf-8").read()
 profile = json.loads(open(profile_path, "r", encoding="utf-8").read())
 history = json.loads(open(history_path, "r", encoding="utf-8").read())
 namespace = {"__name__": "__algorithm__", "__builtins__": ALLOWED}
+sys.addaudithook(_algorithm_audit)
 try:
-    exec(compile(source, source_path, "exec"), namespace, namespace)
+    _ALGORITHM_PHASE = False
+    compiled = compile(source, source_path, "exec")
+    exec(compiled, namespace, namespace)
+    _ALGORITHM_PHASE = True
     result = namespace["propose"](profile, history)
+    _ALGORITHM_PHASE = False
     json.dump(result, open(output_path, "w", encoding="utf-8"), sort_keys=True)
 except Exception as exc:
+    _ALGORITHM_PHASE = False
     json.dump({"error": type(exc).__name__ + ": " + str(exc)}, open(output_path, "w", encoding="utf-8"), sort_keys=True)
     traceback.print_exc()
     raise
@@ -189,7 +247,8 @@ class AlgorithmSandbox:
             metadata={
                 "offline_simulation": True,
                 "process_isolation": "python-isolated-process",
+                "runtime_audit": "deny-file-network-process-dynamic-code",
                 "resource_limits": {"timeout_s": self.timeout_s, "cpu_s": max(1, int(self.timeout_s)), "address_space_bytes": 512 * 1024 * 1024, "file_size_bytes": 1024 * 1024, "open_files": 32},
-                "network_policy": "socket/subprocess imports denied; host network namespace not assumed",
+                "network_policy": "runtime-audit-deny; host network namespace not assumed",
             },
         )
