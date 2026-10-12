@@ -70,6 +70,7 @@ def summarize_run(name: str, root: Path) -> dict[str, Any]:
     rounds: list[Mapping[str, Any]] = []
     evaluations: list[Mapping[str, Any]] = []
     recipe_digests: set[str] = set()
+    source_revisions: set[str] = set()
     failure_count = 0
     promoted_rounds: list[str] = []
 
@@ -89,6 +90,8 @@ def summarize_run(name: str, root: Path) -> dict[str, Any]:
             digest = evaluation.get("evaluator_recipe_sha256")
             if isinstance(digest, str) and digest:
                 recipe_digests.add(digest)
+            revision = evaluation.get("source_revision")
+            source_revisions.add(str(revision).strip() if revision is not None else "unknown")
         rounds.append(
             {
                 "round_id": round_dir.name,
@@ -125,7 +128,13 @@ def summarize_run(name: str, root: Path) -> dict[str, Any]:
         "promoted_rounds": promoted_rounds,
         "active_model_metrics_available": active_is_measured,
         "evaluator_recipe_sha256": sorted(recipe_digests),
-        "comparable": len(recipe_digests) <= 1 and bool(evaluations),
+        "source_revision": sorted(source_revisions),
+        "comparable": (
+            len(recipe_digests) <= 1
+            and len(source_revisions) == 1
+            and "unknown" not in source_revisions
+            and bool(evaluations)
+        ),
         "final": {
             "quality_score": _number(final.get("quality_score")) if isinstance(final, Mapping) else None,
             "quality_delta": _number(final.get("quality_delta")) if isinstance(final, Mapping) else None,
@@ -160,6 +169,15 @@ def compare_runs(specs: list[str], *, expected_cases: int | None = None) -> dict
     warnings: list[str] = []
     if len(recipes) > 1:
         warnings.append("evaluator_recipe_sha256 differs across runs")
+    revisions = {
+        revision
+        for item in summaries
+        for revision in item["source_revision"]
+    }
+    if "unknown" in revisions or not revisions:
+        warnings.append("source_revision missing from one or more runs")
+    elif len(revisions) > 1:
+        warnings.append("source_revision differs across runs")
     if expected_cases is not None:
         for item in summaries:
             case_counts = [item["final"].get("case_count")]

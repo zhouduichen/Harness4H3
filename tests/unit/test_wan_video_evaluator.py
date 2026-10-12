@@ -28,10 +28,12 @@ def test_real_evaluator_defaults_quality_device_to_generation_device(tmp_path):
             "evaluation_manifest": str(tmp_path / "manifest.json"),
             "clip_model_path": str(tmp_path / "clip"),
             "device": "cuda:3",
+            "source_revision": "test-revision",
         },
         tmp_path / "out",
     )
     assert config.quality_device == "cuda:3"
+    assert config.source_revision == "test-revision"
 
 
 def test_real_evaluator_rejects_manifest_smaller_than_requested_budget(tmp_path):
@@ -105,6 +107,7 @@ def test_real_evaluator_records_video_and_quality_evidence(tmp_path, monkeypatch
     assert result["checkpoint_sha256"] == child.sha256
     assert len(result["evaluation_manifest_sha256"]) == 64
     assert result["evaluator_version"]
+    assert result["source_revision"] == "unknown"
     assert list((tmp_path / "evaluation" / "evaluations" / child.sha256).iterdir())
 
 

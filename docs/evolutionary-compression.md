@@ -103,6 +103,11 @@ prompt/新 seed manifest 上的迁移结果。`rounds/*/decision.json`、
 `experiences.jsonl` 和 `search-policy.json` 是对比实验的机器可读输入；不要
 把不同 manifest 或不同质量阈值的结果直接横向比较。
 
+正式实验还必须记录同一份代码版本。由于远程部署目录可能不是 Git checkout，
+启动命令应显式设置 `HARNESS4H3_SOURCE_REVISION`（或在 evaluator 配置中设置
+`source_revision`）；评测 recipe 和每个结果都会保存该值。缺失或不一致的代码
+版本会让对比器将四路结果标为不可直接比较。
+
 完成四路 run 后，用只读汇总器检查协议一致性并生成机器可读对比：
 
 ```bash

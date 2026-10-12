@@ -6,6 +6,7 @@ import gc
 import hashlib
 import json
 import math
+import os
 import statistics
 import time
 from dataclasses import dataclass, field
@@ -19,7 +20,7 @@ class WanEvaluationError(RuntimeError):
     """A real evaluation could not produce trusted evidence."""
 
 
-EVALUATOR_VERSION = "wan-video-evaluator-v3"
+EVALUATOR_VERSION = "wan-video-evaluator-v4"
 
 DEFAULT_VISUAL_QUALITY_GATE = {
     "enabled": True,
@@ -202,6 +203,7 @@ class WanVideoEvaluationConfig:
     latency_repeats: int = 3
     visual_quality_gate: Mapping[str, Any] = field(default_factory=lambda: dict(DEFAULT_VISUAL_QUALITY_GATE))
     quality_device: str = "cpu"
+    source_revision: str = "unknown"
 
     def __post_init__(self) -> None:
         if not str(self.wan_config).strip() or not str(self.evaluation_manifest).strip():
@@ -235,6 +237,10 @@ class WanVideoEvaluationConfig:
             latency_repeats=int(raw.get("latency_repeats", 3)),
             visual_quality_gate=dict(raw.get("visual_quality_gate") or DEFAULT_VISUAL_QUALITY_GATE),
             quality_device=str(raw.get("quality_device", raw.get("device", "cpu"))),
+            source_revision=str(
+                raw.get("source_revision")
+                or os.environ.get("HARNESS4H3_SOURCE_REVISION", "unknown")
+            ).strip() or "unknown",
         )
 
 
@@ -286,6 +292,7 @@ class WanVideoEvaluator:
                 "quality_device": config.quality_device,
                 "quality_backend": type(quality_backend).__name__ if quality_backend is not None else "ClipTemporalQualityBackend",
                 "clip_model_path": str(config.clip_model_path),
+                "source_revision": config.source_revision,
             }
         )
 
@@ -335,6 +342,7 @@ class WanVideoEvaluator:
                 "evaluator_recipe_sha256": self.recipe_digest,
                 "evaluator_version": EVALUATOR_VERSION,
                 "evaluation_manifest_sha256": self.manifest_sha256,
+                "source_revision": self.config.source_revision,
             }
         baseline_quality = float(baseline["quality_score"])
         candidate_quality = float(candidate["quality_score"])
@@ -361,6 +369,7 @@ class WanVideoEvaluator:
             "offline_simulation": False,
             "search_score": search_score,
             "evaluator_recipe_sha256": self.recipe_digest,
+            "source_revision": self.config.source_revision,
         }
 
     def _evaluate_artifact(self, artifact: CheckpointArtifact) -> Mapping[str, Any]:
@@ -445,6 +454,7 @@ class WanVideoEvaluator:
                             "evaluator_recipe_sha256": self.recipe_digest,
                             "evaluator_version": EVALUATOR_VERSION,
                             "evaluation_manifest_sha256": self.manifest_sha256,
+                            "source_revision": self.config.source_revision,
                             "cases": cases,
                         },
                     )
@@ -478,6 +488,7 @@ class WanVideoEvaluator:
                     "case_count": len(cases),
                 },
                 "resumed_case_count": resumed_case_count,
+                "source_revision": self.config.source_revision,
                 "cases": cases,
             }
             _atomic_json(result_path, result)
