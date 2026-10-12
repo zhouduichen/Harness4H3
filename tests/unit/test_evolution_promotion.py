@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from harness4h3.evolution.evaluator import PromotionPolicy
+from harness4h3.evolution.policy import SearchPolicy
 
 
 def _evidence(*, quality=0.99, latency=90.0, memory=9.0, size=8.0, valid=True, baseline_quality=1.0):
@@ -97,3 +98,10 @@ def test_promotion_uses_active_parent_before_initial_baseline():
     )
     assert decision["accepted"] is False
     assert "quality_floor_failed" in decision["reasons"]
+
+
+def test_search_policy_records_high_cost_low_gain_feedback():
+    policy = SearchPolicy()
+    policy.update(feasible=False, improved=False, failure_type="model_size_improvement_below_threshold")
+    assert policy.costly_failure_rounds == 1
+    assert policy.exploit_ratio == 0.6

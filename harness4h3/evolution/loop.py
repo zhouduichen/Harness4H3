@@ -202,7 +202,12 @@ class EvolutionLoop:
         decision_status = "promoted" if feasible else "rejected"
         previous_score = float(parent_candidate.state.measured_metrics.get("search_score", parent_candidate.state.measured_metrics.get("quality_score", 0.0)))
         current_score = float(evaluation.get("search_score", evaluation.get("quality_score", 0.0)))
-        self._update_search_policy(feasible=feasible, improved=current_score > previous_score)
+        feedback_failure = str(evaluation.get("failure_type", "")) or None
+        if not feasible and feedback_failure is None:
+            reasons = promotion.get("reasons")
+            if isinstance(reasons, list) and reasons:
+                feedback_failure = str(reasons[0])
+        self._update_search_policy(feasible=feasible, improved=current_score > previous_score, failure_type=feedback_failure)
         self._persist_search_policy()
         decision = {
             "status": decision_status,
