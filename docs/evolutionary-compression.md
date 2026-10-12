@@ -78,6 +78,22 @@ fail closed，不会把未知结构当作可安全裁剪的 Transformer block。
 case/seed 原子写入 `progress.json`；进程中断后会复用已完成且视频仍存在的记录，
 不会把未完成 case 当作有效证据。
 
+Dev run 完成后，对已存在的 baseline 和最终候选使用独立入口评测 Test manifest，
+不要为了评测重新生成一个压缩候选：
+
+```bash
+HARNESS4H3_SOURCE_REVISION=$(git rev-parse HEAD) \\
+  .venv/bin/python tools/evaluate_wan_checkpoint.py \\
+  --config configs/evolutionary-compression.wan-formal-test.yaml \\
+  --baseline /path/to/parent \\
+  --candidate /path/to/final-child \\
+  --output-root var/rsi/test/fixed-algorithm \\
+  --json
+```
+
+该命令只写 `independent-evaluation.json` 和 evaluator 产物，不修改模型晋升状态；
+晋升仍只由 Dev round 的独立评测和 `PromotionPolicy` 决定。
+
 确定性探索算法的 FFN 保留比例由
 `controller.explore_ffn_retention_ratio` 控制。Memory 中若发现上一轮模型大小
 改善低于 10%，下一轮探索会自动收紧该比例，形成可审计的算法设计反馈，而不是
