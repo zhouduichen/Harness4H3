@@ -8,7 +8,7 @@ import json
 import math
 import statistics
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -20,6 +20,19 @@ class WanEvaluationError(RuntimeError):
 
 
 EVALUATOR_VERSION = "wan-video-evaluator-v3"
+
+DEFAULT_VISUAL_QUALITY_GATE = {
+    "enabled": True,
+    "version": "visual-structure-v1",
+    # These are conservative floors for the 256x256/81-frame Wan contract.
+    # They reject blank/near-solid videos without importing the stricter
+    # 5-second campaign thresholds into this evaluator.
+    "min_spatial_gradient": 0.05,
+    "min_laplacian_std": 0.50,
+    "min_block_variance": 1.0,
+    "min_frame_difference": 0.001,
+    "max_low_texture_frame_ratio": 0.75,
+}
 
 
 @dataclass(frozen=True)
@@ -178,6 +191,7 @@ class WanVideoEvaluationConfig:
     max_quality_drop: float = 0.05
     latency_warmup: int = 1
     latency_repeats: int = 3
+    visual_quality_gate: Mapping[str, Any] = field(default_factory=lambda: dict(DEFAULT_VISUAL_QUALITY_GATE))
 
     def __post_init__(self) -> None:
         if not str(self.wan_config).strip() or not str(self.evaluation_manifest).strip():
@@ -209,6 +223,7 @@ class WanVideoEvaluationConfig:
             max_quality_drop=float(raw.get("max_quality_drop", 0.05)),
             latency_warmup=int(raw.get("latency_warmup", 1)),
             latency_repeats=int(raw.get("latency_repeats", 3)),
+            visual_quality_gate=dict(raw.get("visual_quality_gate") or DEFAULT_VISUAL_QUALITY_GATE),
         )
 
 
@@ -256,6 +271,7 @@ class WanVideoEvaluator:
                 "sample_frames": config.sample_frames,
                 "latency_warmup": config.latency_warmup,
                 "latency_repeats": config.latency_repeats,
+                "visual_quality_gate": dict(config.visual_quality_gate),
                 "quality_backend": type(quality_backend).__name__ if quality_backend is not None else "ClipTemporalQualityBackend",
                 "clip_model_path": str(config.clip_model_path),
             }
@@ -388,6 +404,10 @@ class WanVideoEvaluator:
                     self._write_video(frames, video_path, float(self._wan_spec["native_fps"]))
                     validity = self._validate_video(video_path, frames)
                     evidence = quality.evaluate(video_path, caption)
+                    quality_record = evidence.to_dict()
+                    visual_gate = quality_record.get("visual_quality_gate")
+                    visual_gate_passed = not isinstance(visual_gate, Mapping) or visual_gate.get("passed", True) is not False
+                    validity = {**dict(validity), "visual_quality_gate_passed": visual_gate_passed}
                     cases.append({
                         "case_id": case_id,
                         "seed": seed,
@@ -398,7 +418,7 @@ class WanVideoEvaluator:
                         "latency_warmup": int(self.config.latency_warmup),
                         "peak_memory_gb": self._peak_memory_gb(torch),
                         "validity": validity,
-                        "quality": evidence.to_dict(),
+                        "quality": quality_record,
                     })
                     completed_keys.add((case_id, seed))
                     _atomic_json(
@@ -421,8 +441,8 @@ class WanVideoEvaluator:
                 "evaluator_version": EVALUATOR_VERSION,
                 "evaluation_manifest_sha256": self.manifest_sha256,
                 "evaluation_status": "measured_video",
-                "valid": all(bool(item["validity"]["valid"]) for item in cases),
-                "promotable": all(bool(item["validity"]["valid"]) for item in cases),
+                "valid": all(bool(item["validity"]["valid"]) and bool(item["validity"].get("visual_quality_gate_passed", True)) for item in cases),
+                "promotable": all(bool(item["validity"]["valid"]) and bool(item["validity"].get("visual_quality_gate_passed", True)) for item in cases),
                 "offline_simulation": False,
                 "quality_score": sum(scores) / len(scores),
                 "quality_metrics": {
@@ -497,6 +517,7 @@ class WanVideoEvaluator:
                 self.config.clip_model_path,
                 device="cpu",
                 sample_frames=self.config.sample_frames,
+                visual_quality_gate=self.config.visual_quality_gate,
             )
         return self._quality_backend
 

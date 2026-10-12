@@ -95,6 +95,47 @@ def test_real_evaluator_records_video_and_quality_evidence(tmp_path, monkeypatch
     assert list((tmp_path / "evaluation" / "evaluations" / child.sha256).iterdir())
 
 
+def test_real_evaluator_rejects_visual_quality_collapse(tmp_path, monkeypatch):
+    wan_config = tmp_path / "wan.yaml"
+    wan_config.write_text(
+        "width: 8\nheight: 8\nnum_frames: 4\nnative_fps: 8\n"
+        "num_inference_steps: 1\nguidance_scale: 1.0\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"cases": [{"case_id": "collapse", "caption": "test", "seeds": [7]}]}), encoding="utf-8")
+    config = WanVideoEvaluationConfig(
+        wan_config=wan_config,
+        evaluation_manifest=manifest,
+        clip_model_path=tmp_path / "clip",
+        output_root=tmp_path / "evaluation",
+    )
+    adapter = FakeWanDiTAdapter(block_count=2, hidden_size=8, ffn_width=16)
+    baseline = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "baseline")
+    child = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "child")
+    collapsed = QualityEvidence(
+        semantic=0.9,
+        temporal=0.9,
+        motion=0.0,
+        aggregate=0.9,
+        backend="test",
+        model_path="test",
+        visual_quality_gate={"enabled": True, "passed": False, "failures": ["low_texture_frame_ratio_above_ceiling"]},
+    )
+    evaluator = WanVideoEvaluator(config, baseline, quality_backend=SimpleNamespace(evaluate=lambda path, caption: collapsed), pipeline_loader=lambda checkpoint: (object(), object()))
+    monkeypatch.setattr(
+        evaluator,
+        "_generate",
+        lambda pipeline, torch, caption, seed: np.zeros((1, 4, 8, 8, 3), dtype=np.float32),
+    )
+
+    result = evaluator(child, {})
+
+    assert result["valid"] is False
+    assert result["promotable"] is False
+    assert result["cases"][0]["validity"]["visual_quality_gate_passed"] is False
+
+
 def test_real_evaluator_resumes_completed_case_from_progress(tmp_path, monkeypatch):
     wan_config = tmp_path / "wan.yaml"
     wan_config.write_text(

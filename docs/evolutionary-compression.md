@@ -54,7 +54,8 @@ python -m harness4h3 evolve-compression \
 真实 Diffusers checkpoint 必须配置 `evaluator.backend: wan_video`；CLI
 会拒绝用 structural proxy 给真实权重打分。真实 evaluator 使用固定的
 prompt/seed 生成视频，用本地 CLIP-temporal backend 评估语义、时间一致性
-和运动，并把生成耗时、视频有效性和质量证据写入
+和运动；同时使用可配置的 visual-structure hard gate 拒绝空白、近纯色或低纹理
+坍缩视频，并把生成耗时、视频有效性和质量证据写入
 `output_root/real-evaluation/`。当前 1.3B smoke 支持把 Transformer 放到
 GPU，T5 encoder 和 VAE 留在 CPU。
 
