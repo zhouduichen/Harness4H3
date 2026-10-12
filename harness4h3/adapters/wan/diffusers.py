@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
@@ -65,6 +66,31 @@ def _module_at(root: Any, path: str) -> Any:
     for part in path.split("."):
         value = getattr(value, part) if not part.isdigit() else value[int(part)]
     return value
+
+
+def _copy_shared_components(source: Path, target: Path) -> bool:
+    """Materialize an unchanged pipeline shell without copying its weights.
+
+    EvoCompress only mutates ``transformer``.  Child checkpoints remain
+    reloadable because the unchanged component files are hard-linked when the
+    parent and child are on the same filesystem.  A cross-filesystem source
+    returns ``False`` so the caller can use the portable full-copy path.
+    """
+
+    if not source.is_dir() or not (source / "model_index.json").is_file():
+        return False
+    try:
+        shutil.copytree(
+            source,
+            target,
+            ignore=shutil.ignore_patterns("transformer"),
+            copy_function=os.link,
+        )
+    except (OSError, shutil.Error):
+        if target.exists():
+            shutil.rmtree(target)
+        return False
+    return True
 
 
 class DiffusersWanAdapter:
@@ -254,15 +280,38 @@ class DiffusersWanAdapter:
         target = Path(output_dir)
         if target.exists():
             shutil.rmtree(target)
-        target.mkdir(parents=True)
-        if hasattr(model, "save_pretrained"):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shared_components = False
+        transformer = self._transformer(model)
+        source_raw = getattr(model, "_harness4h3_checkpoint_root", "")
+        source = Path(str(source_raw)) if str(source_raw).strip() else None
+        if source is not None and hasattr(transformer, "save_pretrained"):
+            shared_components = _copy_shared_components(source, target)
+            if shared_components:
+                transformer.save_pretrained(str(target / "transformer"))
+        if not shared_components and hasattr(model, "save_pretrained"):
+            # This is required for the initial Parent copied from the HF cache
+            # when /home and the experiment volume are different filesystems.
+            if target.exists():
+                shutil.rmtree(target)
+            target.mkdir(parents=True)
             model.save_pretrained(str(target))
-        else:
+        elif not shared_components:
             raise ValueError("unsupported_model_layout: model cannot save_pretrained")
         value = _transformer_checkpoint_sha256(target)
         model._harness4h3_checkpoint_sha256 = value
         structure = self.inspect(model)
-        return CheckpointArtifact(str(target), value, self.architecture_name, structure, {"offline_simulation": False, "checkpoint_hash_scope": "model_index+transformer"})
+        return CheckpointArtifact(
+            str(target),
+            value,
+            self.architecture_name,
+            structure,
+            {
+                "offline_simulation": False,
+                "checkpoint_hash_scope": "model_index+transformer",
+                "shared_components": "hardlink" if shared_components else "copied",
+            },
+        )
 
     def reload_model(self, artifact: CheckpointArtifact) -> Any:
         actual = _transformer_checkpoint_sha256(artifact.path)
