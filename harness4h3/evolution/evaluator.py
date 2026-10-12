@@ -341,16 +341,20 @@ class WanVideoEvaluator:
         candidate_latency = float(candidate_hardware.get("inference_wall_time_s_mean", float("inf")))
         baseline_latency = float(baseline_hardware.get("inference_wall_time_s_mean", float("inf")))
         latency_ratio = candidate_latency / baseline_latency if baseline_latency > 0 and math.isfinite(baseline_latency) else 1.0
-        feasible = bool(candidate.get("valid", False)) and not quality_regression
+        baseline_valid = bool(baseline.get("valid", False))
+        candidate_valid = bool(candidate.get("valid", False))
+        feasible = baseline_valid and candidate_valid and not quality_regression
         search_score = candidate_quality + max(0.0, 1.0 - latency_ratio) * 0.05
         return {
             **dict(candidate),
             "baseline_quality_score": baseline_quality,
             "baseline_hardware_metrics": dict(baseline.get("hardware_metrics") or {}),
+            "baseline_evaluation_valid": baseline_valid,
+            "candidate_evaluation_valid": candidate_valid,
             "quality_delta": candidate_quality - baseline_quality,
             "latency_ratio": latency_ratio,
             "feasible": feasible,
-            "critical_regression": quality_regression or not bool(candidate.get("valid", False)),
+            "critical_regression": quality_regression or not baseline_valid or not candidate_valid,
             "offline_simulation": False,
             "search_score": search_score,
             "evaluator_recipe_sha256": self.recipe_digest,
