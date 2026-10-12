@@ -41,6 +41,10 @@ class QuantizedLinear(nn.Module):
             torch.empty(0, dtype=linear.weight.dtype),
             persistent=False,
         )
+        # Preserve the shape metadata exposed by nn.Linear.  Student blocks
+        # use it to size residual/cross-attention paths during inference.
+        self.in_features = int(linear.in_features)
+        self.out_features = int(linear.out_features)
         if linear.bias is None:
             self.bias = None
         else:
