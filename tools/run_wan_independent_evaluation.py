@@ -104,6 +104,7 @@ def _evaluate_one(
     seed_count: int,
     latency_warmup: int,
     latency_repeats: int,
+    quality_device: str | None,
 ) -> None:
     destination = output_root / spec.name
     try:
@@ -117,7 +118,7 @@ def _evaluate_one(
                 "evaluation_manifest": str(manifest),
                 "clip_model_path": str(clip_model_path),
                 "device": "cuda:%d" % spec.gpu,
-                "quality_device": "cuda:%d" % spec.gpu,
+                "quality_device": quality_device or ("cuda:%d" % spec.gpu),
                 "dtype": "bfloat16",
                 "local_files_only": True,
                 "max_cases": max_cases,
@@ -203,6 +204,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed-count", type=int, default=2)
     parser.add_argument("--latency-warmup", type=int, default=1)
     parser.add_argument("--latency-repeats", type=int, default=3)
+    parser.add_argument(
+        "--quality-device",
+        default=None,
+        help="device for independent CLIP quality evaluation; defaults to the candidate GPU",
+    )
     return parser
 
 
@@ -244,6 +250,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "seed_count": int(args.seed_count),
                 "latency_warmup": int(args.latency_warmup),
                 "latency_repeats": int(args.latency_repeats),
+                "quality_device": args.quality_device,
             },
         )
         process.start()

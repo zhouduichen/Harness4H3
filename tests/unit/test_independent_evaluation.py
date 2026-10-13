@@ -6,6 +6,7 @@ import pytest
 from tools.run_wan_independent_evaluation import (
     _active_artifacts,
     _artifact_from_candidate,
+    build_parser,
     _parse_candidate_models,
     _parse_run,
 )
@@ -101,3 +102,25 @@ def test_independent_evaluation_parses_candidate_overrides_and_rejects_duplicate
         _parse_candidate_models(["fixed"])
     with pytest.raises(ValueError, match="duplicate"):
         _parse_candidate_models(["fixed=M0003", "fixed=M0002"])
+
+
+def test_independent_evaluation_exposes_quality_device_override():
+    args = build_parser().parse_args(
+        [
+            "--run",
+            "memory=/tmp/memory",
+            "--gpus",
+            "0",
+            "--manifest",
+            "/tmp/manifest.json",
+            "--wan-config",
+            "/tmp/wan.yaml",
+            "--clip-model-path",
+            "/tmp/clip",
+            "--output-root",
+            "/tmp/output",
+            "--quality-device",
+            "cpu",
+        ]
+    )
+    assert args.quality_device == "cpu"
