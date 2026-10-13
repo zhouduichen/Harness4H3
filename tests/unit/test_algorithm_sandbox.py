@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import harness4h3.sandbox.runner as sandbox_runner
+
 from harness4h3.evolution.candidate import AlgorithmCandidate
 from harness4h3.evolution.store import AlgorithmStore
 from harness4h3.sandbox import AlgorithmSandbox
@@ -47,6 +49,22 @@ def test_sandbox_rejects_unbounded_output(tmp_path):
     result = AlgorithmSandbox(tmp_path).run(source, {}, [])
     assert result.status == "failed"
     assert result.failure_type == "algorithm_output_invalid"
+
+
+def test_sandbox_fails_closed_when_resource_limits_are_unavailable(tmp_path, monkeypatch):
+    source = "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.1']}}\n"
+    patched_runner = sandbox_runner.RUNNER_SOURCE.replace(
+        "try:\n    if resource is None:",
+        "try:\n    resource = None\n    if resource is None:",
+        1,
+    )
+    monkeypatch.setattr(sandbox_runner, "RUNNER_SOURCE", patched_runner)
+
+    result = AlgorithmSandbox(tmp_path).run(source, {"layers": []}, [])
+
+    assert result.status == "failed"
+    assert result.failure_type == "process_exit"
+    assert result.plan is None
 
 
 def test_algorithm_store_persists_source_and_rejects_duplicate(tmp_path):

@@ -166,11 +166,23 @@ try:
     resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
     if hasattr(resource, "RLIMIT_CORE"):
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    # The algorithm receives summaries only; it has no reason to allocate
-    # hundreds of megabytes while choosing a plan.
-    resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
-except (AttributeError, OSError, ValueError):
-    pass
+except (AttributeError, OSError, ValueError) as exc:
+    # A process without enforced bounds is not a safe execution environment.
+    # Fail before loading untrusted algorithm code instead of silently
+    # degrading to AST-only validation.
+    raise RuntimeError("sandbox resource limits unavailable") from exc
+
+# Some POSIX platforms expose RLIMIT_AS but reject lowering it from an
+# unlimited process address space.  CPU, file-size, descriptor, core-dump,
+# timeout, and audit boundaries remain mandatory; address-space enforcement is
+# an optional stronger bound when the host kernel supports it.
+if hasattr(resource, "RLIMIT_AS"):
+    try:
+        # The algorithm receives summaries only; it has no reason to allocate
+        # hundreds of megabytes while choosing a plan.
+        resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+    except (AttributeError, OSError, ValueError):
+        pass
 
 ALLOWED = {
     "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict,
