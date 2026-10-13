@@ -41,6 +41,12 @@ class CompressionPlan:
     def from_mapping(cls, raw: Any) -> "CompressionPlan":
         if not isinstance(raw, Mapping):
             raise ValueError("algorithm_output_invalid: output must be an object")
+        # Some structured providers use the repository's persisted decision
+        # name (`operator_args`) when returning the sandbox plan.  Normalize
+        # that single compatibility alias at the trust boundary; all later
+        # validation remains identical and no extra fields are accepted.
+        if set(raw) == {"operator", "operator_args"}:
+            raw = {"operator": raw["operator"], "args": raw["operator_args"]}
         if set(raw) != {"operator", "args"}:
             raise ValueError("algorithm_output_invalid: output keys must be operator and args")
         operator = raw["operator"]
