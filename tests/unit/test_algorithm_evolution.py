@@ -102,6 +102,40 @@ def test_memory_feedback_tightens_ffn_exploration_after_size_miss():
     assert "int(width * 0.375000)" in candidate.source
 
 
+def test_provider_agent_receives_compact_pareto_front():
+    payloads = []
+
+    def provider(payload):
+        payloads.append(payload)
+        return {
+            "source": "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n",
+            "hypothesis": "use the measured front",
+            "parent_id": "M0000",
+        }
+
+    AlgorithmAgent(provider=provider).generate(
+        "A0001",
+        parent_id="M0000",
+        profile={},
+        history=[],
+        pareto_front=[
+            {
+                "candidate_id": "M0000",
+                "quality_score": 0.9,
+                "hardware_metrics": {"latency_s": 2.0, "peak_memory_gb": 4.0, "model_size_gb": 8.0, "ignored": "drop"},
+                "ignored": "drop",
+            }
+        ],
+    )
+    assert payloads[0]["pareto_front"] == [
+        {
+            "candidate_id": "M0000",
+            "quality_score": 0.9,
+            "hardware_metrics": {"latency_s": 2.0, "peak_memory_gb": 4.0, "model_size_gb": 8.0},
+        }
+    ]
+
+
 def test_provider_agent_rejects_parent_override():
     agent = AlgorithmAgent(provider=lambda payload: {"source": "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n", "parent_id": "M9999"})
     try:

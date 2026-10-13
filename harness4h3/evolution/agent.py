@@ -65,6 +65,7 @@ class AlgorithmAgent:
         profile: Mapping[str, Any],
         history: Sequence[Mapping[str, Any]],
         skills: Sequence[Mapping[str, Any]] = (),
+        pareto_front: Sequence[Mapping[str, Any]] = (),
         search_choice: str = "exploit",
     ) -> AlgorithmCandidate:
         if self.provider is None:
@@ -85,6 +86,7 @@ class AlgorithmAgent:
             "profile": _compact_profile(profile),
             "history": [dict(item) for item in history],
             "skills": [dict(item) for item in skills],
+            "pareto_front": _compact_pareto_front(pareto_front),
             "parent_id": parent_id,
             "search_policy": {"choice": search_choice},
         }
@@ -196,6 +198,28 @@ def _compact_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
         )[:4]
         channel_records.append(record)
     compact["channel_sensitivity"] = channel_records
+    return compact
+
+
+def _compact_pareto_front(front: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Expose measured front evidence without allowing an unbounded prompt."""
+
+    compact: list[dict[str, Any]] = []
+    for item in front:
+        if not isinstance(item, Mapping):
+            continue
+        record: dict[str, Any] = {}
+        for field in ("candidate_id", "quality_score", "search_score", "evaluation_status", "valid"):
+            if field in item:
+                record[field] = item[field]
+        hardware = item.get("hardware_metrics")
+        if isinstance(hardware, Mapping):
+            record["hardware_metrics"] = {
+                field: hardware[field]
+                for field in ("latency_s", "inference_wall_time_s_mean", "peak_memory_gb", "model_size_gb", "parameter_count")
+                if field in hardware
+            }
+        compact.append(record)
     return compact
 
 

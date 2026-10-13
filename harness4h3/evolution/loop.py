@@ -117,6 +117,7 @@ class EvolutionLoop:
         profile = self._load_or_profile(profile_path, parent_artifact)
         architecture = str(profile.model["architecture"])
         skills = self.skill_hub.search(architecture=architecture, limit=8) if self.memory_enabled else []
+        pareto_front = self._load_pareto_front()
         selection_history = self._selection_history()
         # Local round history is not evaluator Memory.  It only lets a
         # deterministic baseline avoid proposing the same selection logic
@@ -148,6 +149,7 @@ class EvolutionLoop:
                     profile=profile.to_dict(),
                     history=agent_history,
                     skills=skills,
+                    pareto_front=pareto_front,
                     search_choice=search_choice,
                 )
             except (RuntimeError, TypeError, ValueError) as exc:
