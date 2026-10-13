@@ -113,3 +113,10 @@ def test_search_policy_records_high_cost_low_gain_feedback():
     policy.update(feasible=False, improved=False, failure_type="model_size_improvement_below_threshold")
     assert policy.costly_failure_rounds == 1
     assert policy.exploit_ratio == 0.6
+
+
+def test_search_policy_records_metric_specific_hardware_regression():
+    policy = SearchPolicy()
+    policy.update(feasible=False, improved=False, failure_type="hardware_regression:latency_s")
+    assert policy.costly_failure_rounds == 1
+    assert policy.exploit_ratio == 0.6

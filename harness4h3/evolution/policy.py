@@ -40,7 +40,7 @@ class SearchPolicy:
         if failure_type == "duplicate_algorithm":
             self.duplicate_rounds += 1
             self.exploit_ratio = max(0.2, float(self.exploit_ratio) - 0.10)
-        if failure_type in {
+        costly_failure = failure_type in {
             "evaluator_failed",
             "child_integrity_failed",
             "compression_failed",
@@ -48,7 +48,11 @@ class SearchPolicy:
             "no_substantial_efficiency_improvement",
             "model_size_improvement_below_threshold",
             "pareto_dominated",
-        }:
+        }
+        if failure_type and (
+            costly_failure
+            or str(failure_type).startswith("hardware_regression:")
+        ):
             self.costly_failure_rounds += 1
 
     def to_dict(self) -> dict[str, int | float]:
