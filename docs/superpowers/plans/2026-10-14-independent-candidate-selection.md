@@ -82,7 +82,7 @@
       "active_model_id": active_id,
       "candidate_model_id": selected_id,
       "candidate_selection": "explicit" | "active_default",
-      "candidate_checkpoint_path": candidate.checkpoint_path,
+      "candidate_checkpoint_path": candidate.path,
   }
   ```
 

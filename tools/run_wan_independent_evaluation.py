@@ -27,6 +27,7 @@ class RunSpec:
     name: str
     root: Path
     gpu: int
+    candidate_model_id: str | None = None
 
 
 def _write_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -59,12 +60,36 @@ def _artifact_from_candidate(path: Path) -> CheckpointArtifact:
     )
 
 
-def _active_artifacts(root: Path) -> tuple[CheckpointArtifact, CheckpointArtifact, str]:
+def _active_artifacts(
+    root: Path,
+    candidate_model_id: str | None = None,
+) -> tuple[CheckpointArtifact, CheckpointArtifact, str, str]:
     candidates = root / "models" / "candidates"
     baseline = _artifact_from_candidate(candidates / "M0000.json")
     active_id = str(json.loads((root / "models" / "active.json").read_text(encoding="utf-8"))["id"])
-    candidate = _artifact_from_candidate(candidates / (active_id + ".json"))
-    return baseline, candidate, active_id
+    selected_id = candidate_model_id or active_id
+    candidate_path = candidates / (selected_id + ".json")
+    if candidate_model_id is not None and not candidate_path.is_file():
+        raise FileNotFoundError("explicit candidate model record not found: %s" % candidate_path)
+    candidate = _artifact_from_candidate(candidate_path)
+    selection_mode = "explicit" if candidate_model_id is not None else "active_default"
+    return baseline, candidate, active_id, selection_mode
+
+
+def _parse_candidate_models(values: Sequence[str]) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for raw in values:
+        if "=" not in raw:
+            raise ValueError("--candidate-model must use NAME=MODEL_ID")
+        name, model_id = raw.split("=", 1)
+        name = name.strip()
+        model_id = model_id.strip()
+        if not name or not model_id:
+            raise ValueError("--candidate-model must use non-empty NAME=MODEL_ID")
+        if name in overrides:
+            raise ValueError("duplicate --candidate-model name: %s" % name)
+        overrides[name] = model_id
+    return overrides
 
 
 def _evaluate_one(
@@ -82,7 +107,10 @@ def _evaluate_one(
 ) -> None:
     destination = output_root / spec.name
     try:
-        baseline, candidate, active_id = _active_artifacts(spec.root)
+        baseline, candidate, active_id, selection_mode = _active_artifacts(
+            spec.root,
+            spec.candidate_model_id,
+        )
         evaluator_config = WanVideoEvaluationConfig.from_mapping(
             {
                 "wan_config": str(wan_config),
@@ -110,6 +138,9 @@ def _evaluate_one(
                 "run": spec.name,
                 "gpu": spec.gpu,
                 "active_model_id": active_id,
+                "candidate_model_id": spec.candidate_model_id or active_id,
+                "candidate_selection": selection_mode,
+                "candidate_checkpoint_path": candidate.path,
                 "baseline_checkpoint_sha256": baseline.sha256,
                 "candidate_checkpoint_sha256": candidate.sha256,
                 "evaluation_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
@@ -152,6 +183,13 @@ def _parse_run(raw: str, gpu: int) -> RunSpec:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", action="append", required=True, help="completed run as NAME=ROOT; repeat once per GPU")
+    parser.add_argument(
+        "--candidate-model",
+        action="append",
+        default=[],
+        metavar="NAME=MODEL_ID",
+        help="explicit candidate model ID for a named run; defaults to active.json",
+    )
     parser.add_argument("--gpus", default="0", help="comma-separated GPU ids matching --run order")
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--wan-config", type=Path, required=True)
@@ -173,7 +211,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     gpu_ids = [int(item.strip()) for item in str(args.gpus).split(",") if item.strip()]
     if len(gpu_ids) != len(args.run):
         raise ValueError("--gpus count must match --run count")
+    candidate_models = _parse_candidate_models(args.candidate_model)
     specs = [_parse_run(raw, gpu) for raw, gpu in zip(args.run, gpu_ids)]
+    run_names = {spec.name for spec in specs}
+    unknown_names = sorted(set(candidate_models) - run_names)
+    if unknown_names:
+        raise ValueError("--candidate-model names missing from --run: %s" % ", ".join(unknown_names))
+    specs = [
+        RunSpec(spec.name, spec.root, spec.gpu, candidate_models.get(spec.name))
+        for spec in specs
+    ]
     manifest = args.manifest.expanduser().resolve()
     wan_config = args.wan_config.expanduser().resolve()
     clip_model_path = args.clip_model_path.expanduser().resolve()
