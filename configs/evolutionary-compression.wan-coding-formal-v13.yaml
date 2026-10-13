@@ -16,7 +16,7 @@ controller:
   timeout_s: 180
 evaluator:
   backend: wan_video
-  source_revision: 6ededa0
+  source_revision: a9c1ebd
   wan_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-1.3b-paper16.remote.yaml
   evaluation_manifest: /home/intern/huangjiahao/Harness4H3-rsi-codex-20261013/configs/evaluation-manifest.wan-rsi-dev.json
   clip_model_path: /data/models/clip-vit-large-patch14-336
