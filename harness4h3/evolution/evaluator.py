@@ -146,10 +146,12 @@ class PromotionPolicy:
             baseline_hw = parent_hw
         improvements: dict[str, float] = {}
         comparable = 0
+        missing_metrics: list[str] = []
         for names, minimum in metric_specs:
             before = self._metric(baseline_hw, names)
             after = self._metric(candidate_hw, names)
             if before is None or after is None or before <= 0.0:
+                missing_metrics.append(names[0])
                 continue
             comparable += 1
             ratio = (before - after) / before
@@ -158,6 +160,8 @@ class PromotionPolicy:
                 reasons.append("hardware_regression:%s" % names[0])
         if comparable == 0:
             reasons.append("hardware_data_missing")
+        for metric_name in missing_metrics:
+            reasons.append("hardware_data_missing:%s" % metric_name)
         efficiency_improved = any(
             improvements.get(names[0], -1.0) >= self.min_efficiency_improvement
             for names, _minimum in metric_specs[:2]

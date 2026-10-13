@@ -79,6 +79,14 @@ def test_efficiency_gain_without_required_model_size_gain_does_not_promote():
     assert "model_size_improvement_below_threshold" in decision["reasons"]
 
 
+def test_partial_hardware_evidence_does_not_promote():
+    evidence = _evidence()
+    del evidence["hardware_metrics"]["peak_memory_gb"]
+    decision = PromotionPolicy().decide(parent={}, evaluation=evidence, child_integrity=True)
+    assert decision["accepted"] is False
+    assert "hardware_data_missing:peak_memory_gb" in decision["reasons"]
+
+
 def test_promotion_uses_active_parent_before_initial_baseline():
     decision = PromotionPolicy().decide(
         parent={
