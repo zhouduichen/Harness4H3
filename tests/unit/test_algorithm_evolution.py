@@ -102,6 +102,97 @@ def test_memory_feedback_tightens_ffn_exploration_after_size_miss():
     assert "int(width * 0.375000)" in candidate.source
 
 
+def test_exploration_agent_generates_profile_guided_composite_plan(tmp_path):
+    profile = {
+        "model": {"ffn_width": 16},
+        "layers": [
+            {"block_id": "block.0", "latency_ms": 1.0, "estimated_flops": 10.0},
+            {"block_id": "block.1", "latency_ms": 5.0, "estimated_flops": 50.0},
+            {"block_id": "block.2", "latency_ms": 3.0, "estimated_flops": 30.0},
+        ],
+        "block_sensitivity": [
+            {"block_id": "block.0", "importance_score": 0.1, "available": True},
+            {"block_id": "block.1", "importance_score": 0.2, "available": True},
+            {"block_id": "block.2", "importance_score": 0.3, "available": True},
+        ],
+        "channel_sensitivity": [
+            {
+                "block_id": "block.1",
+                "available": True,
+                "channels": [
+                    {"channel": 0, "importance_score": 0.1, "available": True},
+                    {"channel": 1, "importance_score": 0.9, "available": True},
+                    {"channel": 2, "importance_score": 0.8, "available": True},
+                ],
+            }
+        ],
+    }
+
+    candidate = AlgorithmAgent(explore_ffn_retention_ratio=0.5).generate(
+        "A0001", parent_id="M0000", profile=profile, history=[], search_choice="explore"
+    )
+    result = __import__("harness4h3.sandbox", fromlist=["AlgorithmSandbox"]).AlgorithmSandbox(tmp_path).run(
+        candidate.source, profile, []
+    )
+
+    assert result.status == "success"
+    assert result.plan is not None
+    assert result.plan.operator == "compose"
+    assert len(result.plan.args["steps"]) == 2
+    assert result.plan.args["steps"][0]["operator"] == "prune_blocks"
+    assert result.plan.args["steps"][1]["operator"] == "prune_ffn_channels"
+
+
+def test_quality_failure_disables_aggressive_composition(tmp_path):
+    profile = {
+        "model": {"ffn_width": 16},
+        "layers": [{"block_id": "block.0", "latency_ms": 2.0, "estimated_flops": 20.0}, {"block_id": "block.1", "latency_ms": 3.0, "estimated_flops": 30.0}],
+        "block_sensitivity": [{"block_id": "block.0", "importance_score": 0.1, "available": True}, {"block_id": "block.1", "importance_score": 0.2, "available": True}],
+        "channel_sensitivity": [{"block_id": "block.1", "available": True, "channels": [{"channel": 0, "importance_score": 0.1, "available": True}]}],
+    }
+    history = [{"decision": {"promotion": {"reasons": ["quality_floor_failed"]}}}]
+
+    candidate = AlgorithmAgent().generate(
+        "A0001", parent_id="M0000", profile=profile, history=history, search_choice="explore"
+    )
+    result = __import__("harness4h3.sandbox", fromlist=["AlgorithmSandbox"]).AlgorithmSandbox(tmp_path).run(
+        candidate.source, profile, history
+    )
+
+    assert result.status == "success"
+    assert result.plan is not None
+    assert result.plan.operator == "prune_blocks"
+
+
+def test_provider_prompt_documents_composite_plan(monkeypatch):
+    payloads = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps({
+                "source": "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n",
+                "hypothesis": "test",
+                "parent_id": "M0000",
+            })}}]}).encode()
+
+    def fake_urlopen(request, timeout):
+        payloads.append(json.loads(request.data.decode())['messages'][1]['content'])
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = build_algorithm_provider("vllm", "test-model", endpoint="http://127.0.0.1:8000/v1/chat/completions")
+    provider({"parent_id": "M0000", "profile": {}, "history": [], "skills": []})
+
+    assert "compose" in payloads[0]
+    assert "steps" in payloads[0]
+
+
 def test_provider_agent_receives_compact_pareto_front():
     payloads = []
 

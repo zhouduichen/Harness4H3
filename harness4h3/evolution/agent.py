@@ -26,7 +26,25 @@ ALGORITHM_RESPONSE_SCHEMA = {
 }
 
 
-def _seed_source(block_id: str, algorithm_id: str, search_choice: str, *, retention_ratio: float = 0.25) -> str:
+def _seed_source(
+    block_id: str,
+    algorithm_id: str,
+    search_choice: str,
+    *,
+    retention_ratio: float = 0.25,
+    channel_block_id: Optional[str] = None,
+) -> str:
+    if search_choice == "explore" and channel_block_id is not None:
+        return (
+            "def propose(profile, history):\n"
+            "    # Explore seed %s: compose profile-guided block and FFN pruning.\n"
+            "    width = int(profile['model']['ffn_width'])\n"
+            "    retained_indices = list(range(max(1, int(width * %.6f))))\n"
+            "    return {'operator': 'compose', 'args': {'steps': [\n"
+            "        {'operator': 'prune_blocks', 'args': {'block_ids': %r}},\n"
+            "        {'operator': 'prune_ffn_channels', 'args': {'block_ids': [%r], 'retained_indices': retained_indices}},\n"
+            "    ]}}\n"
+        ) % (algorithm_id, retention_ratio, [block_id], channel_block_id)
     if search_choice == "explore":
         return (
             "def propose(profile, history):\n"
@@ -70,17 +88,41 @@ class AlgorithmAgent:
     ) -> AlgorithmCandidate:
         if self.provider is None:
             previously_selected = self._previously_selected_blocks(history)
-            block_id = self._least_sensitive_block(profile, excluded=previously_selected)
             retention_ratio = self._explore_retention_ratio(history)
-            source = _seed_source(block_id, algorithm_id, search_choice, retention_ratio=retention_ratio)
-            operator = "prune_ffn_channels" if search_choice == "explore" else "prune_blocks"
+            quality_feedback = self._has_quality_failure(history)
+            channel_block_id = None if quality_feedback or search_choice != "explore" else self._channel_target_block(profile, excluded=previously_selected)
+            block_excluded = set(previously_selected)
+            if channel_block_id is not None:
+                block_excluded.add(channel_block_id)
+            block_id = self._least_sensitive_block(profile, excluded=block_excluded)
+            generation_choice = "exploit" if quality_feedback else search_choice
+            source = _seed_source(
+                block_id,
+                algorithm_id,
+                generation_choice,
+                retention_ratio=retention_ratio,
+                channel_block_id=channel_block_id,
+            )
+            operator = "compose" if channel_block_id is not None else ("prune_ffn_channels" if generation_choice == "explore" else "prune_blocks")
+            if quality_feedback:
+                hypothesis = "quality feedback requires conservative block-only pruning"
+                design_strategy = "conservative_block"
+            elif channel_block_id is not None:
+                hypothesis = "compose a high-cost low-sensitivity block removal with FFN width pruning at %.1f%% retention" % (retention_ratio * 100.0)
+                design_strategy = "profile_guided_composite"
+            elif generation_choice == "explore":
+                hypothesis = "explore paired FFN width pruning at %.1f%% retention" % (retention_ratio * 100.0)
+                design_strategy = "prune_ffn_channels"
+            else:
+                hypothesis = "remove the lowest measured leave-one-block-out sensitivity block"
+                design_strategy = "prune_blocks"
             return AlgorithmCandidate.from_source(
                 algorithm_id,
                 source,
                 parent_id=parent_id,
                 parent_algorithm_id=parent_algorithm_id,
-                hypothesis=("explore paired FFN width pruning at %.1f%% retention" % (retention_ratio * 100.0) if search_choice == "explore" else "remove the lowest measured leave-one-block-out sensitivity block"),
-                metadata={"generator": "deterministic_seed", "operator": operator, "search_choice": search_choice, "retention_ratio": retention_ratio if search_choice == "explore" else None, "predicted_gain": {"latency": 0.05, "model_size": 0.10, "basis": "profile_sensitivity_and_operator_proxy"}},
+                hypothesis=hypothesis,
+                metadata={"generator": "deterministic_seed", "operator": operator, "design_strategy": design_strategy, "search_choice": search_choice, "retention_ratio": retention_ratio if generation_choice == "explore" else None, "predicted_gain": {"latency": 0.05, "model_size": 0.10, "basis": "profile_sensitivity_and_operator_proxy"}},
             )
         payload = {
             "profile": _compact_profile(profile),
@@ -115,9 +157,23 @@ class AlgorithmAgent:
     def _least_sensitive_block(profile: Mapping[str, Any], excluded: Optional[set[str]] = None) -> str:
         records = profile.get("block_sensitivity", [])
         excluded = excluded or set()
+        layers = {
+            str(item.get("block_id")): item
+            for item in profile.get("layers", [])
+            if isinstance(item, Mapping) and isinstance(item.get("block_id"), str)
+        }
         candidates = [item for item in records if isinstance(item, Mapping) and isinstance(item.get("block_id"), str) and item.get("block_id") not in excluded and isinstance(item.get("importance_score"), (int, float))]
         if candidates:
-            return str(min(candidates, key=lambda item: float(item["importance_score"]))["block_id"])
+            def score(item: Mapping[str, Any]) -> tuple[float, float, float]:
+                layer = layers.get(str(item["block_id"]), {})
+                latency = float(layer.get("latency_ms", 0.0) or 0.0)
+                flops = float(layer.get("estimated_flops", 0.0) or 0.0)
+                importance = float(item["importance_score"])
+                pressure = max(latency, flops)
+                # Prefer low sensitivity while still targeting measurable work.
+                return (importance / max(pressure, 1.0), importance, -pressure)
+
+            return str(min(candidates, key=score)["block_id"])
         layers = profile.get("layers", [])
         for item in layers:
             if isinstance(item, Mapping) and isinstance(item.get("block_id"), str) and item.get("block_id") not in excluded:
@@ -126,6 +182,37 @@ class AlgorithmAgent:
             if isinstance(item, Mapping) and isinstance(item.get("block_id"), str):
                 return str(item["block_id"])
         return "block.0"
+
+    @staticmethod
+    def _channel_target_block(profile: Mapping[str, Any], excluded: set[str]) -> Optional[str]:
+        records = profile.get("channel_sensitivity", [])
+        candidates = [
+            item
+            for item in records
+            if isinstance(item, Mapping)
+            and item.get("available") is True
+            and isinstance(item.get("block_id"), str)
+            and item["block_id"] not in excluded
+        ]
+        if not candidates:
+            return None
+        return str(candidates[0]["block_id"])
+
+    @staticmethod
+    def _has_quality_failure(history: Sequence[Mapping[str, Any]]) -> bool:
+        for item in history:
+            if not isinstance(item, Mapping):
+                continue
+            decision = item.get("decision")
+            if not isinstance(decision, Mapping):
+                continue
+            promotion = decision.get("promotion")
+            reasons = promotion.get("reasons", []) if isinstance(promotion, Mapping) else []
+            if any("quality" in str(reason).lower() for reason in reasons):
+                return True
+            if "quality" in str(decision.get("failure_type", "")).lower():
+                return True
+        return False
 
     @staticmethod
     def _previously_selected_blocks(history: Sequence[Mapping[str, Any]]) -> set[str]:
@@ -254,9 +341,11 @@ def build_algorithm_provider(
             "Return JSON only with source, hypothesis, and parent_id. The source must define "
             "a complete Python function `def propose(profile, history): ...` and return only "
             "a bounded operator/args plan; never return a function name or pseudocode. "
-            "Allowed operators are exactly `prune_blocks` with args `{" 
-            "block_ids: list[str]}` or `prune_ffn_channels` with args "
-            "`{block_ids: list[str], retained_indices: list[int]}`. "
+            "Allowed plans are exactly `prune_blocks` with args `{"
+            "block_ids: list[str]}`, `prune_ffn_channels` with args "
+            "`{block_ids: list[str], retained_indices: list[int]}`, or "
+            "`compose` with args `{"
+            "steps: list[2..3] of the two base plans}`. Compose cannot be nested. "
             "The returned parent_id must exactly match the supplied parent_id. "
             "Never output paths, devices, shell commands, imports outside the sandbox allowlist, "
             "or evaluator settings.\n\n"
