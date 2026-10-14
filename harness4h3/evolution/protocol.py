@@ -71,6 +71,53 @@ def _asset_record(raw: Any, config_path: Path, *, require_file: bool = False) ->
     return record
 
 
+def _asset_identity(asset: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a path-independent identity for protocol fingerprinting.
+
+    Small evaluation files are identified by content hash.  Large model and
+    directory assets are identified by their snapshot/name and availability;
+    their host-specific absolute paths remain in the audit manifest, not in
+    the protocol fingerprint.
+    """
+
+    digest = asset.get("sha256")
+    if isinstance(digest, str) and digest:
+        return {"kind": str(asset.get("kind", "unknown")), "sha256": digest, "exists": bool(asset.get("exists"))}
+    raw_path = str(asset.get("path", "")).replace("\\", "/")
+    parts = [part for part in raw_path.split("/") if part]
+    snapshot = None
+    if "snapshots" in parts:
+        index = parts.index("snapshots")
+        if index + 1 < len(parts):
+            snapshot = parts[index + 1]
+    return {
+        "kind": str(asset.get("kind", "unknown")),
+        "snapshot": snapshot,
+        "name": Path(raw_path).name if raw_path else "",
+        "exists": bool(asset.get("exists")),
+    }
+
+
+def _evaluator_identity(record: Mapping[str, Any]) -> dict[str, Any]:
+    evaluator = dict(record["evaluator"])
+    assets = record["assets"]
+    for key in ("wan_config", "evaluation_manifest", "clip_model_path"):
+        evaluator[key] = _asset_identity(assets[key])
+    return evaluator
+
+
+def _common_identity(record: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "backend": record["backend"],
+        "checkpoint": _asset_identity(record["checkpoint_asset"]),
+        "device": record["device"],
+        "dtype": record["dtype"],
+        "seed": record["seed"],
+        "evaluator": _evaluator_identity(record),
+        "source_revision": record["source_revision"],
+    }
+
+
 def _read_raw_config(path: Path) -> Mapping[str, Any]:
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -223,10 +270,11 @@ def validate_protocol(
                 errors.append("output_root overlaps: %s and %s" % (left_name, right_name))
 
     first = records[REQUIRED_ARMS[0]]
-    common_keys = ("backend", "checkpoint", "device", "dtype", "seed", "evaluator", "source_revision")
+    first_common = _common_identity(first)
     for name, record in records.items():
-        for key in common_keys:
-            if _canonical(record[key]) != _canonical(first[key]):
+        current_common = _common_identity(record)
+        for key in first_common:
+            if _canonical(current_common[key]) != _canonical(first_common[key]):
                 errors.append("common field differs: %s" % key)
                 break
     # The controller is intentionally the same only for the three adaptive
@@ -276,7 +324,7 @@ def validate_protocol(
         "schema_version": PROTOCOL_SCHEMA_VERSION,
         "arms": {name: controls[name] for name in REQUIRED_ARMS},
         "common": {
-            key: first[key] for key in ("backend", "checkpoint", "device", "dtype", "seed", "evaluator", "source_revision")
+            key: first_common[key] for key in first_common
         },
         "adaptive_controller": {
             "controller": records["coding-agent"]["controller"],
@@ -295,6 +343,7 @@ def validate_protocol(
             "config_sha256": record["config_sha256"],
             "source_revision": record["source_revision"],
             "checkpoint": record["checkpoint_asset"],
+            "assets": record["assets"],
             "evaluator": record["evaluator"],
             "budget": {"rounds": rounds, "expected_cases": expected_cases, "latency_repeats": latency_repeats},
             "controls": controls[name],

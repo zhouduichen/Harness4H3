@@ -43,6 +43,9 @@ the arm controls (`memory_enabled`, `adapt_search_policy`, provider/model, and
 
 `tools/compare_evolution_runs.py` treats missing manifests, changed
 fingerprints, duplicate arms, or inconsistent budgets as protocol warnings.
+It also rejects manifests whose checkpoint or evaluation assets are unresolved;
+`--allow-missing-assets` is only a preparation aid and cannot make a result
+comparable.
 Such runs are not reported as directly comparable, even if their individual
 evaluation files look complete. A manifest is evidence of configuration
 consistency only; it is not a GPU result and does not promote a model.

@@ -80,6 +80,13 @@ def test_validate_protocol_builds_stable_four_arm_manifest(tmp_path):
         assert json.loads(path.read_text(encoding="utf-8")) == report["run_manifests"][name]
 
 
+def test_protocol_fingerprint_does_not_depend_on_host_absolute_paths(tmp_path):
+    first = validate_protocol(_make_configs(tmp_path / "host-a"))
+    second = validate_protocol(_make_configs(tmp_path / "host-b"))
+    assert first["protocol_fingerprint"] == second["protocol_fingerprint"]
+    assert first["arms"]["fixed"]["output_root"] != second["arms"]["fixed"]["output_root"]
+
+
 def test_validate_protocol_rejects_missing_arm_and_bad_control(tmp_path):
     configs = _make_configs(tmp_path)
     configs.pop("rsi")

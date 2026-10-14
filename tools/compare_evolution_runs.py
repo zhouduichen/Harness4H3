@@ -273,6 +273,7 @@ def summarize_run(name: str, root: Path) -> dict[str, Any]:
         "protocol_fingerprint": manifest.get("protocol_fingerprint") if manifest else None,
         "protocol_arm_name": manifest.get("arm_name") if manifest else None,
         "protocol_budget": dict(manifest.get("budget")) if manifest and isinstance(manifest.get("budget"), Mapping) else None,
+        "protocol_assets": dict(manifest.get("assets")) if manifest and isinstance(manifest.get("assets"), Mapping) else None,
         "round_count": len(rounds),
         "experiment_count": len(evaluations),
         "failure_count": failure_count,
@@ -339,6 +340,21 @@ def compare_runs(specs: list[str], *, expected_cases: int | None = None) -> dict
         warnings.append("run-manifest.json missing arm_name")
     if manifests and any(item["protocol_budget"] is None for item in manifests):
         warnings.append("run-manifest.json missing budget")
+    if manifests and any(item["protocol_assets"] is None for item in manifests):
+        warnings.append("run-manifest.json missing assets")
+    for item in manifests:
+        assets = item["protocol_assets"]
+        if not isinstance(assets, Mapping):
+            continue
+        unavailable = []
+        for asset_name, asset in assets.items():
+            if not isinstance(asset, Mapping):
+                unavailable.append(str(asset_name))
+                continue
+            if not bool(asset.get("exists")) or (asset.get("required_file") and asset.get("kind") != "file"):
+                unavailable.append(str(asset_name))
+        if unavailable:
+            warnings.append("%s protocol assets unresolved: %s" % (item["name"], ", ".join(sorted(unavailable))))
     if len(fingerprints) > 1:
         warnings.append("protocol_fingerprint differs across runs")
     if len(summaries) == len(REQUIRED_ARMS):

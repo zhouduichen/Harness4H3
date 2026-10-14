@@ -76,6 +76,12 @@ def _write_manifest(root, arm, *, fingerprint="protocol-a"):
                 "protocol_fingerprint": fingerprint,
                 "arm_name": arm,
                 "budget": {"rounds": 3, "expected_cases": 16, "latency_repeats": 3},
+                "assets": {
+                    "checkpoint": {"exists": True, "kind": "directory"},
+                    "wan_config": {"exists": True, "kind": "file"},
+                    "evaluation_manifest": {"exists": True, "kind": "file"},
+                    "clip_model_path": {"exists": True, "kind": "directory"},
+                },
             }
         ),
         encoding="utf-8",
@@ -209,3 +215,16 @@ def test_compare_rejects_incomplete_protocol_manifest(tmp_path):
     assert result["protocol_comparable"] is False
     assert "run-manifest.json missing arm_name" in result["warnings"]
     assert "run-manifest.json missing budget" in result["warnings"]
+
+
+def test_compare_rejects_unresolved_protocol_assets(tmp_path):
+    root = tmp_path / "run"
+    _write_active(root, metrics={"quality_score": 1.0, "hardware_metrics": {"model_size_gb": 8.0, "case_count": 16}})
+    _write_run(root, status="promoted", case_count=16)
+    _write_manifest(root, "fixed")
+    manifest = json.loads((root / "run-manifest.json").read_text(encoding="utf-8"))
+    manifest["assets"]["checkpoint"]["exists"] = False
+    (root / "run-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    result = compare_runs(["run=%s" % root], expected_cases=16)
+    assert result["protocol_comparable"] is False
+    assert "run protocol assets unresolved: checkpoint" in result["warnings"]
