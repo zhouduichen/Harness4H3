@@ -35,6 +35,14 @@ def test_sandbox_normalizes_persisted_operator_args_alias(tmp_path):
     assert result.plan.to_dict() == {"operator": "prune_blocks", "args": {"block_ids": ["block.1"]}}
 
 
+def test_sandbox_normalizes_top_level_operator_alias(tmp_path):
+    source = "def propose(profile, history):\n    return {'prune_blocks': {'block_ids': ['block.1']}}\n"
+    result = AlgorithmSandbox(tmp_path).run(source, {}, [])
+    assert result.status == "success"
+    assert result.plan is not None
+    assert result.plan.to_dict() == {"operator": "prune_blocks", "args": {"block_ids": ["block.1"]}}
+
+
 def test_sandbox_accepts_bounded_composite_plan(tmp_path):
     source = """def propose(profile, history):
     return {

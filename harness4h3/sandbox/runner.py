@@ -51,6 +51,14 @@ class CompressionPlan:
         # validation remains identical and no extra fields are accepted.
         if set(raw) == {"operator", "operator_args"}:
             raw = {"operator": raw["operator"], "args": raw["operator_args"]}
+        elif len(raw) == 1:
+            # Controllers occasionally return the operator as the top-level
+            # key (for example, {"prune_blocks": {"block_ids": [...]}}).
+            # Normalize that harmless schema variant here, before applying
+            # the same strict operator/argument validation below.
+            operator, args = next(iter(raw.items()))
+            if operator in cls.ALLOWED_OPERATORS:
+                raw = {"operator": operator, "args": args}
         if set(raw) != {"operator", "args"}:
             raise ValueError("algorithm_output_invalid: output keys must be operator and args")
         operator = raw["operator"]
