@@ -194,6 +194,38 @@ def test_design_feedback_changes_next_algorithm_and_persists_gene(tmp_path):
     assert "quality_floor_failed" in genes[0]
 
 
+def test_failed_composite_design_is_retained_as_negative_gene(tmp_path):
+    from harness4h3.evolution.agent import AlgorithmAgent
+
+    adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    source = """def propose(profile, history):
+    return {'operator': 'compose', 'args': {'steps': [
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}},
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}},
+    ]}}
+"""
+
+    def provider(payload):
+        return {"source": source, "hypothesis": "repeat a block to test failure memory", "parent_id": payload["parent_id"]}
+
+    loop = EvolutionLoop(
+        adapter=adapter,
+        parent=parent,
+        output_root=tmp_path / "run",
+        agent=AlgorithmAgent(provider=provider),
+    )
+
+    outcome = loop.run_round()
+
+    assert outcome.status == "failed"
+    assert outcome.decision["failure_type"] == "invalid_block_selection"
+    assert (tmp_path / "run" / "rounds" / outcome.round_id / "design.json").is_file()
+    gene_lines = (tmp_path / "run" / "design-genes.jsonl").read_text().splitlines()
+    assert len(gene_lines) == 1
+    assert '"status": "failed"' in gene_lines[0]
+
+
 def test_incomplete_round_reuses_persisted_compression_after_process_crash(tmp_path):
     adapter = FakeWanDiTAdapter(block_count=5, hidden_size=8, ffn_width=16)
     parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")

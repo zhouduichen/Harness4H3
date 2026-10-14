@@ -201,7 +201,7 @@ class EvolutionLoop:
             compression = self.registry.execute(algorithm_plan_operator(sandbox_result), self.adapter, parent_artifact, sandbox_result.plan.args, compression_dir)
             _write_json(compression_path, compression.to_dict())
         if compression.status != "success" or compression.child_checkpoint is None:
-            return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "compression", compression.failure_type or "compression_failed", compression.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "compression": str(compression_path)})
+            return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "compression", compression.failure_type or "compression_failed", compression.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "design": str(design_path), "compression": str(compression_path)}, design=design)
 
         try:
             child_integrity = self._verify_checkpoint(compression.child_checkpoint, expected_sha256=compression.child_checkpoint.sha256, parent_sha256=parent_artifact.sha256)
@@ -285,7 +285,7 @@ class EvolutionLoop:
             self.model_store.set_active(child_candidate.id)
         return EvolutionRound(round_id, parent_candidate.id, algorithm.algorithm_id, decision_status, child_candidate.id, decision, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "design": str(design_path), "compression": str(compression_path), "evaluation": str(evaluation_path), "decision": str(decision_path)})
 
-    def _finish_failure(self, round_id: str, round_dir: Path, parent: ModelCandidate, algorithm: AlgorithmCandidate, search_choice: str, stage: str, failure_type: str, message: str, paths: Mapping[str, str], *, algorithm_persisted: bool = True) -> EvolutionRound:
+    def _finish_failure(self, round_id: str, round_dir: Path, parent: ModelCandidate, algorithm: AlgorithmCandidate, search_choice: str, stage: str, failure_type: str, message: str, paths: Mapping[str, str], *, algorithm_persisted: bool = True, design: Optional[Mapping[str, Any]] = None) -> EvolutionRound:
         self._update_search_policy(feasible=False, improved=False, failure_type=failure_type)
         decision = {
             "status": "failed",
@@ -296,6 +296,9 @@ class EvolutionLoop:
             "algorithm_id": algorithm.algorithm_id,
             "search_policy": {"choice": search_choice, **self.search_policy.to_dict()},
         }
+        if design:
+            decision["design"] = dict(design)
+            decision["design_fingerprint"] = design.get("fingerprint")
         decision_path = round_dir / "decision.json"
         _write_json(decision_path, decision)
         self._finalize_round_state(
@@ -307,7 +310,7 @@ class EvolutionLoop:
             failure_type=failure_type,
             decision_path=decision_path,
         )
-        self._record_experience(round_id, parent, None, algorithm, None, decision, "failed", decision_path)
+        self._record_experience(round_id, parent, None, algorithm, None, decision, "failed", decision_path, design=design)
         if algorithm_persisted:
             self.algorithm_store.update(replace(algorithm, status="failed", experiment_ids=(round_id,), failure_reasons=(failure_type,)))
         all_paths = dict(paths)
