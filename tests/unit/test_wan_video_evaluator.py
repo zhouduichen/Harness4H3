@@ -255,6 +255,9 @@ def test_real_evaluator_records_video_and_quality_evidence(tmp_path, monkeypatch
     assert len(result["evaluation_manifest_sha256"]) == 64
     assert result["evaluator_version"]
     assert result["source_revision"] == "unknown"
+    assert result["generation_device"] == "cuda:0"
+    assert result["pipeline_device"] == "cuda:0"
+    assert result["hardware_metrics"]["input_shape"] == {"height": 8, "width": 8, "num_frames": 4}
     assert list((tmp_path / "evaluation" / "evaluations" / child.sha256).iterdir())
 
 

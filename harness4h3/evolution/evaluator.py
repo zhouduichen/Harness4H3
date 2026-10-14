@@ -358,6 +358,9 @@ class WanVideoEvaluator:
                 "evaluator_version": EVALUATOR_VERSION,
                 "evaluation_manifest_sha256": self.manifest_sha256,
                 "source_revision": self.config.source_revision,
+                "generation_device": self.config.device,
+                "pipeline_device": self.config.resolved_pipeline_device,
+                "dtype": self.config.dtype,
             }
         baseline_quality = float(baseline["quality_score"])
         candidate_quality = float(candidate["quality_score"])
@@ -481,6 +484,9 @@ class WanVideoEvaluator:
                             "evaluator_version": EVALUATOR_VERSION,
                             "evaluation_manifest_sha256": self.manifest_sha256,
                             "source_revision": self.config.source_revision,
+                            "generation_device": self.config.device,
+                            "pipeline_device": self.config.resolved_pipeline_device,
+                            "dtype": self.config.dtype,
                             "cases": cases,
                         },
                     )
@@ -510,6 +516,14 @@ class WanVideoEvaluator:
                     "gpu_runtime_cost_s": sum(sum(float(value) for value in item["latency_samples_s"]) for item in cases),
                     "latency_measurement_method": LATENCY_MEASUREMENT_METHOD,
                     "prompt_encoding_included": False,
+                    "generation_device": self.config.device,
+                    "pipeline_device": self.config.resolved_pipeline_device,
+                    "dtype": self.config.dtype,
+                    "input_shape": {
+                        "height": int(self._wan_spec["height"]),
+                        "width": int(self._wan_spec["width"]),
+                        "num_frames": int(self._wan_spec["num_frames"]),
+                    },
                     "peak_memory_gb_max": max(float(item["peak_memory_gb"]) for item in cases),
                     "model_size_gb": self._checkpoint_size_gb(artifact.path),
                     "parameter_count": int(artifact.structure.parameter_count),
@@ -517,6 +531,9 @@ class WanVideoEvaluator:
                 },
                 "resumed_case_count": resumed_case_count,
                 "source_revision": self.config.source_revision,
+                "generation_device": self.config.device,
+                "pipeline_device": self.config.resolved_pipeline_device,
+                "dtype": self.config.dtype,
                 "cases": cases,
             }
             _atomic_json(result_path, result)
