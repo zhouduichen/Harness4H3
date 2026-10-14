@@ -35,7 +35,7 @@
 ## 验证结果
 
 - 相关统计、晋升、Wan evaluator、Sandbox、组合 operator、设计记录和 EvoCompress 集成回归：`58 passed`。
-- CPU 全量：`909 passed, 4 skipped`，耗时 `101.23 秒`。
+- CPU 全量：`910 passed, 4 skipped`，耗时 `100.96 秒`。
 - 4 个 skip 均是既有环境条件：真实 Wan GPU smoke、两项 CUDA-only training 测试和 CUDA RNG parity；不是本轮失败。
 - RSI 相关目录的 `.venv/bin/python -m compileall` 通过，`git diff --check` 通过。
 - `git diff --check` 通过。
