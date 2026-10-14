@@ -85,9 +85,36 @@ embedding 只编码一次，warmup 和 3 次 repeat 测量扩散 Transformer 与
 可以避免把未优化组件的 CPU 时间误归因给候选 Transformer；recipe digest 会随测量
 方法变化，旧缓存不会被错误复用。
 
-Peak memory 会针对 evaluator 配置的 CUDA device 重置并读取；不能用默认 CUDA
-device 的统计值代表实际执行卡。如果运行环境无法提供 CUDA memory telemetry，结果
-必须显式保留为 unavailable/0 并在报告中标注，不能解释成低显存占用。
+Peak memory 会针对 evaluator 配置的 `generation_device` 重置并读取；不能用默认
+CUDA device 的统计值代表实际执行卡。如果运行环境无法提供 CUDA memory telemetry，
+`peak_memory_gb_max` 和 `peak_memory_available` 必须分别写成 `null` 和 `false`，
+不能写零，更不能解释成低显存占用。每个 case 也保留实际 device 和可用性。
+
+### Evaluation Recipe：Wan 指标口径
+
+同一份 Recipe 必须固定 checkpoint revision、Wan generation config、evaluation
+manifest、prompt/seed、warmup、latency repeat、dtype、generation device、pipeline
+device 和 quality backend。当前 latency 是
+`denoising+vae_decode_with_case_cached_prompt_embeddings`，不包含固定文本编码器的
+重复编码；Recipe 会记录 `prompt_encoding_included=false` 和 `latency_samples_s`。
+
+指标含义固定如下：
+
+- `transformer_parameter_count` 和兼容字段 `parameter_count` 只数压缩目标
+  Transformer，`parameter_count_scope=transformer`；不能把 T5/VAE 参数混进压缩收益。
+- `transformer_model_size_gb` 只数 Transformer 目录；`pipeline_model_size_gb` 和兼容
+  字段 `model_size_gb` 数完整 Pipeline 的逻辑文件体积。
+- 体积按 `(device, inode)` 去重，因此 hardlink 和指向同一文件的 symlink 不会被重复
+  计数。Child 只改 Transformer 时，固定 T5/VAE 的共享体积不会被误报成压缩收益。
+- 峰值显存必须来自真实 `generation_device`，任何缺失、异常或不可用 telemetry 都是
+  `null`/unavailable。零不是有效的显存测量。
+
+后续晋升协议先检查 Child 完整性、独立真实评测、aggregate quality 至少为当前
+Parent 的 98%、已有可靠 semantic/temporal/motion 子指标不发生不可接受退化，以及
+可用硬件指标没有超过退化容忍度。通过这些硬约束后，latency 改善 5%、peak memory
+改善 5%、完整 Pipeline 体积改善 10% 三者任一达标即可进入 Pareto 非支配判断；门槛
+可在 evaluator 配置中分别调整。缺失指标只记为 unavailable，不贡献改善；若所有
+目标指标都缺失或都未达标，候选拒绝。这个协议只适用于新实验，不会重写历史决策。
 
 EvolutionLoop 也会复用没有 `decision.json` 的最早未完成 round；已写入的
 `profile.json`、`algorithm.json`、`sandbox.json` 和 `compression.json` 会先校验并
@@ -134,9 +161,13 @@ HARNESS4H3_SOURCE_REVISION=$(git rev-parse HEAD) \\
 对应配置开关是 `memory_enabled` 和 `adapt_search_policy`；前三个 baseline
 只需在各自 YAML 中关闭相应能力，且必须使用独立的 `output_root`。
 
-每个 run 至少记录：最终 `quality_score`、`quality_delta`、压缩后参数/模型
+每个 run 至少记录：当前 Active 的 `quality_score`、`quality_delta`、压缩后参数/模型
 大小、平均生成耗时、有效实验数、失败实验数、总 GPU wall time，以及在新
-prompt/新 seed manifest 上的迁移结果。`rounds/*/decision.json`、
+prompt/新 seed manifest 上的迁移结果。汇总器还会分别记录
+`active_model_id`、`last_candidate_model_id`、`historical_best_candidate_model_id`、
+`rejected_model_ids` 和 `final_source`。`final` 只能来自 Active 的真实测量，或来自
+明确以 Active 为 parent 的 baseline 测量；没有这些证据时字段保持 `null`，不能用
+最后一个候选补齐。`rounds/*/decision.json`、
 `experiences.jsonl` 和 `search-policy.json` 是对比实验的机器可读输入；不要
 把不同 manifest 或不同质量阈值的结果直接横向比较。
 
@@ -156,8 +187,10 @@ prompt/新 seed manifest 上的迁移结果。`rounds/*/decision.json`、
   --run algorithm-evolution=var/rsi/algorithm-evolution
 ```
 
-汇总器不会把缺失指标填成零，也不会把被拒绝候选当作 active model；不同
-`evaluator_recipe_sha256` 或 case 数量不一致时，结果会标记为不可直接比较。
+汇总器不会把缺失指标填成零，也不会把被拒绝候选当作 active model；历史最佳候选
+和最后候选只用于候选实验记录。Active 指针读取 `models/active.json` 的 `id` 字段；
+不同 `evaluator_recipe_sha256`、代码 revision 或 case 数量不一致时，结果会标记为
+不可直接比较。当前 Active 没有可靠指标时，汇总器会明确报告数据缺失。
 
 当前仓库先完成 Wan2.1-1.3B 的真实闭环；H3 迁移只依赖同一组
 `WanModelAdapter`/`CompressionOperator`/`EvaluationFn` 边界，待 Wan 的

@@ -11,7 +11,7 @@ import statistics
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, ClassVar, Mapping, Optional
 
 from ..adapters.wan.contracts import CheckpointArtifact, stable_digest
 
@@ -20,7 +20,7 @@ class WanEvaluationError(RuntimeError):
     """A real evaluation could not produce trusted evidence."""
 
 
-EVALUATOR_VERSION = "wan-video-evaluator-v6"
+EVALUATOR_VERSION = "wan-video-evaluator-v7"
 LATENCY_MEASUREMENT_METHOD = "denoising+vae_decode_with_case_cached_prompt_embeddings"
 
 DEFAULT_VISUAL_QUALITY_GATE = {
@@ -42,22 +42,40 @@ class PromotionPolicy:
     """Independent promotion gate for measured candidate evidence."""
 
     quality_floor_ratio: float = 0.98
+    # Kept as a compatibility knob for existing configs.  New configs can
+    # override latency and memory independently below.
     min_efficiency_improvement: float = 0.05
+    min_latency_improvement: Optional[float] = None
+    min_memory_improvement: Optional[float] = None
     min_model_size_improvement: float = 0.10
     max_metric_regression_ratio: float = 0.05
 
+    _NON_TARGET_MINIMIZE_METRICS: ClassVar[tuple[str, ...]] = ("energy_j", "energy_j_mean", "gpu_runtime_cost_s")
+
     def __post_init__(self) -> None:
-        for name in ("quality_floor_ratio", "min_efficiency_improvement", "min_model_size_improvement", "max_metric_regression_ratio"):
+        for name in (
+            "quality_floor_ratio",
+            "min_efficiency_improvement",
+            "min_model_size_improvement",
+            "max_metric_regression_ratio",
+        ):
             value = float(getattr(self, name))
             if not 0.0 <= value <= 1.0:
+                raise ValueError("%s must be in [0, 1]" % name)
+        for name in ("min_latency_improvement", "min_memory_improvement"):
+            value = getattr(self, name)
+            if value is not None and not 0.0 <= float(value) <= 1.0:
                 raise ValueError("%s must be in [0, 1]" % name)
 
     @classmethod
     def from_mapping(cls, raw: Optional[Mapping[str, Any]] = None) -> "PromotionPolicy":
         value = dict(raw or {})
+        legacy_efficiency = float(value.get("min_efficiency_improvement", 0.05))
         return cls(
             quality_floor_ratio=float(value.get("quality_floor_ratio", value.get("min_quality_ratio", 0.98))),
-            min_efficiency_improvement=float(value.get("min_efficiency_improvement", 0.05)),
+            min_efficiency_improvement=legacy_efficiency,
+            min_latency_improvement=float(value.get("min_latency_improvement", legacy_efficiency)),
+            min_memory_improvement=float(value.get("min_memory_improvement", legacy_efficiency)),
             min_model_size_improvement=float(value.get("min_model_size_improvement", 0.10)),
             max_metric_regression_ratio=float(value.get("max_metric_regression_ratio", value.get("max_hardware_regression", 0.05))),
         )
@@ -78,6 +96,11 @@ class PromotionPolicy:
         return None
 
     @classmethod
+    def _positive_metric(cls, mapping: Mapping[str, Any], names: tuple[str, ...]) -> Optional[float]:
+        value = cls._metric(mapping, names)
+        return value if value is not None and value > 0.0 else None
+
+    @classmethod
     def _hardware(cls, mapping: Mapping[str, Any]) -> Mapping[str, Any]:
         value = mapping.get("hardware_metrics")
         return value if isinstance(value, Mapping) else mapping
@@ -91,9 +114,13 @@ class PromotionPolicy:
         if left_quality is None or right_quality is None or left_quality < right_quality:
             return False
         strict = left_quality > right_quality
-        for names in (("latency_s", "inference_wall_time_s_mean"), ("peak_memory_gb", "peak_memory_gb_max"), ("model_size_gb",)):
-            left_value = cls._metric(cls._hardware(left), names)
-            right_value = cls._metric(cls._hardware(right), names)
+        for names in (
+            ("latency_s", "inference_wall_time_s_mean"),
+            ("peak_memory_gb", "peak_memory_gb_max"),
+            ("model_size_gb", "pipeline_model_size_gb"),
+        ):
+            left_value = cls._positive_metric(cls._hardware(left), names)
+            right_value = cls._positive_metric(cls._hardware(right), names)
             if left_value is None or right_value is None:
                 continue
             compared = True
@@ -113,6 +140,10 @@ class PromotionPolicy:
         """Return an auditable decision; never trust evaluator ``feasible``."""
 
         reasons: list[str] = []
+        missing_metrics: list[str] = []
+        objective_failures: list[str] = []
+        quality_metrics_checked: list[str] = []
+        quality_metrics_unavailable: list[str] = []
         if not child_integrity:
             reasons.append("child_integrity_failed")
         if evaluation.get("valid") is not True:
@@ -130,15 +161,36 @@ class PromotionPolicy:
         elif candidate_quality < parent_quality * self.quality_floor_ratio:
             reasons.append("quality_floor_failed")
 
+        candidate_quality_metrics = evaluation.get("quality_metrics")
+        if not isinstance(candidate_quality_metrics, Mapping):
+            candidate_quality_metrics = {}
+        parent_quality_metrics = parent.get("quality_metrics")
+        if not isinstance(parent_quality_metrics, Mapping):
+            parent_quality_metrics = evaluation.get("baseline_quality_metrics")
+        if not isinstance(parent_quality_metrics, Mapping):
+            parent_quality_metrics = {}
+        for metric_name in ("semantic", "temporal", "motion"):
+            candidate_value = self._number(candidate_quality_metrics.get(metric_name))
+            parent_value = self._number(parent_quality_metrics.get(metric_name))
+            if candidate_value is None or parent_value is None:
+                if candidate_value is not None or parent_value is not None:
+                    quality_metrics_unavailable.append(metric_name)
+                continue
+            quality_metrics_checked.append(metric_name)
+            if candidate_value < parent_value * self.quality_floor_ratio:
+                reasons.append("quality_metric_floor_failed:%s" % metric_name)
+
+        latency_threshold = float(self.min_latency_improvement if self.min_latency_improvement is not None else self.min_efficiency_improvement)
+        memory_threshold = float(self.min_memory_improvement if self.min_memory_improvement is not None else self.min_efficiency_improvement)
         metric_specs = (
-            (("latency_s", "inference_wall_time_s_mean"), self.min_efficiency_improvement),
-            (("peak_memory_gb", "peak_memory_gb_max"), self.min_efficiency_improvement),
-            (("model_size_gb",), self.min_model_size_improvement),
+            (("latency_s", "inference_wall_time_s_mean"), latency_threshold),
+            (("peak_memory_gb", "peak_memory_gb_max"), memory_threshold),
+            (("model_size_gb", "pipeline_model_size_gb"), self.min_model_size_improvement),
         )
         candidate_hw = self._hardware(evaluation)
         parent_hw = self._hardware(parent)
         has_parent_measurement = any(
-            self._metric(parent_hw, names) is not None
+            self._positive_metric(parent_hw, names) is not None
             for names, _minimum in metric_specs
         )
         baseline_hw = parent_hw if has_parent_measurement else evaluation.get("baseline_hardware_metrics")
@@ -146,33 +198,40 @@ class PromotionPolicy:
             baseline_hw = parent_hw
         improvements: dict[str, float] = {}
         comparable = 0
-        missing_metrics: list[str] = []
+        objective_passes: dict[str, bool] = {}
         for names, minimum in metric_specs:
-            before = self._metric(baseline_hw, names)
-            after = self._metric(candidate_hw, names)
-            if before is None or after is None or before <= 0.0:
-                missing_metrics.append(names[0])
+            canonical_name = names[0]
+            before = self._positive_metric(baseline_hw, names)
+            after = self._positive_metric(candidate_hw, names)
+            if before is None or after is None:
+                missing_metrics.append(canonical_name)
+                objective_passes[canonical_name] = False
                 continue
             comparable += 1
             ratio = (before - after) / before
-            improvements[names[0]] = ratio
+            improvements[canonical_name] = ratio
+            objective_passes[canonical_name] = ratio >= minimum
+            if ratio < minimum:
+                objective_failures.append(canonical_name)
             if ratio < -self.max_metric_regression_ratio:
-                reasons.append("hardware_regression:%s" % names[0])
+                reasons.append("hardware_regression:%s" % canonical_name)
         if comparable == 0:
             reasons.append("hardware_data_missing")
-        for metric_name in missing_metrics:
-            reasons.append("hardware_data_missing:%s" % metric_name)
-        efficiency_improved = any(
-            improvements.get(names[0], -1.0) >= self.min_efficiency_improvement
-            for names, _minimum in metric_specs[:2]
-        )
-        if comparable > 0 and not efficiency_improved:
+        if comparable > 0 and not any(objective_passes.values()):
             reasons.append("no_substantial_efficiency_improvement")
-        model_size_improvement = improvements.get("model_size_gb")
-        if model_size_improvement is None:
-            reasons.append("model_size_data_missing")
-        elif model_size_improvement < self.min_model_size_improvement:
-            reasons.append("model_size_improvement_below_threshold")
+            reasons.extend("objective_below_threshold:%s" % name for name in objective_failures)
+        if not any(objective_passes.values()):
+            for metric_name in missing_metrics:
+                reasons.append("hardware_data_missing:%s" % metric_name)
+
+        # Optional metrics such as energy are minimized too.  They are hard
+        # regression checks when both sides provide a real positive value, but
+        # they never become an improvement objective by accident.
+        for metric_name in self._NON_TARGET_MINIMIZE_METRICS:
+            before = self._positive_metric(baseline_hw, (metric_name,))
+            after = self._positive_metric(candidate_hw, (metric_name,))
+            if before is not None and after is not None and (after - before) / before > self.max_metric_regression_ratio:
+                reasons.append("hardware_regression:%s" % metric_name)
 
         # A candidate must not be dominated by the current independent front.
         if pareto_front and any(self._dominates(front, evaluation) for front in pareto_front):
@@ -184,9 +243,16 @@ class PromotionPolicy:
             "reasons": reasons,
             "quality_floor_ratio": self.quality_floor_ratio,
             "min_efficiency_improvement": self.min_efficiency_improvement,
+            "min_latency_improvement": latency_threshold,
+            "min_memory_improvement": memory_threshold,
             "min_model_size_improvement": self.min_model_size_improvement,
             "max_metric_regression_ratio": self.max_metric_regression_ratio,
             "improvements": improvements,
+            "objective_passes": objective_passes,
+            "objective_failures": objective_failures,
+            "missing_metrics": sorted(set(missing_metrics)),
+            "quality_metrics_checked": quality_metrics_checked,
+            "quality_metrics_unavailable": quality_metrics_unavailable,
             "independent_evaluation": True,
         }
 
@@ -377,6 +443,7 @@ class WanVideoEvaluator:
         return {
             **dict(candidate),
             "baseline_quality_score": baseline_quality,
+            "baseline_quality_metrics": dict(baseline.get("quality_metrics") or {}),
             "baseline_hardware_metrics": dict(baseline.get("hardware_metrics") or {}),
             "baseline_evaluation_valid": baseline_valid,
             "candidate_evaluation_valid": candidate_valid,
@@ -493,6 +560,13 @@ class WanVideoEvaluator:
             if not cases:
                 raise WanEvaluationError("evaluation_manifest_invalid: no cases selected")
             scores = [float(item["quality"]["aggregate"]) for item in cases]
+            peak_memory_values = [item.get("peak_memory_gb") for item in cases]
+            peak_memory_available = all(
+                isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and float(value) > 0.0
+                for value in peak_memory_values
+            )
+            pipeline_model_size_gb = self._checkpoint_size_gb(artifact.path)
+            transformer_model_size_gb = self._component_size_gb(Path(artifact.path) / "transformer")
             result = {
                 "status": "success",
                 "checkpoint_sha256": artifact.sha256,
@@ -524,9 +598,16 @@ class WanVideoEvaluator:
                         "width": int(self._wan_spec["width"]),
                         "num_frames": int(self._wan_spec["num_frames"]),
                     },
-                    "peak_memory_gb_max": max(float(item["peak_memory_gb"]) for item in cases),
-                    "model_size_gb": self._checkpoint_size_gb(artifact.path),
+                    "peak_memory_gb_max": max(float(value) for value in peak_memory_values) if peak_memory_available else None,
+                    "peak_memory_available": peak_memory_available,
+                    "peak_memory_device": self.config.device,
+                    "model_size_gb": pipeline_model_size_gb,
+                    "pipeline_model_size_gb": pipeline_model_size_gb,
+                    "transformer_model_size_gb": transformer_model_size_gb,
+                    "model_size_scope": "pipeline_logical_unique_files",
                     "parameter_count": int(artifact.structure.parameter_count),
+                    "transformer_parameter_count": int(artifact.structure.parameter_count),
+                    "parameter_count_scope": "transformer",
                     "case_count": len(cases),
                 },
                 "resumed_case_count": resumed_case_count,
@@ -603,25 +684,41 @@ class WanVideoEvaluator:
         except (AttributeError, RuntimeError):
             pass
 
-    def _peak_memory_gb(self, torch: Any) -> float:
+    def _peak_memory_gb(self, torch: Any) -> Optional[float]:
         try:
             if torch.cuda.is_available():
-                return float(torch.cuda.max_memory_allocated(self._cuda_device(torch))) / float(1024**3)
+                value = float(torch.cuda.max_memory_allocated(self._cuda_device(torch))) / float(1024**3)
+                if math.isfinite(value) and value > 0.0:
+                    return value
         except (AttributeError, RuntimeError):
             pass
-        return 0.0
+        return None
 
     @staticmethod
     def _checkpoint_size_gb(path: str) -> float:
         root = Path(path)
         try:
-            if root.is_file():
-                total = root.stat().st_size
-            else:
-                total = sum(item.stat().st_size for item in root.rglob("*") if item.is_file())
+            if not root.exists():
+                raise FileNotFoundError(str(root))
+            items = [root] if root.is_file() or root.is_symlink() else [item for item in root.rglob("*") if item.is_file() or item.is_symlink()]
+            seen: set[tuple[int, int]] = set()
+            total = 0
+            for item in items:
+                stat = item.stat()
+                identity = (int(stat.st_dev), int(stat.st_ino))
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                total += int(stat.st_size)
         except OSError as exc:
             raise WanEvaluationError("checkpoint_size_failed: %s" % exc) from exc
         return float(total) / float(1024**3)
+
+    @classmethod
+    def _component_size_gb(cls, path: Path) -> Optional[float]:
+        if not path.exists() and not path.is_symlink():
+            return None
+        return cls._checkpoint_size_gb(str(path))
 
     def _load_pipeline(self, checkpoint: str) -> tuple[Any, Any]:
         if self._pipeline_loader is not None:

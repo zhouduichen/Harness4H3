@@ -5,10 +5,35 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from harness4h3.adapters.wan import FakeWanDiTAdapter
 from harness4h3.evolution.evaluator import WanEvaluationError, WanVideoEvaluationConfig, WanVideoEvaluator
 from harness4h3.student.quality import QualityEvidence
+
+
+def test_checkpoint_size_deduplicates_hardlinks_and_symlinks(tmp_path):
+    root = tmp_path / "pipeline"
+    root.mkdir()
+    source = root / "weights.bin"
+    source.write_bytes(b"1234")
+    (root / "hardlink.bin").hardlink_to(source)
+    (root / "symlink.bin").symlink_to(source)
+
+    assert WanVideoEvaluator._checkpoint_size_gb(str(root)) == pytest.approx(4 / 1024**3)
+
+
+def test_unavailable_peak_memory_is_none():
+    class Torch:
+        class cuda:
+            @staticmethod
+            def is_available():
+                return False
+
+    evaluator = object.__new__(WanVideoEvaluator)
+    evaluator.config = SimpleNamespace(device="cuda:7")
+
+    assert evaluator._peak_memory_gb(Torch) is None
 
 
 def test_real_evaluator_config_requires_trusted_inputs(tmp_path):
@@ -258,6 +283,12 @@ def test_real_evaluator_records_video_and_quality_evidence(tmp_path, monkeypatch
     assert result["generation_device"] == "cuda:0"
     assert result["pipeline_device"] == "cuda:0"
     assert result["hardware_metrics"]["input_shape"] == {"height": 8, "width": 8, "num_frames": 4}
+    assert result["hardware_metrics"]["peak_memory_gb_max"] is None
+    assert result["hardware_metrics"]["peak_memory_available"] is False
+    assert result["hardware_metrics"]["parameter_count_scope"] == "transformer"
+    assert result["hardware_metrics"]["transformer_parameter_count"] == result["hardware_metrics"]["parameter_count"]
+    assert result["hardware_metrics"]["pipeline_model_size_gb"] == result["hardware_metrics"]["model_size_gb"]
+    assert result["hardware_metrics"]["transformer_model_size_gb"] is None
     assert list((tmp_path / "evaluation" / "evaluations" / child.sha256).iterdir())
 
 

@@ -59,13 +59,12 @@ def test_evolution_loop_restarts_from_persisted_parent_and_search_policy(tmp_pat
     assert outcome.round_id == "R0002"
     assert outcome.parent_model_id == "M0001"
     # The restarted loop compares the new candidate with the active measured
-    # Parent, not only with the immutable initial baseline.  The structural
-    # fake evaluator does not provide a further 10% size improvement, so the
-    # candidate is retained as evidence without replacing M0001.
-    assert outcome.status == "rejected"
+    # Parent.  The new protocol permits promotion when any one of the
+    # independent efficiency objectives clears its configured threshold.
+    assert outcome.status == "promoted"
     round_state = json.loads((tmp_path / "run" / "rounds" / outcome.round_id / "round.json").read_text(encoding="utf-8"))
-    assert round_state["status"] == "rejected"
-    assert restarted.model_store.active_id == "M0001"
+    assert round_state["status"] == "promoted"
+    assert restarted.model_store.active_id == "M0002"
     assert restarted.search_policy.rounds == 2
     assert (tmp_path / "run" / "initial-baseline.json").is_file()
 

@@ -24,5 +24,9 @@ bytes are never embedded.
 cannot be active. `evaluated_candidate` means a benchmark was recorded but the
 child was not promoted. `accepted` and `rejected` are explicit gate decisions;
 `failed` is retained training/infrastructure negative evidence. Missing metrics
-are `null`, never zero. The default `structural_proxy` quality scope is an
-engineering signal, not semantic video-quality evidence.
+are `null`, never zero; an unavailable CUDA memory sample must not be interpreted
+as zero memory. For Wan compression records, `parameter_count_scope` identifies
+the Transformer-only parameter count, while `transformer_model_size_gb` and
+`pipeline_model_size_gb` keep target and complete-pipeline volume separate.
+The default `structural_proxy` quality scope is an engineering signal, not
+semantic video-quality evidence.
