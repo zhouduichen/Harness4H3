@@ -168,6 +168,21 @@ CPU fake 测试可以验证“反馈改变算法结构”和 artifact 可重放�
 
 ## 四组协议预检
 
+如果四组 YAML 尚未建立，可以从一份已固定代码版本的基线配置生成它们。生成器只改
+控制变量和独立输出目录，并把相对模型/评价路径固定为绝对路径：
+
+```bash
+.venv/bin/python tools/build_evolution_protocol_configs.py \
+  --base-config configs/evolutionary-compression.wan-coding-formal-v13.yaml \
+  --output-dir configs/generated-rsi \
+  --run-root /data/models/harness4h3-evolutionary-compression-20261014 \
+  --source-revision a9c1ebd
+```
+
+生成器要求基线使用真实 Wan evaluator 和非 deterministic 的 Coding Agent provider；
+如果模型资产只在远程主机上，须在远程主机执行，或显式使用
+`--allow-missing-assets` 只生成待补齐的配置，不能把它当作实验结果。
+
 正式启动前，先用协议预检工具把四份配置锁成同一组可比条件。工具不会加载 Wan
 模型或执行 GPU 推理；它会检查 checkpoint、Wan 配置、评价 manifest、dtype、设备、
 seed、`8 × 2 = 16` 个评价单元、三次延迟测量和三轮预算，并要求四个控制臂分别命名为

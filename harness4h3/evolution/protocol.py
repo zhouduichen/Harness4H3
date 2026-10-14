@@ -261,6 +261,8 @@ def validate_protocol(
         errors.append("fixed must disable memory/adaptation and use exploit_ratio=1.0")
     if controls["coding-agent"]["memory_enabled"] or controls["coding-agent"]["adapt_search_policy"]:
         errors.append("coding-agent must disable memory and adaptation")
+    if controls["coding-agent"]["provider"] in {"fixed", "deterministic", "offline", "mock"}:
+        errors.append("coding-agent must use a non-deterministic controller provider")
     if not controls["agent-memory"]["memory_enabled"] or controls["agent-memory"]["adapt_search_policy"]:
         errors.append("agent-memory must enable memory and disable adaptation")
     if not controls["rsi"]["memory_enabled"] or not controls["rsi"]["adapt_search_policy"]:
