@@ -224,6 +224,10 @@ class AlgorithmAgent:
                 args = item.get("training", {}).get("operator_args") if isinstance(item, Mapping) and isinstance(item.get("training"), Mapping) else None
             if isinstance(args, Mapping) and isinstance(args.get("block_ids"), list):
                 selected.update(str(value) for value in args["block_ids"])
+            if isinstance(args, Mapping) and isinstance(args.get("steps"), list):
+                for step in args["steps"]:
+                    if isinstance(step, Mapping) and isinstance(step.get("args"), Mapping) and isinstance(step["args"].get("block_ids"), list):
+                        selected.update(str(value) for value in step["args"]["block_ids"])
         return selected
 
     def _explore_retention_ratio(self, history: Sequence[Mapping[str, Any]]) -> float:

@@ -7,6 +7,7 @@ from harness4h3.evolution.agent import AlgorithmAgent
 from harness4h3.evolution.agent import build_algorithm_provider
 from harness4h3.evolution.policy import SearchPolicy
 from harness4h3.evolution.skill_hub import SkillHub
+from harness4h3.memory.design_gene import DesignGene
 from harness4h3.memory.experience import ExperienceRecord
 
 
@@ -39,6 +40,33 @@ def test_skill_hub_filters_by_architecture_and_operator_family(tmp_path):
     matches = hub.search(architecture="wan", operator="prune_blocks", limit=5)
     assert len(matches) == 1
     assert matches[0]["architecture"] == "wan"
+
+
+def test_skill_hub_retrieves_design_genes_without_dropping_status(tmp_path):
+    hub = SkillHub(tmp_path / "experience.jsonl", tmp_path / "genes.jsonl")
+    hub.record(
+        DesignGene(
+            gene_id="G-R0001",
+            status="rejected",
+            state={"architecture": "wan"},
+            bottleneck={"kind": "latency"},
+            intervention={"operator": "compose"},
+            controlled_conditions={"manifest": "dev"},
+            benefit={"latency_s": None},
+            remaining_limitation={"reason": "quality_floor_failed"},
+            risks_lessons=["reduce aggressiveness after quality failure"],
+            evidence={"round_id": "R0001"},
+            confidence="partial",
+            created_at="2026-10-14T00:00:00+00:00",
+        )
+    )
+
+    matches = hub.search(architecture="wan")
+
+    assert len(matches) == 1
+    assert matches[0]["memory_kind"] == "design_gene"
+    assert matches[0]["status"] == "rejected"
+    assert matches[0]["training"]["design_strategy"] == "compose"
 
 
 def test_search_policy_uses_seeded_explore_ratio():
@@ -85,6 +113,37 @@ def test_memory_feedback_changes_deterministic_selection_logic():
     assert "block.1" in without_memory.source
     assert "block.0" in with_memory.source
     assert without_memory.source != with_memory.source
+
+
+def test_selection_history_excludes_blocks_used_inside_composite_plans():
+    profile = {
+        "block_sensitivity": [
+            {"block_id": "block.0", "importance_score": 0.1},
+            {"block_id": "block.1", "importance_score": 0.2},
+            {"block_id": "block.2", "importance_score": 0.3},
+        ]
+    }
+    candidate = AlgorithmAgent().generate(
+        "A0002",
+        parent_id="M0000",
+        profile=profile,
+        history=[
+            {
+                "decision": {
+                    "operator_args": {
+                        "steps": [
+                            {"operator": "prune_blocks", "args": {"block_ids": ["block.0"]}},
+                            {"operator": "prune_ffn_channels", "args": {"block_ids": ["block.1"]}},
+                        ]
+                    }
+                }
+            }
+        ],
+    )
+
+    assert "block.0" not in candidate.source
+    assert "block.1" not in candidate.source
+    assert "block.2" in candidate.source
 
 
 def test_memory_feedback_tightens_ffn_exploration_after_size_miss():

@@ -147,6 +147,53 @@ def test_algorithm_lineage_advances_after_rejected_model(tmp_path):
     assert loop.algorithm_store.get("A0002").parent_algorithm_id == "A0001"
 
 
+def test_design_feedback_changes_next_algorithm_and_persists_gene(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=5, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    calls = {"count": 0}
+
+    def evaluator(child, profile):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {
+                "quality_score": 0.50,
+                "baseline_quality_score": 1.0,
+                "baseline_hardware_metrics": {"latency_s": 1.0, "peak_memory_gb": 1.0, "model_size_gb": 1.0},
+                "hardware_metrics": {"latency_s": 0.40, "peak_memory_gb": 0.40, "model_size_gb": 0.40},
+                "valid": True,
+            }
+        return {
+            "quality_score": 1.0,
+            "baseline_quality_score": 1.0,
+            "baseline_hardware_metrics": {"latency_s": 1.0, "peak_memory_gb": 1.0, "model_size_gb": 1.0},
+            "hardware_metrics": {"latency_s": 0.90, "peak_memory_gb": 0.90, "model_size_gb": 0.90},
+            "valid": True,
+        }
+
+    loop = EvolutionLoop(
+        adapter=adapter,
+        parent=parent,
+        output_root=tmp_path / "run",
+        evaluator=evaluator,
+        search_policy=SearchPolicy(exploit_ratio=0.0, seed=0),
+    )
+
+    first = loop.run_round()
+    second = loop.run_round()
+
+    assert first.status == "rejected"
+    assert second.status == "promoted"
+    assert loop.model_store.active_id == second.child_model_id
+    first_design = json.loads((tmp_path / "run" / "rounds" / first.round_id / "design.json").read_text())
+    second_design = json.loads((tmp_path / "run" / "rounds" / second.round_id / "design.json").read_text())
+    assert first_design["fingerprint"] != second_design["fingerprint"]
+    assert first_design["strategy"] == "composed"
+    assert second_design["strategy"] == "prune_blocks"
+    genes = (tmp_path / "run" / "design-genes.jsonl").read_text().splitlines()
+    assert len(genes) == 2
+    assert "quality_floor_failed" in genes[0]
+
+
 def test_incomplete_round_reuses_persisted_compression_after_process_crash(tmp_path):
     adapter = FakeWanDiTAdapter(block_count=5, hidden_size=8, ffn_width=16)
     parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")

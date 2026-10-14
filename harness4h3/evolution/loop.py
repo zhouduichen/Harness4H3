@@ -12,11 +12,13 @@ from ..adapters.wan.contracts import CheckpointArtifact, CompressionResult, Mode
 from ..archive.model_candidate import ModelCandidate
 from ..archive.model_store import ModelStore
 from ..h3.state import ModelState
+from ..memory.design_gene import DesignGene
 from ..memory.experience import ExperienceRecord, ExperienceStore
 from ..profiler import ProfileReport, profile_model
 from ..sandbox.runner import AlgorithmSandbox, CompressionPlan as SandboxCompressionPlan, SandboxResult
 from .agent import AlgorithmAgent
 from .candidate import AlgorithmCandidate
+from .design import build_design_record
 from .evaluator import PromotionPolicy
 from .policy import SearchPolicy
 from .skill_hub import SkillHub
@@ -178,6 +180,20 @@ class EvolutionLoop:
         if sandbox_result.status != "success" or sandbox_result.plan is None:
             return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "sandbox", sandbox_result.failure_type or "sandbox_failed", sandbox_result.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path)})
 
+        design_path = round_dir / "design.json"
+        design = self._read_json(design_path) if design_path.exists() else {}
+        if not design:
+            design = build_design_record(
+                algorithm_id=algorithm.algorithm_id,
+                parent_algorithm_id=algorithm.parent_algorithm_id,
+                search_choice=search_choice,
+                profile=profile.to_dict(),
+                history=agent_history,
+                plan=sandbox_result.plan.to_dict(),
+                hypothesis=algorithm.hypothesis,
+            )
+            _write_json(design_path, design)
+
         compression_dir = round_dir / "checkpoint"
         compression_path = round_dir / "compression.json"
         compression = self._load_compression(compression_path)
@@ -239,6 +255,9 @@ class EvolutionLoop:
             "algorithm_id": algorithm.algorithm_id,
             "operator": sandbox_result.plan.operator,
             "operator_args": dict(sandbox_result.plan.args),
+            "algorithm_plan": sandbox_result.plan.to_dict(),
+            "design": design,
+            "design_fingerprint": design.get("fingerprint"),
             "feasible": feasible,
             "evaluation_offline": evaluation_offline,
             "offline_mismatch": offline_mismatch,
@@ -259,12 +278,12 @@ class EvolutionLoop:
             decision_path=decision_path,
         )
         status = "accepted" if feasible else "rejected"
-        self._record_experience(round_id, parent_candidate, child_candidate, algorithm, evaluation, decision, status, decision_path)
+        self._record_experience(round_id, parent_candidate, child_candidate, algorithm, evaluation, decision, status, decision_path, design=design)
         self.algorithm_store.update(replace(algorithm, status=status, experiment_ids=(round_id,)))
         if feasible:
             self._update_pareto_front(child_candidate.id, evaluation)
             self.model_store.set_active(child_candidate.id)
-        return EvolutionRound(round_id, parent_candidate.id, algorithm.algorithm_id, decision_status, child_candidate.id, decision, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "compression": str(compression_path), "evaluation": str(evaluation_path), "decision": str(decision_path)})
+        return EvolutionRound(round_id, parent_candidate.id, algorithm.algorithm_id, decision_status, child_candidate.id, decision, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "design": str(design_path), "compression": str(compression_path), "evaluation": str(evaluation_path), "decision": str(decision_path)})
 
     def _finish_failure(self, round_id: str, round_dir: Path, parent: ModelCandidate, algorithm: AlgorithmCandidate, search_choice: str, stage: str, failure_type: str, message: str, paths: Mapping[str, str], *, algorithm_persisted: bool = True) -> EvolutionRound:
         self._update_search_policy(feasible=False, improved=False, failure_type=failure_type)
@@ -314,8 +333,36 @@ class EvolutionLoop:
         self.model_store.create(child)
         return child
 
-    def _record_experience(self, round_id: str, parent: ModelCandidate, child: Optional[ModelCandidate], algorithm: AlgorithmCandidate, evaluation: Optional[Mapping[str, Any]], decision: Mapping[str, Any], status: str, decision_path: Path) -> None:
+    def _record_experience(
+        self,
+        round_id: str,
+        parent: ModelCandidate,
+        child: Optional[ModelCandidate],
+        algorithm: AlgorithmCandidate,
+        evaluation: Optional[Mapping[str, Any]],
+        decision: Mapping[str, Any],
+        status: str,
+        decision_path: Path,
+        *,
+        design: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         source = decision_path.read_bytes()
+        training = {
+            "architecture": parent.state.architecture_name,
+            "algorithm_id": algorithm.algorithm_id,
+            "algorithm_parent_id": algorithm.parent_algorithm_id,
+            "hypothesis": algorithm.hypothesis,
+            "predicted_gain": dict(algorithm.metadata.get("predicted_gain") or {}),
+        }
+        if design:
+            training.update(
+                {
+                    "design_fingerprint": design.get("fingerprint"),
+                    "design_strategy": design.get("strategy"),
+                    "design_feedback": list(design.get("feedback") or []),
+                    "design": dict(design),
+                }
+            )
         record = ExperienceRecord(
             experience_id=round_id,
             source_uri=str(decision_path.resolve()),
@@ -326,7 +373,7 @@ class EvolutionLoop:
             child_model_id=child.id if child else None,
             operator=str(decision.get("operator")) if decision.get("operator") else None,
             operator_args=dict(decision.get("operator_args") or {}),
-            training={"architecture": parent.state.architecture_name, "algorithm_id": algorithm.algorithm_id, "algorithm_parent_id": algorithm.parent_algorithm_id, "hypothesis": algorithm.hypothesis, "predicted_gain": dict(algorithm.metadata.get("predicted_gain") or {})},
+            training=training,
             evaluation=dict(evaluation) if evaluation is not None else None,
             decision=dict(decision),
             reward=float(evaluation.get("search_score", evaluation.get("quality_score", 0.0))) if evaluation else None,
@@ -335,6 +382,75 @@ class EvolutionLoop:
             created_at="",
         )
         self.experience_store.append(record)
+        if design:
+            self._record_design_gene(round_id, parent, child, evaluation, decision, status, decision_path, design)
+
+    def _record_design_gene(
+        self,
+        round_id: str,
+        parent: ModelCandidate,
+        child: Optional[ModelCandidate],
+        evaluation: Optional[Mapping[str, Any]],
+        decision: Mapping[str, Any],
+        status: str,
+        decision_path: Path,
+        design: Mapping[str, Any],
+    ) -> None:
+        genes = self.skill_hub.genes
+        if genes is None:
+            return
+        gene_id = "G-" + str(round_id)
+        if any(item.gene_id == gene_id for item in genes.read()):
+            return
+        measured = dict(evaluation or {})
+        benefit = {
+            key: measured[key]
+            for key in ("quality_score", "search_score", "hardware_metrics", "quality_metrics")
+            if key in measured
+        }
+        promotion = decision.get("promotion")
+        reasons = list(promotion.get("reasons") or []) if isinstance(promotion, Mapping) else []
+        if not reasons and decision.get("failure_type"):
+            reasons.append(str(decision["failure_type"]))
+        first_reason = str(reasons[0]) if reasons else None
+        plan = dict(design.get("plan") or {})
+        gene = DesignGene(
+            gene_id=gene_id,
+            status=status,
+            state={
+                "architecture": parent.state.architecture_name,
+                "parent_model_id": parent.id,
+                "offline_simulation": bool(parent.state.provenance.get("offline_simulation", False)),
+            },
+            bottleneck={
+                "kind": design.get("bottleneck", "unknown"),
+                "evidence_refs": list(design.get("evidence_refs") or []),
+            },
+            intervention={
+                "operator": plan.get("operator"),
+                "steps": list((plan.get("args") or {}).get("steps") or []),
+                "strategy": design.get("strategy"),
+            },
+            controlled_conditions={
+                "search_choice": design.get("search_choice"),
+                "evaluation_status": measured.get("evaluation_status"),
+                "source_revision": measured.get("source_revision"),
+            },
+            benefit=benefit,
+            remaining_limitation={"reason": first_reason, "reasons": reasons},
+            risks_lessons=[str(item) for item in list(design.get("feedback") or []) + reasons],
+            evidence={
+                "architecture": parent.state.architecture_name,
+                "round_id": round_id,
+                "decision_path": str(decision_path),
+                "design_fingerprint": design.get("fingerprint"),
+                "parent_model_id": parent.id,
+                "child_model_id": child.id if child else None,
+            },
+            confidence="measured" if measured.get("valid") is True else "partial",
+            created_at="",
+        )
+        genes.append(gene)
 
     def _artifact_for_candidate(self, candidate: ModelCandidate) -> CheckpointArtifact:
         model = self.adapter.load_model(candidate.checkpoint_path)
