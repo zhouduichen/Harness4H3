@@ -250,6 +250,8 @@ def test_provider_prompt_documents_composite_plan(monkeypatch):
 
     assert "compose" in payloads[0]
     assert "steps" in payloads[0]
+    assert "one flat" in payloads[0]
+    assert "Never emit nested lists" in payloads[0]
 
 
 def test_provider_agent_receives_compact_pareto_front():
