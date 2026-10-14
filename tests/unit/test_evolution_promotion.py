@@ -177,6 +177,20 @@ def test_promotion_uses_active_parent_before_initial_baseline():
     assert "quality_floor_failed" in decision["reasons"]
 
 
+def test_novel_composite_design_does_not_bypass_quality_gate():
+    evidence = _evidence(quality=0.97)
+    evidence["design_fingerprint"] = "new-composite-design"
+    evidence["algorithm_plan"] = {
+        "operator": "compose",
+        "args": {"steps": [{"operator": "prune_blocks", "args": {"block_ids": ["block.0"]}}]},
+    }
+
+    decision = PromotionPolicy().decide(parent={}, evaluation=evidence, child_integrity=True)
+
+    assert decision["accepted"] is False
+    assert "quality_floor_failed" in decision["reasons"]
+
+
 def test_search_policy_records_high_cost_low_gain_feedback():
     policy = SearchPolicy()
     policy.update(feasible=False, improved=False, failure_type="model_size_improvement_below_threshold")

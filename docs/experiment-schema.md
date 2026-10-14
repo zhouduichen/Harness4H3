@@ -30,3 +30,19 @@ the Transformer-only parameter count, while `transformer_model_size_gb` and
 `pipeline_model_size_gb` keep target and complete-pipeline volume separate.
 The default `structural_proxy` quality scope is an engineering signal, not
 semantic video-quality evidence.
+
+## Recursive compression design memory
+
+Wan compression rounds may additionally write `rounds/Rxxxx/design.json` and
+one `DesignGene` to `design-genes.jsonl`. A design record contains the
+algorithm and parent IDs, `search_choice`, `bottleneck`, `evidence_refs`,
+retrieved history IDs, explicit failure feedback, the bounded `plan`, and a
+stable `fingerprint`. A `compose` plan has two or three ordered base-operator
+steps; nested composition is invalid.
+
+`DesignGene.benefit` is populated only from the actual evaluation record,
+while `remaining_limitation` and `risks_lessons` retain rejection reasons and
+previous feedback. `confidence=partial` is used when real measurements are
+missing or the result is offline. Design genes are retrieved with an explicit
+`memory_kind=design_gene`; rejected genes remain retrievable negative evidence
+and must not be treated as successful model or algorithm promotions.

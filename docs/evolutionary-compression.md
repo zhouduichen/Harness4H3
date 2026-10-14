@@ -147,6 +147,25 @@ HARNESS4H3_SOURCE_REVISION=$(git rev-parse HEAD) \\
 改善低于 10%，下一轮探索会自动收紧该比例，形成可审计的算法设计反馈，而不是
 只重新选择一个 Block。
 
+## RSI 算法设计记录
+
+当前探索 Agent 不只返回一个固定操作。若 profile 同时提供层级敏感度和计算开销，
+它可以生成最多 3 步的受限 `compose` 计划，例如先移除低敏感度的高开销 Block，再
+对另一个瓶颈 Block 做 FFN 通道裁剪。计划中的每一步仍只能调用注册的
+`prune_blocks` 或 `prune_ffn_channels`，不能嵌套 `compose`，也不能指定路径、设备、
+命令或 evaluator。
+
+通过 Sandbox 的计划会在 `rounds/Rxxxx/design.json` 写入稳定的算法 fingerprint、
+诊断出的瓶颈、使用的 profile 字段、历史经验 ID、失败反馈、算法假设和最终计划。
+组合计划的每一步分别写入 `checkpoint/step-00/`、`step-01/` 等目录；只有最后一步
+通过完整性和独立评测，整个 Child 才能进入晋升判断。
+
+完成评测后，系统将实际质量/硬件收益和拒绝原因写入 `DesignGeneStore`。预测收益只
+保留在算法候选 metadata 中，不能写入 DesignGene 的实测 benefit。质量失败会让后续
+确定性 Agent 退回保守单 Block 计划；效率或体积不足则允许继续探索组合策略。因而
+CPU fake 测试可以验证“反馈改变算法结构”和 artifact 可重放，但不能证明 Wan2.1
+真实视频质量或硬件收益。
+
 ## 对比实验协议
 
 要验证“算法演化”本身的收益，使用同一 checkpoint、manifest、seed、预算
