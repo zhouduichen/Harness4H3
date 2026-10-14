@@ -291,6 +291,48 @@ def test_provider_agent_receives_compact_pareto_front():
     ]
 
 
+def test_provider_agent_compacts_full_memory_artifacts():
+    payloads = []
+
+    def provider(payload):
+        payloads.append(payload)
+        return {
+            "source": "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n",
+            "hypothesis": "use compact evidence",
+            "parent_id": "M0000",
+        }
+
+    large_memory_item = {
+        "experience_id": "R0001",
+        "memory_kind": "experience",
+        "architecture": "wan",
+        "operator": "prune_ffn_channels",
+        "status": "rejected",
+        "training": {"hypothesis": "x" * 1000, "design": {"plan": {"steps": ["x"]}}},
+        "evaluation": {
+            "quality_score": 0.6,
+            "quality_metrics": {"semantic": 0.5, "temporal": 0.9, "motion": 0.3},
+            "hardware_metrics": {"latency_s": 1.0, "peak_memory_gb": 2.0, "model_size_gb": 3.0},
+            "cases": [{"video_path": "/tmp/video.mp4", "quality": {"semantic": 0.5}}] * 16,
+        },
+        "decision": {"promotion": {"accepted": False, "reasons": ["quality_floor_failed"]}},
+    }
+    AlgorithmAgent(provider=provider).generate(
+        "A0002",
+        parent_id="M0000",
+        profile={},
+        history=[large_memory_item],
+        skills=[large_memory_item],
+    )
+
+    payload = payloads[0]
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "cases" not in serialized
+    assert "video_path" not in serialized
+    assert len(serialized) < 10000
+    assert payload["history"][0]["evaluation"]["hardware_metrics"]["model_size_gb"] == 3.0
+
+
 def test_provider_agent_rejects_parent_override():
     agent = AlgorithmAgent(provider=lambda payload: {"source": "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n", "parent_id": "M9999"})
     try:

@@ -127,8 +127,8 @@ class AlgorithmAgent:
             )
         payload = {
             "profile": _compact_profile(profile),
-            "history": [dict(item) for item in history],
-            "skills": [dict(item) for item in skills],
+            "history": _compact_context_items(history),
+            "skills": _compact_context_items(skills),
             "pareto_front": _compact_pareto_front(pareto_front),
             "parent_id": parent_id,
             "search_policy": {"choice": search_choice},
@@ -313,6 +313,98 @@ def _compact_pareto_front(front: Sequence[Mapping[str, Any]]) -> list[dict[str, 
             }
         compact.append(record)
     return compact
+
+
+def _compact_memory_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep retrieved evidence small enough for a bounded controller prompt."""
+
+    compact: dict[str, Any] = {}
+    for field in ("experience_id", "memory_kind", "architecture", "operator", "status", "reward", "failure_reason"):
+        if field in item:
+            value = item[field]
+            compact[field] = value[:240] if isinstance(value, str) else value
+
+    def compact_args(value: Any) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            return {}
+        result: dict[str, Any] = {}
+        for field in ("block_ids", "retained_indices"):
+            values = value.get(field)
+            if isinstance(values, list):
+                result[field] = list(values[:64])
+        return result
+
+    training = item.get("training")
+    if isinstance(training, Mapping):
+        summary = {}
+        for field in ("architecture", "operator", "algorithm_id", "algorithm_parent_id", "hypothesis", "design_strategy", "design_fingerprint", "predicted_gain"):
+            if field in training:
+                value = training[field]
+                summary[field] = value[:240] if isinstance(value, str) else value
+        args = compact_args(training.get("operator_args"))
+        if args:
+            summary["operator_args"] = args
+        if summary:
+            compact["training"] = summary
+
+    evaluation = item.get("evaluation")
+    if isinstance(evaluation, Mapping):
+        summary = {}
+        for field in ("quality_score", "search_score", "evaluation_status", "valid", "feasible", "source_revision"):
+            if field in evaluation:
+                summary[field] = evaluation[field]
+        quality = evaluation.get("quality_metrics")
+        if isinstance(quality, Mapping):
+            summary["quality_metrics"] = {field: quality[field] for field in ("semantic", "temporal", "motion", "score_type") if field in quality}
+        hardware = evaluation.get("hardware_metrics")
+        if isinstance(hardware, Mapping):
+            summary["hardware_metrics"] = {
+                field: hardware[field]
+                for field in ("latency_s", "inference_wall_time_s_mean", "peak_memory_gb", "model_size_gb", "parameter_count")
+                if field in hardware
+            }
+        if summary:
+            compact["evaluation"] = summary
+
+    decision = item.get("decision")
+    if isinstance(decision, Mapping):
+        summary = {field: decision[field] for field in ("status", "failure_type", "stage") if field in decision}
+        args = compact_args(decision.get("operator_args"))
+        if args:
+            summary["operator_args"] = args
+        promotion = decision.get("promotion")
+        if isinstance(promotion, Mapping):
+            summary["promotion"] = {
+                field: promotion[field]
+                for field in ("accepted", "improvements", "objective_passes", "objective_failures", "missing_metrics", "reasons")
+                if field in promotion
+            }
+        if summary:
+            compact["decision"] = summary
+
+    provenance = item.get("provenance")
+    if isinstance(provenance, Mapping):
+        compact["provenance"] = {field: provenance[field] for field in ("architecture", "offline_simulation") if field in provenance}
+    return compact
+
+
+def _compact_context_items(items: Sequence[Mapping[str, Any]], *, limit: int = 12) -> list[dict[str, Any]]:
+    """Deduplicate and compact Memory items without changing stored evidence."""
+
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        key = (str(item.get("memory_kind", "")), str(item.get("experience_id", "")))
+        if key != ("", "") and key in seen:
+            continue
+        if key != ("", ""):
+            seen.add(key)
+        result.append(_compact_memory_item(item))
+        if len(result) >= limit:
+            break
+    return result
 
 
 def build_algorithm_provider(
