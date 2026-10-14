@@ -68,6 +68,20 @@ def _write_run(
     )
 
 
+def _write_manifest(root, arm, *, fingerprint="protocol-a"):
+    (root / "run-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "protocol_fingerprint": fingerprint,
+                "arm_name": arm,
+                "budget": {"rounds": 3, "expected_cases": 16, "latency_repeats": 3},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_compare_preserves_missing_active_metrics_and_sums_cost(tmp_path):
     _write_run(tmp_path / "fixed")
     result = compare_runs(["fixed=%s" % (tmp_path / "fixed")], expected_cases=2)
@@ -156,3 +170,42 @@ def test_compare_rejects_missing_or_mismatched_source_revision(tmp_path):
     result = compare_runs(["a=%s" % (tmp_path / "a"), "b=%s" % (tmp_path / "b")])
     assert result["protocol_comparable"] is False
     assert "source_revision differs across runs" in result["warnings"]
+
+
+def test_compare_accepts_only_a_complete_consistent_four_arm_protocol(tmp_path):
+    arms = ("fixed", "coding-agent", "agent-memory", "rsi")
+    specs = []
+    for arm in arms:
+        root = tmp_path / arm
+        _write_active(root, metrics={"quality_score": 1.0, "hardware_metrics": {"model_size_gb": 8.0, "case_count": 16}})
+        _write_run(root, status="promoted", case_count=16)
+        _write_manifest(root, arm)
+        specs.append("%s=%s" % (arm, root))
+    result = compare_runs(specs, expected_cases=16)
+    assert result["protocol_comparable"] is True
+    assert not result["warnings"]
+
+
+def test_compare_rejects_protocol_fingerprint_drift_even_with_metrics(tmp_path):
+    arms = ("fixed", "coding-agent", "agent-memory", "rsi")
+    specs = []
+    for index, arm in enumerate(arms):
+        root = tmp_path / arm
+        _write_active(root, metrics={"quality_score": 1.0, "hardware_metrics": {"model_size_gb": 8.0, "case_count": 16}})
+        _write_run(root, status="promoted", case_count=16)
+        _write_manifest(root, arm, fingerprint="protocol-a" if index < 3 else "protocol-b")
+        specs.append("%s=%s" % (arm, root))
+    result = compare_runs(specs, expected_cases=16)
+    assert result["protocol_comparable"] is False
+    assert "protocol_fingerprint differs across runs" in result["warnings"]
+
+
+def test_compare_rejects_incomplete_protocol_manifest(tmp_path):
+    root = tmp_path / "run"
+    _write_active(root, metrics={"quality_score": 1.0, "hardware_metrics": {"model_size_gb": 8.0, "case_count": 16}})
+    _write_run(root, status="promoted", case_count=16)
+    (root / "run-manifest.json").write_text(json.dumps({"protocol_fingerprint": "protocol-a"}), encoding="utf-8")
+    result = compare_runs(["run=%s" % root], expected_cases=16)
+    assert result["protocol_comparable"] is False
+    assert "run-manifest.json missing arm_name" in result["warnings"]
+    assert "run-manifest.json missing budget" in result["warnings"]

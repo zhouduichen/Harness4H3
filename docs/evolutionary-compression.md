@@ -166,15 +166,38 @@ HARNESS4H3_SOURCE_REVISION=$(git rev-parse HEAD) \\
 CPU fake 测试可以验证“反馈改变算法结构”和 artifact 可重放，但不能证明 Wan2.1
 真实视频质量或硬件收益。
 
+## 四组协议预检
+
+正式启动前，先用协议预检工具把四份配置锁成同一组可比条件。工具不会加载 Wan
+模型或执行 GPU 推理；它会检查 checkpoint、Wan 配置、评价 manifest、dtype、设备、
+seed、`8 × 2 = 16` 个评价单元、三次延迟测量和三轮预算，并要求四个控制臂分别命名为
+`fixed`、`coding-agent`、`agent-memory`、`rsi`：
+
+```bash
+.venv/bin/python tools/validate_evolution_protocol.py \
+  --run fixed=configs/rsi-fixed.yaml \
+  --run coding-agent=configs/rsi-coding.yaml \
+  --run agent-memory=configs/rsi-memory.yaml \
+  --run rsi=configs/rsi-full.yaml \
+  --rounds 3 --expected-cases 16 --latency-repeats 3 \
+  --source-revision "$(git rev-parse HEAD)" \
+  --write-manifests --output var/rsi/protocol.json --json
+```
+
+成功后每个 `output_root/run-manifest.json` 都会保存协议指纹、臂名称、代码 revision、
+评价资产摘要、预算和控制变量。远程资产在本机不可见时，预检必须在实际运行主机上执行；
+`--allow-missing-assets` 只适合生成待补齐的远程预检记录，不能把缺失资产当成已经完成的
+实验。四组清单缺失、指纹不一致或臂名称不完整时，汇总器会将结果标为不可直接比较。
+
 ## 对比实验协议
 
 要验证“算法演化”本身的收益，使用同一 checkpoint、manifest、seed、预算
 和输出指标，分别建立四个独立 `output_root`：
 
-1. `fixed-algorithm`：deterministic agent，`exploit_ratio: 1.0`，关闭策略更新；
+1. `fixed`：deterministic agent，`exploit_ratio: 1.0`，关闭策略更新；
 2. `coding-agent`：只接入结构化 provider，不传入历史经验；
 3. `agent-memory`：接入 SkillHub/ExperienceStore，但固定搜索策略；
-4. `algorithm-evolution`：当前默认路径，算法 provider、经验检索和
+4. `rsi`：当前默认路径，算法 provider、经验检索和
    exploit/explore 策略都启用。
 
 对应配置开关是 `memory_enabled` 和 `adapt_search_policy`；前三个 baseline
@@ -200,16 +223,17 @@ prompt/新 seed manifest 上的迁移结果。汇总器还会分别记录
 ```bash
 .venv/bin/python tools/compare_evolution_runs.py --json \
   --expected-cases 16 \
-  --run fixed-algorithm=var/rsi/fixed-algorithm \
+  --run fixed=var/rsi/fixed \
   --run coding-agent=var/rsi/coding-agent \
   --run agent-memory=var/rsi/agent-memory \
-  --run algorithm-evolution=var/rsi/algorithm-evolution
+  --run rsi=var/rsi/rsi
 ```
 
 汇总器不会把缺失指标填成零，也不会把被拒绝候选当作 active model；历史最佳候选
 和最后候选只用于候选实验记录。Active 指针读取 `models/active.json` 的 `id` 字段；
 不同 `evaluator_recipe_sha256`、代码 revision 或 case 数量不一致时，结果会标记为
-不可直接比较。当前 Active 没有可靠指标时，汇总器会明确报告数据缺失。
+不可直接比较。它还会检查四组 `run-manifest.json` 的协议指纹、唯一臂名称和预算；
+当前 Active 没有可靠指标时，汇总器会明确报告数据缺失。
 
 当前仓库先完成 Wan2.1-1.3B 的真实闭环；H3 迁移只依赖同一组
 `WanModelAdapter`/`CompressionOperator`/`EvaluationFn` 边界，待 Wan 的

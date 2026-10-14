@@ -31,6 +31,22 @@ the Transformer-only parameter count, while `transformer_model_size_gb` and
 The default `structural_proxy` quality scope is an engineering signal, not
 semantic video-quality evidence.
 
+## Matched Wan protocol manifest
+
+Before a four-arm Wan comparison, `tools/validate_evolution_protocol.py` can
+write `run-manifest.json` under each run's `output_root`. The manifest records
+`protocol_fingerprint`, `arm_name`, source revision, checkpoint/evaluation
+asset summaries, common evaluation settings, the round/case/repeat budget, and
+the arm controls (`memory_enabled`, `adapt_search_policy`, provider/model, and
+`exploit_ratio`). The four canonical arm names are `fixed`, `coding-agent`,
+`agent-memory`, and `rsi`.
+
+`tools/compare_evolution_runs.py` treats missing manifests, changed
+fingerprints, duplicate arms, or inconsistent budgets as protocol warnings.
+Such runs are not reported as directly comparable, even if their individual
+evaluation files look complete. A manifest is evidence of configuration
+consistency only; it is not a GPU result and does not promote a model.
+
 ## Recursive compression design memory
 
 Wan compression rounds may additionally write `rounds/Rxxxx/design.json` and

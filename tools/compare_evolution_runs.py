@@ -14,6 +14,8 @@ import math
 from pathlib import Path
 from typing import Any, Mapping
 
+from harness4h3.evolution.protocol import REQUIRED_ARMS
+
 
 def _number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -40,6 +42,12 @@ def _read_json(path: Path) -> Mapping[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return value if isinstance(value, Mapping) else None
+
+
+def _run_manifest(root: Path) -> Mapping[str, Any] | None:
+    """Read the preflight manifest without inferring one from run artifacts."""
+
+    return _read_json(root / "run-manifest.json")
 
 
 def _metric(evaluation: Mapping[str, Any], name: str) -> float | None:
@@ -152,6 +160,7 @@ def _candidate_rank(record: Mapping[str, Any]) -> tuple[float, float, float, str
 
 
 def summarize_run(name: str, root: Path) -> dict[str, Any]:
+    manifest = _run_manifest(root)
     rounds: list[Mapping[str, Any]] = []
     evaluations: list[Mapping[str, Any]] = []
     candidate_records: list[Mapping[str, Any]] = []
@@ -260,6 +269,10 @@ def summarize_run(name: str, root: Path) -> dict[str, Any]:
     return {
         "name": name,
         "root": str(root),
+        "protocol_manifest_present": manifest is not None,
+        "protocol_fingerprint": manifest.get("protocol_fingerprint") if manifest else None,
+        "protocol_arm_name": manifest.get("arm_name") if manifest else None,
+        "protocol_budget": dict(manifest.get("budget")) if manifest and isinstance(manifest.get("budget"), Mapping) else None,
         "round_count": len(rounds),
         "experiment_count": len(evaluations),
         "failure_count": failure_count,
@@ -315,6 +328,37 @@ def compare_runs(specs: list[str], *, expected_cases: int | None = None) -> dict
         for digest in item["evaluator_recipe_sha256"]
     }
     warnings: list[str] = []
+    missing_manifests = [item["name"] for item in summaries if not item["protocol_manifest_present"]]
+    if missing_manifests:
+        warnings.append("run-manifest.json missing for: " + ", ".join(missing_manifests))
+    manifests = [item for item in summaries if item["protocol_manifest_present"]]
+    fingerprints = {item["protocol_fingerprint"] for item in manifests if item["protocol_fingerprint"]}
+    if manifests and any(not item["protocol_fingerprint"] for item in manifests):
+        warnings.append("run-manifest.json missing protocol_fingerprint")
+    if manifests and any(not item["protocol_arm_name"] for item in manifests):
+        warnings.append("run-manifest.json missing arm_name")
+    if manifests and any(item["protocol_budget"] is None for item in manifests):
+        warnings.append("run-manifest.json missing budget")
+    if len(fingerprints) > 1:
+        warnings.append("protocol_fingerprint differs across runs")
+    if len(summaries) == len(REQUIRED_ARMS):
+        arm_names = [item["protocol_arm_name"] for item in summaries]
+        if set(arm_names) != set(REQUIRED_ARMS) or len(set(arm_names)) != len(REQUIRED_ARMS):
+            warnings.append("four-arm comparison requires unique arms: " + ", ".join(REQUIRED_ARMS))
+        if len(manifests) != len(REQUIRED_ARMS):
+            warnings.append("four-arm comparison requires a run-manifest.json for every arm")
+    budgets = {
+        json.dumps(item["protocol_budget"], sort_keys=True)
+        for item in manifests
+        if item["protocol_budget"] is not None
+    }
+    if len(budgets) > 1:
+        warnings.append("protocol budget differs across runs")
+    if expected_cases is not None:
+        for item in manifests:
+            budget = item["protocol_budget"]
+            if isinstance(budget, Mapping) and budget.get("expected_cases") not in {None, expected_cases}:
+                warnings.append("%s protocol expected_cases=%s, expected %s" % (item["name"], budget.get("expected_cases"), expected_cases))
     if len(recipes) > 1:
         warnings.append("evaluator_recipe_sha256 differs across runs")
     revisions = {
