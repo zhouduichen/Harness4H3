@@ -16,6 +16,17 @@ def test_sandbox_accepts_bounded_plan(tmp_path):
     assert result.metadata["runtime_audit"] == "deny-file-network-process-dynamic-code"
 
 
+def test_sandbox_allows_safe_iteration_helpers(tmp_path):
+    source = """def propose(profile, history):
+    selected = next(item for item in profile['items'] if item['enabled'])
+    return {'operator': 'prune_blocks', 'args': {'block_ids': [selected['block_id']]}}
+"""
+    result = AlgorithmSandbox(tmp_path).run(source, {"items": [{"block_id": "block.1", "enabled": True}]}, [])
+    assert result.status == "success"
+    assert result.plan is not None
+    assert result.plan.args["block_ids"] == ["block.1"]
+
+
 def test_sandbox_normalizes_persisted_operator_args_alias(tmp_path):
     source = "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'operator_args': {'block_ids': ['block.1']}}\n"
     result = AlgorithmSandbox(tmp_path).run(source, {"layers": []}, [])
