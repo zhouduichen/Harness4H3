@@ -160,6 +160,11 @@ HARNESS4H3_SOURCE_REVISION=$(git rev-parse HEAD) \\
 组合计划的每一步分别写入 `checkpoint/step-00/`、`step-01/` 等目录；只有最后一步
 通过完整性和独立评测，整个 Child 才能进入晋升判断。
 
+真实 Diffusers Wan 的可重载 checkpoint 要求剩余 Transformer Block 的 FFN 宽度保持
+对齐。组合算法先删除 Block 后，Wan operator 会依据当前 checkpoint 的 Block 数量把
+FFN 步骤规范化到所有剩余 Block；该规范化后的参数会写入结构化压缩结果，Fake adapter
+则保留其可局部裁剪的测试语义。
+
 完成评测后，系统将实际质量/硬件收益和拒绝原因写入 `DesignGeneStore`。预测收益只
 保留在算法候选 metadata 中，不能写入 DesignGene 的实测 benefit。质量失败会让后续
 确定性 Agent 退回保守单 Block 计划；效率或体积不足则允许继续探索组合策略。因而

@@ -133,6 +133,10 @@ class DiffusersWanAdapter:
     """
 
     architecture_name = "WanDiffusersDiT"
+    # Wan reloadable checkpoints require the FFN projection width to stay
+    # aligned across every remaining transformer block.  Composite plans may
+    # therefore normalize a channel step to all current positional blocks.
+    channel_pruning_requires_all_blocks = True
     _block_paths = ("transformer_blocks", "blocks", "single_blocks")
 
     def __init__(self, local_files_only: bool = True) -> None:

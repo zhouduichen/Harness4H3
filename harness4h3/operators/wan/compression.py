@@ -86,6 +86,16 @@ class CompositeCompressionOperator:
             operator_type = self._BASE_OPERATORS.get(operator_name)
             if operator_type is None or not isinstance(args, Mapping):
                 return _failed(parent, "invalid_composite_plan", "compose steps must use base operators", started)
+            if operator_name == "prune_ffn_channels" and getattr(adapter, "channel_pruning_requires_all_blocks", False):
+                # The Diffusers Wan adapter uses positional block IDs after a
+                # structural removal and requires channel widths to remain
+                # aligned across all remaining blocks.  Keep the algorithm's
+                # intent but bind this adapter-specific invariant at the
+                # trusted operator boundary.
+                args = {
+                    **dict(args),
+                    "block_ids": ["block.%d" % current_index for current_index in range(int(current.structure.block_count))],
+                }
             result = operator_type().execute(adapter, current, args, Path(output_dir) / ("step-%02d" % index))
             if result.status != "success" or result.child_checkpoint is None:
                 return CompressionResult(

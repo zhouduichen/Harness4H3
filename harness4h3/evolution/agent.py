@@ -37,14 +37,15 @@ def _seed_source(
     if search_choice == "explore" and channel_block_id is not None:
         return (
             "def propose(profile, history):\n"
-            "    # Explore seed %s: compose profile-guided block and FFN pruning.\n"
+            "    # Explore seed %s: compose profile-guided block and FFN pruning; channel evidence target=%r.\n"
             "    width = int(profile['model']['ffn_width'])\n"
             "    retained_indices = list(range(max(1, int(width * %.6f))))\n"
+            "    remaining_block_ids = [item['block_id'] for item in profile.get('layers', []) if item.get('block_id') != %r]\n"
             "    return {'operator': 'compose', 'args': {'steps': [\n"
             "        {'operator': 'prune_blocks', 'args': {'block_ids': %r}},\n"
-            "        {'operator': 'prune_ffn_channels', 'args': {'block_ids': [%r], 'retained_indices': retained_indices}},\n"
+            "        {'operator': 'prune_ffn_channels', 'args': {'block_ids': remaining_block_ids, 'retained_indices': retained_indices}},\n"
             "    ]}}\n"
-        ) % (algorithm_id, retention_ratio, [block_id], channel_block_id)
+        ) % (algorithm_id, channel_block_id, retention_ratio, block_id, [block_id])
     if search_choice == "explore":
         return (
             "def propose(profile, history):\n"
