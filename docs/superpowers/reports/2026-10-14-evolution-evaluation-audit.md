@@ -25,12 +25,19 @@
 - 测试覆盖了 Active 已晋升、未晋升、连续拒绝、缺失 baseline、单目标达标、质量不足、硬件退化、零/缺失指标、Pareto 支配和体积去重。
 - `docs/evolutionary-compression.md` 与 `docs/experiment-schema.md` 已写入新的 Evaluation Recipe 和字段定义。
 
+在本轮后续实现中又补上了 RSI 算法设计层：
+
+- Sandbox 现在允许最多 3 步、不可嵌套的 `compose` 计划；每一步仍只能调用已注册的 Block/FFN 压缩 operator。
+- 确定性 Agent 会结合层敏感度、FLOPs/延迟和 Channel profile 生成组合算法；出现质量门槛失败时会退回保守的单 Block 策略。
+- 每个可执行 round 新增 `design.json`，记录瓶颈、证据字段、历史反馈、计划和稳定 fingerprint；实际结果会生成 `DesignGene`，失败设计也会作为负面经验检索。
+- 组合计划逐步保存 `checkpoint/step-00/` 等 artifact；只有最终 Child 进入原有完整性、真实评测和 PromotionPolicy 判断，算法新颖性本身不能晋升模型。
+
 ## 验证结果
 
-- 相关统计、晋升、Wan evaluator 和 EvoCompress 集成回归：45 passed。
-- CPU 全量：`892 passed, 4 skipped`，耗时约 99.6 秒。
+- 相关统计、晋升、Wan evaluator、Sandbox、组合 operator、设计记录和 EvoCompress 集成回归：`58 passed`。
+- CPU 全量：`909 passed, 4 skipped`，耗时 `101.23 秒`。
 - 4 个 skip 均是既有环境条件：真实 Wan GPU smoke、两项 CUDA-only training 测试和 CUDA RNG parity；不是本轮失败。
-- `.venv/bin/python -m compileall -q harness4h3 h3_training research tools` 通过。
+- RSI 相关目录的 `.venv/bin/python -m compileall` 通过，`git diff --check` 通过。
 - `git diff --check` 通过。
 
 没有执行四组完整 GPU 实验，也没有修改历史实验记录。
@@ -50,11 +57,11 @@
 
 ### 1. 当前系统是否已经具备可信的自动压缩与模型晋升闭环？
 
-实现层面已经有“生成算法 → 沙箱 → 压缩 → 独立评测 → 晋升/拒绝 → 记录经验”的闭环，并且本轮修复了最终结果污染和晋升门槛错误。就当前真实实验的证据状态而言，答案仍是“尚未完全具备可信闭环”：真实四路对照记录不完整，且 Active 缺失指标时只能明确报告缺失，不能替系统补出结论。完成一轮新的、口径一致的真实评测后，才能把它称为可信的实验闭环。
+实现层面现在已经有“profile 诊断 → 设计组合算法 → 沙箱 → 逐步压缩 → 独立评测 → 晋升/拒绝 → DesignGene/ExperienceStore 反馈”的闭环，并且本轮修复了最终结果污染和晋升门槛错误。就当前真实实验的证据状态而言，答案仍是“尚未完全具备可信闭环”：目前只能证明机制可执行、可追溯，真实四路对照记录仍不完整。完成一轮口径一致的 Wan 评测后，才能把它称为经过实验验证的可信闭环。
 
 ### 2. 为什么 Agent + Memory 可能优于完整 RSI？
 
-仓库能支持的最强结论是：Memory 有明确的经验检索和失败反馈利用机制；完整 RSI 额外改变搜索策略和算法生成路径，所以两组的候选分布可能不同。仓库没有四组真实逐轮证据，无法判断优势究竟来自经验复用、探索策略、压缩位置、剪枝幅度，还是设备/recipe 差异。21.5% 延迟和 7.1% 显存改善如果复核成立，只能说明该候选在当时测量条件下硬件收益明显，不能单独证明 RSI 失去了算法设计能力。
+仓库能支持的最强结论是：Memory 现在不仅检索历史经验，还能把质量失败、效率失败和设计 fingerprint 传给下一轮；完整 RSI 额外改变搜索策略，并允许 profile 驱动的组合算法和质量失败后的保守回退。因此两组的候选分布确实可能不同。仓库仍没有四组真实逐轮证据，无法判断优势究竟来自经验复用、探索策略、压缩位置、剪枝幅度，还是设备/recipe 差异。21.5% 延迟和 7.1% 显存改善如果复核成立，只能说明该候选在当时测量条件下硬件收益明显，不能单独证明 RSI 已经获得或失去算法设计优势。
 
 ### 3. 证明“通过经验积累持续改进压缩算法”所需的最小实验是什么？
 
