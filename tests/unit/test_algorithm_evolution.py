@@ -344,6 +344,8 @@ def test_provider_agent_rejects_parent_override():
 
 
 def test_vllm_algorithm_provider_parses_structured_json_without_network(monkeypatch):
+    requests = []
+
     class Response:
         def __enter__(self):
             return self
@@ -354,11 +356,16 @@ def test_vllm_algorithm_provider_parses_structured_json_without_network(monkeypa
         def read(self):
             return json.dumps({"choices": [{"message": {"content": json.dumps({"source": "def propose(profile, history):\\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\\n", "hypothesis": "test", "parent_id": "M0000"})}}]}).encode()
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: Response())
+    def fake_urlopen(request, timeout):
+        requests.append(json.loads(request.data.decode()))
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     provider = build_algorithm_provider("vllm", "test-model", endpoint="http://127.0.0.1:8000/v1/chat/completions")
     result = provider({"parent_id": "M0000", "profile": {}, "history": [], "skills": []})
     assert result["parent_id"] == "M0000"
     assert "def propose" in result["source"]
+    assert requests[0]["max_tokens"] == 2048
 
 
 def test_vllm_provider_binds_missing_parent_to_request_context(monkeypatch):

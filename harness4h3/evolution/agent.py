@@ -487,7 +487,11 @@ def build_algorithm_provider(
                 # OpenAI json_schema extension.  The local sandbox remains
                 # the authoritative validator for the returned source.
                 "response_format": {"type": "json_object"},
-                "max_tokens": 1024,
+                # Algorithm responses contain executable source as well as
+                # the plan metadata.  1024 tokens can truncate a valid JSON
+                # response mid-string, which is an infrastructure failure
+                # rather than an invalid algorithm.
+                "max_tokens": 2048,
             }
         else:
             request_payload = {
