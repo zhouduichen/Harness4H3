@@ -124,3 +124,25 @@ def test_independent_evaluation_exposes_quality_device_override():
         ]
     )
     assert args.quality_device == "cpu"
+
+
+def test_independent_evaluation_exposes_pipeline_device_override():
+    args = build_parser().parse_args(
+        [
+            "--run",
+            "memory=/tmp/memory",
+            "--gpus",
+            "0",
+            "--manifest",
+            "/tmp/manifest.json",
+            "--wan-config",
+            "/tmp/wan.yaml",
+            "--clip-model-path",
+            "/tmp/clip",
+            "--output-root",
+            "/tmp/output",
+            "--pipeline-device",
+            "cpu",
+        ]
+    )
+    assert args.pipeline_device == "cpu"

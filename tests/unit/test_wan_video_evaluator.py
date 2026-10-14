@@ -33,7 +33,39 @@ def test_real_evaluator_defaults_quality_device_to_generation_device(tmp_path):
         tmp_path / "out",
     )
     assert config.quality_device == "cuda:3"
+    assert config.resolved_pipeline_device == "cuda:3"
     assert config.source_revision == "test-revision"
+
+
+def test_real_evaluator_allows_explicit_pipeline_device_and_binds_recipe(tmp_path):
+    (tmp_path / "wan.yaml").write_text(
+        "width: 8\nheight: 8\nnum_frames: 4\nnative_fps: 8\n"
+        "num_inference_steps: 1\nguidance_scale: 1.0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"cases": [{"case_id": "one", "caption": "test", "seeds": [7]}]}),
+        encoding="utf-8",
+    )
+    raw = {
+        "wan_config": str(tmp_path / "wan.yaml"),
+        "evaluation_manifest": str(tmp_path / "manifest.json"),
+        "clip_model_path": str(tmp_path / "clip"),
+        "device": "cuda:3",
+        "pipeline_device": "cpu",
+    }
+    explicit = WanVideoEvaluationConfig.from_mapping(raw, tmp_path / "explicit")
+    assert explicit.resolved_pipeline_device == "cpu"
+
+    raw["pipeline_device"] = None
+    inherited = WanVideoEvaluationConfig.from_mapping(raw, tmp_path / "inherited")
+    assert inherited.resolved_pipeline_device == "cuda:3"
+
+    adapter = FakeWanDiTAdapter(block_count=2, hidden_size=8, ffn_width=16)
+    baseline = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "baseline")
+    explicit_digest = WanVideoEvaluator(explicit, baseline).recipe_digest
+    inherited_digest = WanVideoEvaluator(inherited, baseline).recipe_digest
+    assert explicit_digest != inherited_digest
 
 
 def test_real_evaluator_rejects_manifest_smaller_than_requested_budget(tmp_path):
@@ -60,6 +92,121 @@ def test_real_evaluator_rejects_manifest_smaller_than_requested_budget(tmp_path)
         assert "insufficient_cases" in str(exc)
     else:
         raise AssertionError("undersized manifest was accepted for a larger budget")
+
+
+def test_real_evaluator_moves_complete_pipeline_and_keeps_transformer_in_eval_mode():
+    class Component:
+        def __init__(self):
+            self.devices = []
+            self.eval_calls = 0
+
+        def to(self, device):
+            self.devices.append(device)
+            return self
+
+        def eval(self):
+            self.eval_calls += 1
+            return self
+
+    class Pipeline:
+        def __init__(self):
+            self.transformer = Component()
+            self.vae = Component()
+            self.text_encoder = Component()
+            self.to_calls = []
+
+        def to(self, device):
+            self.to_calls.append(device)
+            return self
+
+    pipeline = Pipeline()
+    moved = WanVideoEvaluator._move_pipeline_to_device(pipeline, "cuda:2")
+    assert moved is pipeline
+    assert pipeline.to_calls == ["cuda:2"]
+    assert pipeline.transformer.eval_calls == 1
+
+    class FallbackPipeline:
+        def __init__(self):
+            self.transformer = Component()
+            self.vae = Component()
+            self.text_encoder = Component()
+
+    fallback = FallbackPipeline()
+    WanVideoEvaluator._move_pipeline_to_device(fallback, "cpu")
+    assert fallback.transformer.devices == ["cpu"]
+    assert fallback.vae.devices == ["cpu"]
+    assert fallback.text_encoder.devices == ["cpu"]
+    assert fallback.transformer.eval_calls == 1
+
+
+def test_real_evaluator_uses_vae_parameter_device_for_decode():
+    class Torch:
+        @staticmethod
+        def device(value):
+            return "device:%s" % value
+
+    class Parameter:
+        device = "device:cuda:4"
+
+    class Vae:
+        @staticmethod
+        def parameters():
+            yield Parameter()
+
+    assert WanVideoEvaluator._module_device(Vae(), Torch, "cpu") == "device:cuda:4"
+
+    class NoParameters:
+        pass
+
+    assert WanVideoEvaluator._module_device(NoParameters(), Torch, "cpu") == "device:cpu"
+
+
+def test_real_evaluator_decodes_latents_on_vae_device(tmp_path):
+    torch = __import__("torch")
+
+    class Vae(torch.nn.Module):
+        dtype = torch.float32
+
+        def __init__(self):
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.zeros(1))
+            self.decode_devices = []
+
+        def decode(self, latents, return_dict=False):
+            self.decode_devices.append(latents.device)
+            return (latents,)
+
+    class Pipeline:
+        text_encoder = SimpleNamespace(dtype=torch.float32)
+
+        def __init__(self):
+            self.vae = Vae()
+            self.video_processor = SimpleNamespace(postprocess_video=lambda value, output_type: value.detach().numpy())
+
+        def _get_t5_prompt_embeds(self, caption, *, device, dtype):
+            del caption
+            return torch.zeros((1, 1), device=device, dtype=dtype)
+
+        def __call__(self, **kwargs):
+            assert kwargs["prompt_embeds"].device.type == "cpu"
+            return SimpleNamespace(frames=torch.ones((1, 1, 1, 1, 1)))
+
+    evaluator = object.__new__(WanVideoEvaluator)
+    evaluator.config = SimpleNamespace(
+        device="cpu",
+        resolved_pipeline_device="cpu",
+        dtype="float32",
+    )
+    evaluator._wan_spec = {
+        "height": 1,
+        "width": 1,
+        "num_frames": 1,
+        "num_inference_steps": 1,
+        "guidance_scale": 1.0,
+    }
+    pipeline = Pipeline()
+    evaluator._generate(pipeline, torch, "test", 7)
+    assert pipeline.vae.decode_devices == [torch.device("cpu")]
 
 
 def test_real_evaluator_records_video_and_quality_evidence(tmp_path, monkeypatch):
@@ -196,6 +343,7 @@ def test_real_evaluator_caches_prompt_embeddings_for_latency_repeats(tmp_path, m
     assert result["hardware_metrics"]["peak_memory_gb_max"] == 2.0
     assert FakeCuda.reset_devices
     assert len(pipeline.embed_calls) == 4  # positive and negative text, once per artifact/case
+    assert all(call[1] == "cuda:0" for call in pipeline.embed_calls)
     assert len(generate_calls) == 16  # two seeds per artifact, warmup plus three repeats
     assert all(call[2]["prompt_embeds"] is not None for call in generate_calls)
 

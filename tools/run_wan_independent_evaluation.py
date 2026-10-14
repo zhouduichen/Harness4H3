@@ -105,6 +105,7 @@ def _evaluate_one(
     latency_warmup: int,
     latency_repeats: int,
     quality_device: str | None,
+    pipeline_device: str | None,
 ) -> None:
     destination = output_root / spec.name
     try:
@@ -118,6 +119,7 @@ def _evaluate_one(
                 "evaluation_manifest": str(manifest),
                 "clip_model_path": str(clip_model_path),
                 "device": "cuda:%d" % spec.gpu,
+                "pipeline_device": pipeline_device or ("cuda:%d" % spec.gpu),
                 "quality_device": quality_device or ("cuda:%d" % spec.gpu),
                 "dtype": "bfloat16",
                 "local_files_only": True,
@@ -209,6 +211,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="device for independent CLIP quality evaluation; defaults to the candidate GPU",
     )
+    parser.add_argument(
+        "--pipeline-device",
+        default=None,
+        help="device for the complete Wan pipeline; defaults to each candidate GPU",
+    )
     return parser
 
 
@@ -251,6 +258,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "latency_warmup": int(args.latency_warmup),
                 "latency_repeats": int(args.latency_repeats),
                 "quality_device": args.quality_device,
+                "pipeline_device": args.pipeline_device,
             },
         )
         process.start()

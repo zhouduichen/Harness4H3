@@ -20,7 +20,7 @@ class WanEvaluationError(RuntimeError):
     """A real evaluation could not produce trusted evidence."""
 
 
-EVALUATOR_VERSION = "wan-video-evaluator-v5"
+EVALUATOR_VERSION = "wan-video-evaluator-v6"
 LATENCY_MEASUREMENT_METHOD = "denoising+vae_decode_with_case_cached_prompt_embeddings"
 
 DEFAULT_VISUAL_QUALITY_GATE = {
@@ -198,6 +198,7 @@ class WanVideoEvaluationConfig:
     clip_model_path: Path
     output_root: Path
     device: str = "cuda:0"
+    pipeline_device: Optional[str] = None
     dtype: str = "bfloat16"
     local_files_only: bool = True
     max_cases: int = 1
@@ -220,6 +221,12 @@ class WanVideoEvaluationConfig:
         if not 0.0 <= float(self.max_quality_drop) <= 1.0:
             raise ValueError("max_quality_drop must be in [0, 1]")
 
+    @property
+    def resolved_pipeline_device(self) -> str:
+        """Device for the complete Wan pipeline, defaulting to generation device."""
+
+        return str(self.pipeline_device or self.device)
+
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any], output_root: Path) -> "WanVideoEvaluationConfig":
         required = {"wan_config", "evaluation_manifest", "clip_model_path"}
@@ -232,6 +239,7 @@ class WanVideoEvaluationConfig:
             clip_model_path=Path(str(raw["clip_model_path"])).expanduser(),
             output_root=Path(output_root),
             device=str(raw.get("device", "cuda:0")),
+            pipeline_device=(str(raw["pipeline_device"]) if raw.get("pipeline_device") is not None else None),
             dtype=str(raw.get("dtype", "bfloat16")),
             local_files_only=bool(raw.get("local_files_only", True)),
             max_cases=int(raw.get("max_cases", 1)),
@@ -287,6 +295,7 @@ class WanVideoEvaluator:
                 "wan_spec": self._wan_spec,
                 "evaluator_version": EVALUATOR_VERSION,
                 "device": config.device,
+                "pipeline_device": config.resolved_pipeline_device,
                 "dtype": config.dtype,
                 "max_cases": config.max_cases,
                 "seed_count": config.seed_count,
@@ -416,7 +425,12 @@ class WanVideoEvaluator:
                 # Prompt text is fixed across seeds for one manifest case.  It
                 # is not a compressed component, so encode it once and reuse
                 # the tensors for every latency sample and seed.
-                prompt_embeddings = self._prepare_prompt_embeddings(pipeline, torch, caption)
+                prompt_embeddings = self._prepare_prompt_embeddings(
+                    pipeline,
+                    torch,
+                    caption,
+                    device=self.config.resolved_pipeline_device,
+                )
                 for seed in seeds:
                     if (case_id, seed) in completed_keys:
                         continue
@@ -607,7 +621,7 @@ class WanVideoEvaluator:
                 local_files_only=self.config.local_files_only,
                 torch_dtype=getattr(torch, self.config.dtype),
             )
-            pipeline.transformer.to(self.config.device).eval()
+            pipeline = self._move_pipeline_to_device(pipeline, self.config.resolved_pipeline_device)
             execution_device = torch.device(self.config.device)
             cls = type(
                 "WanEvolutionCudaExecution",
@@ -623,7 +637,34 @@ class WanVideoEvaluator:
             raise WanEvaluationError("wan_pipeline_load_failed: %s" % exc) from exc
 
     @staticmethod
-    def _prepare_prompt_embeddings(pipeline: Any, torch: Any, caption: str) -> Optional[tuple[Any, Any]]:
+    def _move_pipeline_to_device(pipeline: Any, device: str) -> Any:
+        """Place all inference components together when the pipeline supports it."""
+
+        mover = getattr(pipeline, "to", None)
+        if callable(mover):
+            moved = mover(device)
+            if moved is not None:
+                pipeline = moved
+        else:
+            for component_name in ("transformer", "vae", "text_encoder", "text_encoder_2"):
+                component = getattr(pipeline, component_name, None)
+                component_mover = getattr(component, "to", None)
+                if callable(component_mover):
+                    component_mover(device)
+        transformer = getattr(pipeline, "transformer", None)
+        evaluator = getattr(transformer, "eval", None)
+        if callable(evaluator):
+            evaluator()
+        return pipeline
+
+    @staticmethod
+    def _prepare_prompt_embeddings(
+        pipeline: Any,
+        torch: Any,
+        caption: str,
+        *,
+        device: str,
+    ) -> Optional[tuple[Any, Any]]:
         """Encode fixed text once per case; it is not a compressed component."""
 
         getter = getattr(pipeline, "_get_t5_prompt_embeds", None)
@@ -632,9 +673,16 @@ class WanVideoEvaluator:
             return None
         text_dtype = getattr(text_encoder, "dtype", getattr(torch, "bfloat16"))
         return (
-            getter(caption, device=torch.device("cpu"), dtype=text_dtype),
-            getter("", device=torch.device("cpu"), dtype=text_dtype),
+            getter(caption, device=torch.device(device), dtype=text_dtype),
+            getter("", device=torch.device(device), dtype=text_dtype),
         )
+
+    @staticmethod
+    def _module_device(module: Any, torch: Any, fallback: str) -> Any:
+        try:
+            return next(module.parameters()).device
+        except (AttributeError, StopIteration, TypeError):
+            return torch.device(fallback)
 
     def _generate_case(
         self,
@@ -668,8 +716,16 @@ class WanVideoEvaluator:
         device = torch.device(self.config.device)
         if prompt_embeds is None or negative_prompt_embeds is None:
             text_dtype = getattr(pipeline.text_encoder, "dtype", getattr(torch, self.config.dtype))
-            prompt_embeds = pipeline._get_t5_prompt_embeds(caption, device=torch.device("cpu"), dtype=text_dtype)
-            negative_prompt_embeds = pipeline._get_t5_prompt_embeds("", device=torch.device("cpu"), dtype=text_dtype)
+            prompt_embeds = pipeline._get_t5_prompt_embeds(
+                caption,
+                device=torch.device(self.config.resolved_pipeline_device),
+                dtype=text_dtype,
+            )
+            negative_prompt_embeds = pipeline._get_t5_prompt_embeds(
+                "",
+                device=torch.device(self.config.resolved_pipeline_device),
+                dtype=text_dtype,
+            )
         generator = torch.Generator(device=str(device)).manual_seed(int(seed))
         with torch.inference_mode():
             output = pipeline(
@@ -684,7 +740,12 @@ class WanVideoEvaluator:
                 generator=generator,
                 output_type="latent",
             )
-            latents = output.frames.to("cpu", dtype=pipeline.vae.dtype)
+            vae_device = self._module_device(
+                pipeline.vae,
+                torch,
+                self.config.resolved_pipeline_device,
+            )
+            latents = output.frames.to(vae_device, dtype=pipeline.vae.dtype)
             decoded = pipeline.vae.decode(latents, return_dict=False)[0]
             return pipeline.video_processor.postprocess_video(decoded, output_type="np")
 
