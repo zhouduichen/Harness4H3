@@ -62,6 +62,64 @@ class FFNChannelPruningOperator:
             return _failed(parent, _failure_type(exc, "channel_pruning_failed"), str(exc), started)
 
 
+class CompositeCompressionOperator:
+    """Execute a short, ordered program of registered base operators."""
+
+    name = "compose"
+    _BASE_OPERATORS = {
+        "prune_blocks": BlockPruningOperator,
+        "prune_ffn_channels": FFNChannelPruningOperator,
+    }
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        started = time.monotonic()
+        steps = plan.get("steps")
+        if not isinstance(steps, (list, tuple)) or not 2 <= len(steps) <= 3:
+            return _failed(parent, "invalid_composite_plan", "compose requires 2 to 3 steps", started)
+        current = parent
+        changes: list[Mapping[str, Any]] = []
+        for index, raw_step in enumerate(steps):
+            if not isinstance(raw_step, Mapping) or set(raw_step) != {"operator", "args"}:
+                return _failed(parent, "invalid_composite_plan", "each compose step requires operator and args", started)
+            operator_name = raw_step.get("operator")
+            args = raw_step.get("args")
+            operator_type = self._BASE_OPERATORS.get(operator_name)
+            if operator_type is None or not isinstance(args, Mapping):
+                return _failed(parent, "invalid_composite_plan", "compose steps must use base operators", started)
+            result = operator_type().execute(adapter, current, args, Path(output_dir) / ("step-%02d" % index))
+            if result.status != "success" or result.child_checkpoint is None:
+                return CompressionResult(
+                    "failed",
+                    parent.sha256,
+                    None,
+                    {
+                        "kind": "composite",
+                        "completed_steps": len(changes),
+                        "steps": changes,
+                        "failed_step": index,
+                    },
+                    failure_type=result.failure_type or "composite_step_failed",
+                    message=result.message,
+                    wall_time_s=time.monotonic() - started,
+                )
+            changes.append(
+                {
+                    "operator": operator_name,
+                    "args": dict(args),
+                    "structural_change": dict(result.structural_change),
+                    "child_checkpoint_sha256": result.child_checkpoint.sha256,
+                }
+            )
+            current = result.child_checkpoint
+        return CompressionResult(
+            "success",
+            parent.sha256,
+            current,
+            {"kind": "composite", "steps": changes},
+            wall_time_s=time.monotonic() - started,
+        )
+
+
 def _failure_type(exc: BaseException, default: str) -> str:
     message = str(exc)
     for name in ("invalid_block_selection", "invalid_channel_selection", "unsupported_model_layout", "checkpoint_reload_failed"):
@@ -88,4 +146,4 @@ class WanCompressionRegistry:
 
 
 def build_wan_compression_registry() -> WanCompressionRegistry:
-    return WanCompressionRegistry((BlockPruningOperator(), FFNChannelPruningOperator()))
+    return WanCompressionRegistry((BlockPruningOperator(), FFNChannelPruningOperator(), CompositeCompressionOperator()))
