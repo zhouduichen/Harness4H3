@@ -253,6 +253,7 @@ def test_provider_prompt_documents_composite_plan(monkeypatch):
     assert "top-level keys" in payloads[0]
     assert "top-level `{'steps': [...]}` object is invalid" in payloads[0]
     assert "one flat" in payloads[0]
+    assert "every block from `profile['layers']`" in payloads[0]
     assert "Never emit nested lists" in payloads[0]
 
 
