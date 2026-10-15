@@ -11,6 +11,7 @@ from harness4h3.operators.wan import (
     OperatorSpec,
     SearchSpaceManager,
     ThresholdFFNChannelOperator,
+    TimestepBlockGatingOperator,
     build_wan_compression_registry,
 )
 
@@ -179,3 +180,23 @@ def test_generated_rule_is_classified_as_rule_evolution_until_structural_counter
     assert result["change_class"] == "algorithm_rule_evolution"
     assert result["reachable_by_existing_closure"] is True
     assert result["evidence_status"] == "delegates_to_existing_structural_operator"
+
+
+def test_agent_timestep_gate_extension_is_validated_and_enters_active_registry(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    manager = SearchSpaceManager(tmp_path / "space")
+    suggestion = AlgorithmAgent().propose_search_space_change(
+        search_space=manager.active.to_dict(),
+        history=[],
+        failures=["timestep_latency_plateau"],
+    )
+    spec = OperatorSpec.from_dict(suggestion["spec"])
+    proposal = manager.propose(spec, suggestion["rationale"], suggestion["evidence_ids"])
+    validated = manager.validate(proposal, adapter, parent, output_dir=tmp_path / "validation")
+    assert validated.status == "validated"
+    assert validated.validation["structure_outside_active_closure"] is True
+    assert validated.validation["structural_counterexample"]["dynamic_compute"] is True
+    version = manager.register(validated)
+    registry = manager.registry_for(version, build_wan_compression_registry())
+    assert isinstance(registry.get("timestep_block_gate"), TimestepBlockGatingOperator)
+    assert "timestep_block_gate" in registry.names()

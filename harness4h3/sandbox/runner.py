@@ -116,6 +116,11 @@ class CompressionPlan:
                 raise ValueError("algorithm_output_invalid: %s must be a list of strings" % key)
             if type_name == "list[int]" and (not isinstance(value, list) or not all(isinstance(item, int) and not isinstance(item, bool) for item in value)):
                 raise ValueError("algorithm_output_invalid: %s must be a list of integers" % key)
+            if type_name == "list[object]" and (
+                not isinstance(value, list)
+                or not all(isinstance(item, Mapping) for item in value)
+            ):
+                raise ValueError("algorithm_output_invalid: %s must be a list of objects" % key)
             if type_name == "float" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
                 raise ValueError("algorithm_output_invalid: %s must be numeric" % key)
             if type_name == "int" and (not isinstance(value, int) or isinstance(value, bool)):

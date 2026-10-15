@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, ChannelPruningConfig, CompressionResult, WanModelAdapter
+from .runtime_gating import validate_timestep_gate_plan
 
 
 class CompressionOperator(Protocol):
@@ -60,6 +61,42 @@ class FFNChannelPruningOperator:
             return CompressionResult("success", parent.sha256, child, {"kind": change.kind, **dict(change.details)}, wall_time_s=time.monotonic() - started)
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
             return _failed(parent, _failure_type(exc, "channel_pruning_failed"), str(exc), started)
+
+
+class TimestepBlockGatingOperator:
+    """Skip selected Wan blocks for selected denoising timestep intervals."""
+
+    name = "timestep_block_gate"
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        started = time.monotonic()
+        try:
+            model = adapter.reload_model(parent)
+            block_ids = [item.block_id for item in adapter.get_blocks(model)]
+            rules = validate_timestep_gate_plan(plan, block_ids)
+            change = adapter.apply_timestep_block_gating(model, [rule.to_dict() for rule in rules])
+            child = adapter.save_model(model, Path(output_dir))
+            if child.sha256 == parent.sha256:
+                return _failed(parent, "checkpoint_not_changed", "runtime gate did not change checkpoint configuration", started)
+            reloaded = adapter.reload_model(child)
+            restored = getattr(reloaded, "runtime_gate_rules", None)
+            transformer = getattr(reloaded, "transformer", reloaded)
+            if restored is None:
+                restored = getattr(getattr(transformer, "config", None), "harness4h3_timestep_block_gating", None)
+            if not restored:
+                return _failed(parent, "runtime_gate_reload_failed", "runtime gate rules were not restored", started)
+            structural_change = {
+                "kind": "runtime_timestep_gating",
+                "runtime_operator": self.name,
+                "rules": [rule.to_dict() for rule in rules],
+                "parameter_reduction_ratio": 0.0,
+                "dynamic_compute": True,
+                "child_reload_verified": True,
+                **dict(change.details),
+            }
+            return CompressionResult("success", parent.sha256, child, structural_change, wall_time_s=time.monotonic() - started)
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            return _failed(parent, _failure_type(exc, "timestep_gate_failed"), str(exc), started)
 
 
 class TICAPruningOperator:

@@ -6,7 +6,7 @@ import json
 import shutil
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .contracts import (
     BlockRef,
@@ -16,6 +16,7 @@ from .contracts import (
     StructuralChange,
     checkpoint_content_sha256,
 )
+from ...operators.wan.runtime_gating import TimestepGateRule, normalized_timestep, rule_matches, validate_timestep_gate_plan
 
 
 def _torch() -> Any:
@@ -65,7 +66,7 @@ def _copy_module(module: Any) -> Any:
 class FakeWanDiT:
     """Small Torch module kept separate so the adapter owns structure policy."""
 
-    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None) -> None:
+    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None, runtime_gate_rules: Sequence[Mapping[str, Any]] | None = None) -> None:
         _, nn = _torch()
         widths = list(ffn_widths or [ffn_width] * block_count)
         if len(widths) != block_count:
@@ -80,12 +81,24 @@ class FakeWanDiT:
             self.blocks.append(_fake_block_module(self.hidden_size, width))
         self.output = nn.Linear(self.hidden_size, self.hidden_size)
         self._artifact_sha256 = "0" * 64
+        self.runtime_gate_rules = [dict(item) for item in (runtime_gate_rules or [])]
+        self.runtime_gate_stats = {
+            str(block_id): {"executed": 0, "skipped": 0}
+            for block_id in self.block_ids
+        }
 
-    def __call__(self, value: Any) -> Any:
-        return self.forward(value)
+    def __call__(self, value: Any, timestep: Any = None) -> Any:
+        return self.forward(value, timestep=timestep)
 
-    def forward(self, value: Any) -> Any:
-        for block in self.blocks:
+    def forward(self, value: Any, timestep: Any = None) -> Any:
+        current_timestep = 0.5 if timestep is None else normalized_timestep(timestep)
+        rules = {str(item["block_id"]): TimestepGateRule.from_mapping(item) for item in self.runtime_gate_rules}
+        for block_id, block in zip(self.block_ids, self.blocks):
+            rule = rules.get(str(block_id))
+            if rule is not None and rule_matches(rule, current_timestep):
+                self.runtime_gate_stats[str(block_id)]["skipped"] += 1
+                continue
+            self.runtime_gate_stats[str(block_id)]["executed"] += 1
             value = value + block(value)
         return self.output(value)
 
@@ -152,6 +165,7 @@ class FakeWanDiTAdapter:
                 int(config["ffn_width"]),
                 block_ids=config["block_ids"],
                 ffn_widths=config["ffn_widths"],
+                runtime_gate_rules=config.get("runtime_gate_rules", []),
             )
             model.load_state_dict(torch.load(root / "model.pt", map_location="cpu", weights_only=True))
             model._artifact_sha256 = checkpoint_content_sha256(root)
@@ -174,7 +188,12 @@ class FakeWanDiTAdapter:
             ffn_width=max(model.ffn_widths),
             parameter_count=_parameter_count(model),
             checkpoint_sha256=digest,
-            metadata={"block_ids": list(model.block_ids), "ffn_widths": list(model.ffn_widths), "offline_simulation": True},
+            metadata={
+                "block_ids": list(model.block_ids),
+                "ffn_widths": list(model.ffn_widths),
+                "offline_simulation": True,
+                "runtime_operator": "timestep_block_gate" if model.runtime_gate_rules else None,
+            },
         )
 
     def get_blocks(self, model: FakeWanDiT) -> tuple[BlockRef, ...]:
@@ -269,6 +288,7 @@ class FakeWanDiTAdapter:
             "ffn_width": max(model.ffn_widths),
             "ffn_widths": list(model.ffn_widths),
             "block_ids": list(model.block_ids),
+            "runtime_gate_rules": list(model.runtime_gate_rules),
         }
         config_path.write_text(json.dumps(config, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         digest = checkpoint_content_sha256(target)
@@ -351,4 +371,19 @@ class FakeWanDiTAdapter:
             raise ValueError("unsupported_tica_calibration_input: Fake tensor shapes differ")
         scale = 1.0 + 0.25 * float(timestep)
         with torch.no_grad():
-            return model(hidden * scale + 0.05 * conditioning)
+            return model(hidden * scale + 0.05 * conditioning, timestep=float(timestep))
+
+    def apply_timestep_block_gating(self, model: FakeWanDiT, rules: Sequence[Mapping[str, Any]]) -> StructuralChange:
+        block_ids = [item.block_id for item in self.get_blocks(model)]
+        validated = validate_timestep_gate_plan({"rules": [dict(item) for item in rules], "policy": "skip_when_in_range"}, block_ids)
+        model.runtime_gate_rules = [rule.to_dict() for rule in validated]
+        model.runtime_gate_stats = {str(block_id): {"executed": 0, "skipped": 0} for block_id in block_ids}
+        return StructuralChange(
+            "runtime_timestep_gating",
+            {
+                "runtime_operator": "timestep_block_gate",
+                "rules": [rule.to_dict() for rule in validated],
+                "parameter_reduction_ratio": 0.0,
+                "dynamic_compute": True,
+            },
+        )

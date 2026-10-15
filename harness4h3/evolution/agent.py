@@ -400,6 +400,30 @@ class AlgorithmAgent:
                 "rationale": str(raw.get("rationale", "provider identified a search-space limitation")),
                 "evidence_ids": tuple(str(item) for item in raw.get("evidence_ids", ())),
             }
+        failure_text = " ".join(str(item).lower() for item in failures)
+        if (
+            "timestep_block_gate" not in active_names
+            and any(token in failure_text for token in ("timestep", "dynamic", "latency", "pareto"))
+        ):
+            implementation_source = """def propose(profile, history):
+    layers = profile.get('layers', [])
+    block_id = str(layers[0].get('block_id')) if layers else 'block.0'
+    return {'operator': 'timestep_block_gate', 'args': {'rules': [{'block_id': block_id, 'min_timestep': 0.0, 'max_timestep': 0.3}], 'policy': 'skip_when_in_range'}}
+"""
+            return {
+                "spec": {
+                    "name": "timestep_block_gate",
+                    "version": "1",
+                    "argument_schema": {"rules": "list[object]", "policy": "str"},
+                    "granularity": "runtime_timestep",
+                    "constraints": ["normalized_timestep", "known_block_ids", "no_parameter_reduction"],
+                    "limitations": ["runtime_only", "cpu_fake_structure_evidence_only", "requires_real_wan_replay_for_hardware_claim"],
+                    "trusted_factory_key": "timestep_block_gate",
+                    "implementation_source": implementation_source,
+                },
+                "rationale": "timestep-local quality/latency feedback motivates a dynamic Block gate that preserves parameters while changing the executed path",
+                "evidence_ids": tuple(str(item) for item in failures if str(item).strip())[:16] or ("offline-bootstrap",),
+            }
         if "prune_ffn_by_weight_threshold" in active_names:
             raise ValueError("search_space_no_unseen_deterministic_extension")
         return {
@@ -556,6 +580,14 @@ def _deterministic_improvement_source(
     failure_text = " ".join(str(item).lower() for item in failures)
     if "tica_prune" in parent.source:
         formula = "late_log" if any(token in failure_text for token in ("quality", "regression", "interaction")) else "uniform"
+        # A recursive child must revise the parent's actual rule.  Toggle the
+        # weighting formula when the previous improvement already selected the
+        # deterministic default, instead of emitting the same logic again.
+        if not any(token in failure_text for token in ("quality", "regression", "interaction")):
+            if "'time_weight_formula': 'uniform'" in parent.source:
+                formula = "late_log"
+            elif "'time_weight_formula': 'late_log'" in parent.source:
+                formula = "uniform"
         source = (
             "import math\n\n"
             "def propose(profile, history):\n"
@@ -573,11 +605,12 @@ def _deterministic_improvement_source(
             "        per_timestep = item.get('per_timestep', {})\n"
             "        risk = sum(weights[index] * float(per_timestep.get(names[index], 0.0)) for index in range(len(names)))\n"
             "        ranked.append((risk, str(item.get('block_id'))))\n"
-            "    selected = sorted(ranked)[0][1] if ranked else str(profile.get('layers', [{'block_id': 'block.0'}])[0]['block_id'])\n"
+            "    ranked = sorted(ranked, key=lambda item: (item[0], item[1]), reverse=bool(%d))\n"
+            "    selected = ranked[0][1] if ranked else str(profile.get('layers', [{'block_id': 'block.0'}])[0]['block_id'])\n"
             "    width = int(profile.get('model', {}).get('ffn_width', 1))\n"
             "    target = max(1, min(width - 1, int(width * 0.75)))\n"
             "    return {'operator': 'tica_prune', 'args': {'block_ids': [selected], 'retained_indices': list(range(target)), 'mode': 'block_plus_ffn', 'time_weight_formula': %r, 'risk_limit': 0.25, 'fast_risk_limit': 0.50, 'activation_weight': 0.5, 'interaction_weight': 0.5, 'beam_width': 2, 'max_fast_evals': 8, 'max_full_evals': 4, 'max_interaction_evals': 2, 'strategy': 'greedy_beam', 'max_search_depth': 3}}\n"
-        ) % (parent.algorithm_id, formula, formula)
+        ) % (parent.algorithm_id, formula, int(str(algorithm_id)[1:]) % 2, formula)
         return (
             source,
             "change TICA timestep weighting while preserving globally aligned Block+FFN execution",

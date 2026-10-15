@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 
 from harness4h3.adapters.wan import FakeWanDiTAdapter
+from harness4h3.evolution.agent import AlgorithmAgent
 from harness4h3.evolution import EvolutionLoop
+from harness4h3.operators.wan import OperatorSpec, SearchSpaceManager
 
 
 def test_tica_loop_keeps_human_baseline_and_records_fair_recursive_comparison(tmp_path):
@@ -61,3 +63,66 @@ def test_tica_loop_keeps_human_baseline_and_records_fair_recursive_comparison(tm
     assert child_algorithm["parent_algorithm_id"] == first_algorithm["algorithm_id"]
     assert child_algorithm["source_diff"]
     assert child_algorithm["metadata"]["algorithm_improvement"] is True
+
+
+def test_tica_loop_performs_three_recursive_source_generations(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    loop = EvolutionLoop(
+        adapter=adapter,
+        parent=parent,
+        output_root=tmp_path / "run",
+        tica_prune=True,
+        algorithm_improvement=True,
+    )
+
+    rounds = [loop.run_round() for _ in range(3)]
+    algorithms = [
+        json.loads((tmp_path / "run" / "rounds" / item.round_id / "algorithm.json").read_text())
+        for item in rounds
+    ]
+    assert [item["algorithm_id"] for item in algorithms] == ["A0001", "A0002", "A0003"]
+    assert len({item["source_sha256"] for item in algorithms}) == 3
+    assert algorithms[1]["parent_algorithm_id"] == algorithms[0]["algorithm_id"]
+    assert algorithms[2]["parent_algorithm_id"] in {algorithms[0]["algorithm_id"], algorithms[1]["algorithm_id"]}
+    assert all(item["source_diff"] for item in algorithms[1:])
+    assert all(
+        (tmp_path / "run" / "rounds" / item.round_id / "algorithm-program-trace.json").exists()
+        for item in rounds
+    )
+
+
+def test_active_timestep_gate_enters_algorithm_candidates_and_executes(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    manager = SearchSpaceManager(tmp_path / "space")
+    suggestion = AlgorithmAgent().propose_search_space_change(
+        search_space=manager.active.to_dict(),
+        history=[],
+        failures=["timestep_latency_plateau"],
+    )
+    proposal = manager.propose(
+        OperatorSpec.from_dict(suggestion["spec"]),
+        suggestion["rationale"],
+        suggestion["evidence_ids"],
+    )
+    validated = manager.validate(proposal, adapter, parent, output_dir=tmp_path / "space-validation")
+    manager.register(validated)
+
+    loop = EvolutionLoop(
+        adapter=adapter,
+        parent=parent,
+        output_root=tmp_path / "run",
+        tica_prune=True,
+        algorithm_improvement=True,
+        search_space_evolution=True,
+        search_space_manager=manager,
+    )
+    loop.run_round()
+    second = loop.run_round()
+    search = json.loads((tmp_path / "run" / "rounds" / second.round_id / "tica-search.json").read_text())
+    gate = next(item for item in search["candidates"] if item["kind"] == "timestep_block_gate")
+    assert gate["full_metrics"]["valid"] is True
+    assert gate["full_metrics"]["structural_change"]["runtime_operator"] == "timestep_block_gate"
+    assert gate["full_metrics"]["structural_change"]["parameter_reduction_ratio"] == 0.0
+    assert "timestep_block_gate" in search["algorithm_trace"][0]["search_space_operator_names"]

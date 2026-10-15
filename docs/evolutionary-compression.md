@@ -296,6 +296,28 @@ operator 和 student training 路径。
 不要让两个命令共享同一个 `output_root` 并发运行；每个实验使用独立的
 output root，避免 parent checkpoint 和 round artifacts 互相覆盖。
 
+## Wan2.1-1.3B Algorithm Discovery + RSI
+
+真实 Wan 模板为
+`configs/evolutionary-compression.wan-rsi-discovery.example.yaml`。它同时打开
+`algorithm_improvement`、`search_space_evolution`、TICA bounded search 和
+candidate screening；Agent 的 `search()` 源码会实际控制候选生成、排序和停止，
+新的 timestep Block gate 只有在 SearchSpaceManager 完成 Sandbox、保存/重载和
+结构验证后才进入 active registry。
+
+替换模板中的本地 checkpoint、Calibration/Validation/Test manifest、Wan 配置、
+CLIP 模型和 controller 后，运行 10--20 轮，例如：
+
+```bash
+.venv/bin/python -m harness4h3 evolve-compression \
+  --config configs/evolutionary-compression.wan-rsi-discovery.example.yaml \
+  --rounds 12 --json
+```
+
+演化阶段只使用 Calibration/Validation；Test 仅由冻结的 `final-evaluate` 流程读取。
+如果没有真实 Wan GPU/视频评测环境，应先使用 Fake CPU 命令验证机制，并在报告中将
+结果标记为 `offline_simulation=true`，不能据此宣称真实 Wan 的画质、延迟或显存收益。
+
 ## 设计边界
 
 - 算法源码只能返回 `operator` 和 `args`，不能指定路径、设备、命令或

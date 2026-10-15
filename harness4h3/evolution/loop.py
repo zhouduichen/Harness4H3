@@ -233,6 +233,7 @@ class EvolutionLoop:
         profile_payload: Mapping[str, Any] = profile.to_dict()
         tica_profile_path = round_dir / "tica-profile.json"
         tica_search_path = round_dir / "tica-search.json"
+        algorithm_trace_path = round_dir / "algorithm-program-trace.json"
         if self.tica_prune:
             tica_profile = self._load_or_collect_tica_profile(tica_profile_path, parent_artifact)
             profile_payload = {**dict(profile_payload), **dict(tica_profile)}
@@ -410,6 +411,16 @@ class EvolutionLoop:
                     "agent_rule_digest": tica_agent_rule_digest,
                 }
                 _write_json(tica_search_path, tica_search_payload)
+            _write_json(
+                algorithm_trace_path,
+                {
+                    "algorithm_id": algorithm.algorithm_id,
+                    "algorithm_source_sha256": algorithm.source_sha256,
+                    "trace": list(tica_search_payload.get("algorithm_trace", [])),
+                    "trace_digest": stable_digest(tica_search_payload.get("algorithm_trace", [])),
+                    "search_space_version": self.search_space_version.version_id if self.search_space_version is not None else "default",
+                },
+            )
             selected_id = str(tica_search_payload.get("selected_candidate_id", ""))
             selected_digest = str(tica_search_payload.get("selected_plan_digest", ""))
             candidates = tica_search_payload.get("candidates")
@@ -477,6 +488,11 @@ class EvolutionLoop:
                     validation_profiles,
                     round_dir / "algorithm-validation-measurements",
                     recipe=active_tica_recipe,
+                    algorithm_sources={
+                        improvement_parent.source_sha256: improvement_parent.source,
+                        algorithm.source_sha256: algorithm.source,
+                    },
+                    algorithm_history=agent_history,
                 )
                 validation = AlgorithmValidator().validate(
                     improvement_parent,
@@ -726,6 +742,7 @@ class EvolutionLoop:
             decision["tica_plan_digest_match"] = decision["selected_plan_digest"] == decision["final_plan_digest"]
             decision["tica_agent_rule_digest"] = tica_search_payload.get("agent_rule_digest")
             decision["tica_search_algorithm_id"] = tica_search_payload.get("algorithm_id")
+            decision["algorithm_program_trace_path"] = str(algorithm_trace_path)
         if self.candidate_screening:
             decision["screening"] = [item.to_dict() for item in CandidateScreeningPipeline(screening_path).load()]
         decision_path = round_dir / "decision.json"
@@ -761,6 +778,7 @@ class EvolutionLoop:
         if self.tica_prune:
             paths["tica_profile"] = str(tica_profile_path)
             paths["tica_search"] = str(tica_search_path)
+            paths["algorithm_program_trace"] = str(algorithm_trace_path)
         if self.search_space_version is not None:
             paths["search_space"] = str(search_space_path)
         if self.candidate_screening:
@@ -1293,6 +1311,8 @@ class EvolutionLoop:
         output_root: Path,
         *,
         recipe: Optional[TICARecipe] = None,
+        algorithm_sources: Optional[Mapping[str, str]] = None,
+        algorithm_history: Sequence[Mapping[str, Any]] = (),
     ) -> Callable[..., Mapping[str, Any]]:
         """Build a scenario-aware callback for AlgorithmValidator.
 
@@ -1302,7 +1322,14 @@ class EvolutionLoop:
         """
 
         if self.tica_prune:
-            return self._complete_tica_algorithm_measurement_evaluator(parent, profiles, output_root, recipe=recipe)
+            return self._complete_tica_algorithm_measurement_evaluator(
+                parent,
+                profiles,
+                output_root,
+                recipe=recipe,
+                algorithm_sources=algorithm_sources,
+                algorithm_history=algorithm_history,
+            )
 
         evaluators: dict[str, AlgorithmModelEvaluator] = {}
         evaluator_recipe = recipe or self.tica_recipe
@@ -1351,6 +1378,8 @@ class EvolutionLoop:
         output_root: Path,
         *,
         recipe: Optional[TICARecipe] = None,
+        algorithm_sources: Optional[Mapping[str, str]] = None,
+        algorithm_history: Sequence[Mapping[str, Any]] = (),
     ) -> Callable[..., Mapping[str, Any]]:
         """Compare TICA rules by running each rule's complete Calibration search.
 
@@ -1404,6 +1433,9 @@ class EvolutionLoop:
                     output_root / "search" / rule_digest,
                     recipe=rule,
                     seed_plan=result.plan.args,
+                    algorithm_source=(algorithm_sources or {}).get(result.source_sha256),
+                    algorithm_history=algorithm_history,
+                    search_space=self.search_space_version.to_dict() if self.search_space_version is not None else {"operators": []},
                 )
                 search_cache[rule_digest] = search
             selected = next(
@@ -1462,7 +1494,14 @@ class EvolutionLoop:
                     SandboxResult(
                         "success",
                         result.source_sha256,
-                        SandboxCompressionPlan("tica_prune", dict(selected.plan)),
+                        SandboxCompressionPlan(
+                            str(selected.plan.get("operator", "tica_prune"))
+                            if isinstance(selected.plan, Mapping) and isinstance(selected.plan.get("args"), Mapping)
+                            else "tica_prune",
+                            dict(selected.plan.get("args", {}))
+                            if isinstance(selected.plan, Mapping) and isinstance(selected.plan.get("args"), Mapping)
+                            else dict(selected.plan),
+                        ),
                         metadata={"complete_tica_search": True, "calibration_search_digest": base["search_result_digest"]},
                     )
                 )

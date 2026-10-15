@@ -4,10 +4,12 @@ import hashlib
 import json
 import os
 import shutil
+from types import MethodType
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange
+from ...operators.wan.runtime_gating import rule_matches, rules_to_dict, validate_timestep_gate_plan
 
 
 def _torch_modules() -> tuple[Any, Any]:
@@ -232,6 +234,9 @@ class DiffusersWanAdapter:
         self._dtype = str(dtype)
         pipe._harness4h3_checkpoint_root = str(checkpoint)
         pipe._harness4h3_checkpoint_sha256 = _transformer_checkpoint_sha256(checkpoint)
+        runtime_rules = getattr(getattr(pipe.transformer, "config", None), "harness4h3_timestep_block_gating", None)
+        if runtime_rules:
+            self.apply_timestep_block_gating(pipe, runtime_rules)
         return pipe
 
     @classmethod
@@ -448,6 +453,64 @@ class DiffusersWanAdapter:
                 "hidden_states": hidden_states,
                 "timestep": timestep_tensor,
                 "encoder_hidden_states": calibration_input.encoder_hidden_states,
+            },
+        )
+
+    def apply_timestep_block_gating(self, model: Any, rules: Sequence[Mapping[str, Any]]) -> StructuralChange:
+        transformer = self._transformer(model)
+        _path, blocks = self._blocks(model)
+        block_ids = ["block.%d" % index for index in range(len(blocks))]
+        validated = validate_timestep_gate_plan(
+            {"rules": [dict(item) for item in rules], "policy": "skip_when_in_range"},
+            block_ids,
+        )
+        by_block = {rule.block_id: rule for rule in validated}
+        if callable(getattr(transformer, "register_to_config", None)):
+            transformer.register_to_config(harness4h3_timestep_block_gating=rules_to_dict(validated))
+        else:
+            setattr(transformer.config, "harness4h3_timestep_block_gating", rules_to_dict(validated))
+        transformer._harness4h3_gate_rules = by_block
+        transformer._harness4h3_gate_stats = {
+            block_id: {"executed": 0, "skipped": 0} for block_id in block_ids
+        }
+
+        if not hasattr(transformer, "_harness4h3_gate_base_forward"):
+            base_transformer_forward = transformer.forward
+
+            def gated_transformer_forward(transformer_self: Any, hidden_states: Any, timestep: Any, *args: Any, **kwargs: Any) -> Any:
+                transformer_self._harness4h3_current_timestep = timestep
+                try:
+                    return base_transformer_forward(hidden_states, timestep, *args, **kwargs)
+                finally:
+                    transformer_self._harness4h3_current_timestep = None
+
+            transformer._harness4h3_gate_base_forward = base_transformer_forward
+            transformer.forward = MethodType(gated_transformer_forward, transformer)
+
+        for index, block in enumerate(blocks):
+            block_id = "block.%d" % index
+            if hasattr(block, "_harness4h3_gate_base_forward"):
+                continue
+            base_block_forward = block.forward
+
+            def gated_block_forward(block_self: Any, hidden_states: Any, *args: Any, _block_id: str = block_id, _base: Any = base_block_forward, **kwargs: Any) -> Any:
+                current_timestep = getattr(transformer, "_harness4h3_current_timestep", None)
+                rule = getattr(transformer, "_harness4h3_gate_rules", {}).get(_block_id)
+                if current_timestep is not None and rule is not None and rule_matches(rule, current_timestep):
+                    transformer._harness4h3_gate_stats[_block_id]["skipped"] += 1
+                    return hidden_states
+                transformer._harness4h3_gate_stats[_block_id]["executed"] += 1
+                return _base(hidden_states, *args, **kwargs)
+
+            block._harness4h3_gate_base_forward = base_block_forward
+            block.forward = MethodType(gated_block_forward, block)
+        return StructuralChange(
+            "runtime_timestep_gating",
+            {
+                "runtime_operator": "timestep_block_gate",
+                "rules": rules_to_dict(validated),
+                "parameter_reduction_ratio": 0.0,
+                "dynamic_compute": True,
             },
         )
 

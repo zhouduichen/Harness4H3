@@ -13,7 +13,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, CompressionResult, WanModelAdapter
 from ...sandbox import AlgorithmSandbox
-from .compression import FFNChannelPruningOperator, WanCompressionRegistry
+from .compression import FFNChannelPruningOperator, TimestepBlockGatingOperator, WanCompressionRegistry
 
 
 def _jsonable(value: Any) -> Any:
@@ -301,6 +301,34 @@ class SearchSpaceManager:
                     raise ValueError("threshold_validation_requires_nonuniform_channel_scores")
                 threshold = lower + (upper - lower) * 0.5
                 plan_args["threshold"] = threshold
+            elif proposal.spec.trusted_factory_key == "timestep_block_gate":
+                if not block_ids:
+                    raise ValueError("timestep_gate_requires_blocks")
+                plan_args = {
+                    "rules": [{
+                        "block_id": block_ids[0],
+                        "min_timestep": 0.0,
+                        "max_timestep": 0.3,
+                    }],
+                    "policy": "skip_when_in_range",
+                }
+            if proposal.spec.implementation_source:
+                # An authored implementation is still untrusted.  Execute it
+                # only to derive the validation plan, with the proposed spec
+                # as the sole extension visible at the sandbox boundary.
+                generated = AlgorithmSandbox(
+                    Path(output_dir or (self.store.root / "validation" / proposal.proposal_id)) / "implementation-sandbox",
+                    operator_specs=(proposal.spec,),
+                ).run(
+                    proposal.spec.implementation_source,
+                    _rule_profile(adapter, parent_model, plan_args),
+                    (),
+                )
+                if generated.status != "success" or generated.plan is None:
+                    raise ValueError(generated.failure_type or "implementation_source_validation_failed")
+                if proposal.spec.trusted_factory_key == "timestep_block_gate" and generated.plan.operator != proposal.spec.name:
+                    raise ValueError("timestep_gate_source_must_return_declared_operator")
+                plan_args = dict(generated.plan.args)
             result = operator.execute(
                 adapter,
                 parent,
@@ -324,9 +352,23 @@ class SearchSpaceManager:
                 "ffn_width": int(structure.ffn_width),
                 "metrics": metrics,
                 "trigger_evidence": dict(proposal.trigger_evidence),
+                "operator": proposal.spec.name,
+                "plan_args": _jsonable(plan_args),
+                "parameter_reduction_ratio": float(result.structural_change.get("parameter_reduction_ratio", 0.0)),
+                "dynamic_compute": bool(result.structural_change.get("dynamic_compute", False)),
+                "child_reload_verified": bool(result.structural_change.get("child_reload_verified", True)),
             }
             if threshold is not None:
                 validation["threshold"] = float(threshold)
+            if proposal.spec.trusted_factory_key == "timestep_block_gate":
+                validation["structure_outside_active_closure"] = True
+                validation["structural_counterexample"] = {
+                    "kind": "dynamic_timestep_block_execution",
+                    "operator": proposal.spec.name,
+                    "parameter_reduction_ratio": float(result.structural_change.get("parameter_reduction_ratio", 0.0)),
+                    "dynamic_compute": bool(result.structural_change.get("dynamic_compute", False)),
+                    "child_reload_verified": bool(result.structural_change.get("child_reload_verified", False)),
+                }
             if proposal.spec.implementation_source:
                 validation["implementation_source_sha256"] = hashlib.sha256(proposal.spec.implementation_source.encode("utf-8")).hexdigest()
             validated = replace(base, status="validated", validation=validation)
@@ -500,6 +542,7 @@ def _assert_finite(model: Any) -> None:
 
 _TRUSTED_FACTORIES: dict[str, Callable[[], Any]] = {
     "prune_ffn_by_weight_threshold": ThresholdFFNChannelOperator,
+    "timestep_block_gate": TimestepBlockGatingOperator,
     "generated_channel_rule": lambda spec=None: GeneratedChannelRuleOperator(
         str(getattr(spec, "name", "generated_channel_rule")),
         str(getattr(spec, "implementation_source", "")),

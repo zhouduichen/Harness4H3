@@ -205,3 +205,6 @@ class WanModelAdapter(Protocol):
 
     def forward_denoising(self, model: Any, calibration_input: Any, timestep: float) -> Any:
         ...
+
+    def apply_timestep_block_gating(self, model: Any, rules: Sequence[Mapping[str, Any]]) -> StructuralChange:
+        ...

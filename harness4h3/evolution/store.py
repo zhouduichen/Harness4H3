@@ -115,13 +115,20 @@ class AlgorithmStore:
 
 
 def _algorithm_logic_digest(source: str) -> str:
-    """Ignore comments/algorithm IDs when detecting repeated selection logic."""
+    """Ignore comments/algorithm IDs while retaining propose/search behavior."""
 
     try:
         tree = ast.parse(source, mode="exec")
-        functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "propose"]
-        node = functions[0] if functions else tree
-        normalized = ast.dump(node, annotate_fields=True, include_attributes=False)
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in {"propose", "search"}
+        ]
+        normalized = "\n".join(
+            ast.dump(item, annotate_fields=True, include_attributes=False)
+            for item in (functions or [tree])
+        )
     except SyntaxError:
         normalized = source
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
