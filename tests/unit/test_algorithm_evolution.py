@@ -333,6 +333,26 @@ def test_provider_agent_compacts_full_memory_artifacts():
     assert payload["history"][0]["evaluation"]["hardware_metrics"]["model_size_gb"] == 3.0
 
 
+def test_provider_agent_deduplicates_history_and_skills():
+    payloads = []
+
+    def provider(payload):
+        payloads.append(payload)
+        return {
+            "source": "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n",
+            "hypothesis": "deduplicate context",
+            "parent_id": "M0000",
+        }
+
+    item = {"experience_id": "R0001", "memory_kind": "experience", "status": "rejected"}
+    AlgorithmAgent(provider=provider).generate(
+        "A0002", parent_id="M0000", profile={}, history=[item], skills=[item]
+    )
+
+    assert payloads[0]["history"]
+    assert payloads[0]["skills"] == []
+
+
 def test_provider_agent_rejects_parent_override():
     agent = AlgorithmAgent(provider=lambda payload: {"source": "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n", "parent_id": "M9999"})
     try:
@@ -365,7 +385,7 @@ def test_vllm_algorithm_provider_parses_structured_json_without_network(monkeypa
     result = provider({"parent_id": "M0000", "profile": {}, "history": [], "skills": []})
     assert result["parent_id"] == "M0000"
     assert "def propose" in result["source"]
-    assert requests[0]["max_tokens"] == 2048
+    assert requests[0]["max_tokens"] == 1536
 
 
 def test_vllm_provider_binds_missing_parent_to_request_context(monkeypatch):

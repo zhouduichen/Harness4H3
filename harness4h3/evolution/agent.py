@@ -125,10 +125,24 @@ class AlgorithmAgent:
                 hypothesis=hypothesis,
                 metadata={"generator": "deterministic_seed", "operator": operator, "design_strategy": design_strategy, "search_choice": search_choice, "retention_ratio": retention_ratio if generation_choice == "explore" else None, "predicted_gain": {"latency": 0.05, "model_size": 0.10, "basis": "profile_sensitivity_and_operator_proxy"}},
             )
+        compact_history = _compact_context_items(history)
+        history_keys = {
+            (str(item.get("memory_kind", "")), str(item.get("experience_id", "")))
+            for item in history
+            if isinstance(item, Mapping)
+        }
+        compact_skills = _compact_context_items(
+            [
+                item
+                for item in skills
+                if not isinstance(item, Mapping)
+                or (str(item.get("memory_kind", "")), str(item.get("experience_id", ""))) not in history_keys
+            ]
+        )
         payload = {
             "profile": _compact_profile(profile),
-            "history": _compact_context_items(history),
-            "skills": _compact_context_items(skills),
+            "history": compact_history,
+            "skills": compact_skills,
             "pareto_front": _compact_pareto_front(pareto_front),
             "parent_id": parent_id,
             "search_policy": {"choice": search_choice},
@@ -434,10 +448,11 @@ def build_algorithm_provider(
 
     def call(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         prompt = (
-            "Generate one compression algorithm for a trusted Wan DiT harness. "
+            "Generate one concise compression algorithm for a trusted Wan DiT harness. "
             "Return JSON only with source, hypothesis, and parent_id. The source must define "
             "a complete Python function `def propose(profile, history): ...` and return only "
-            "a bounded operator/args plan; never return a function name or pseudocode. "
+            "a bounded operator/args plan; keep the source body under 500 tokens, never return "
+            "a function name or pseudocode. "
             "Allowed plans are exactly `prune_blocks` with args `{"
             "block_ids: list[str]}`, `prune_ffn_channels` with args "
             "`{block_ids: list[str], retained_indices: list[int]}`, or "
@@ -487,11 +502,9 @@ def build_algorithm_provider(
                 # OpenAI json_schema extension.  The local sandbox remains
                 # the authoritative validator for the returned source.
                 "response_format": {"type": "json_object"},
-                # Algorithm responses contain executable source as well as
-                # the plan metadata.  1024 tokens can truncate a valid JSON
-                # response mid-string, which is an infrastructure failure
-                # rather than an invalid algorithm.
-                "max_tokens": 2048,
+                # Leave room for a compact executable source while keeping
+                # the request below the controller's 16k context limit.
+                "max_tokens": 1536,
             }
         else:
             request_payload = {
