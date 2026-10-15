@@ -19,6 +19,38 @@ BASELINE_NAMES = (
 )
 
 
+def tica_operator_spec() -> dict[str, Any]:
+    """Return the sandbox schema for TICA's orchestration operator.
+
+    TICA is deliberately not inserted into the persisted SearchSpaceVersion:
+    it orchestrates the existing trusted Block and globally-aligned FFN
+    mutations and therefore is an algorithm-rule baseline, not a new primitive
+    compression capability.
+    """
+
+    return {
+        "name": "tica_prune",
+        "version": "1",
+        "argument_schema": {
+            "block_ids": "list[str]",
+            "retained_indices": "list[int]",
+            "mode": "str",
+            "time_weight_formula": "str",
+            "risk_limit": "float",
+            "activation_weight": "float",
+            "interaction_weight": "float",
+            "beam_width": "int",
+            "max_fast_evals": "int",
+            "max_full_evals": "int",
+            "max_interaction_evals": "int",
+        },
+        "granularity": "algorithm_rule",
+        "constraints": ["wan_ffn_width_aligned", "block_and_ffn_use_trusted_mutations"],
+        "limitations": ["not_a_new_primitive_operator", "no_per_layer_ffn_width"],
+        "trusted_factory_key": "tica_prune",
+    }
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
@@ -156,6 +188,12 @@ def _timestep_value(name: str, index: int, count: int) -> float:
         return 0.5
     if name in {"low_noise", "late", "t_last"}:
         return 0.1
+    try:
+        value = float(name)
+        if 0.0 <= value <= 1.0:
+            return value
+    except (TypeError, ValueError):
+        pass
     return 1.0 - (float(index) / max(float(count - 1), 1.0))
 
 
@@ -295,14 +333,17 @@ def build_human_tica_source(algorithm_id: str) -> str:
 
 def propose(profile, history):
     # Human-designed TICA-Prune baseline %s; this is not Agent discovery.
-    names = ['high_noise', 'middle', 'low_noise']
-    raw_weights = [math.log1p(1.0 + 9.0 * value) for value in [0.9, 0.5, 0.1]]
+    tica = profile.get('tica', {})
+    names = [str(item) for item in tica.get('timesteps', ['0.9', '0.5', '0.1'])]
+    values = [float(item) for item in names]
+    raw_weights = [math.log1p(1.0 + 9.0 * value) for value in values]
     total = sum(raw_weights)
     weights = [value / total for value in raw_weights]
     records = []
     for item in profile.get('tica_block_sensitivity', profile.get('block_sensitivity', [])):
         values = item.get('per_timestep', item.get('timesteps', {}))
-        score = sum(weights[index] * float(values.get(names[index], item.get('importance_score', 0.0))) for index in range(3))
+        fallback_names = ['high_noise', 'middle', 'low_noise']
+        score = sum(weights[index] * float(values.get(names[index], values.get(fallback_names[index], item.get('importance_score', 0.0)))) for index in range(len(names)))
         records.append((score, str(item.get('block_id'))))
     if not records:
         records = [(0.0, str(item.get('block_id'))) for item in profile.get('layers', [])]
@@ -510,6 +551,7 @@ class TICAPruner:
             TICARecipe.from_mapping({**recipe.to_dict(), "baseline_name": name})
             for name in BASELINE_NAMES
         )
+        measured_full: dict[str, Mapping[str, Any]] = {}
         for index, baseline in enumerate(baseline_recipes):
             if used["full_evals"] >= recipe.max_full_evals:
                 break
@@ -518,10 +560,45 @@ class TICAPruner:
             used["fast_evals"] += 1
             full_metrics = dict(evaluate_candidate(plan, True, "full") if evaluate_candidate else {})
             used["full_evals"] += 1
+            measured_full[baseline.baseline_name] = full_metrics
             interaction_metrics: Mapping[str, Any] = {}
             if baseline.baseline_name in {"interaction_block", "tica_block_ffn"} and used["interaction_evals"] < recipe.max_interaction_evals:
-                interaction_metrics = dict(evaluate_candidate(plan, True, "interaction") if evaluate_candidate else {})
-                used["interaction_evals"] += 1
+                independent: list[Mapping[str, Any]] = []
+                if baseline.baseline_name == "interaction_block":
+                    for block_id in list(plan.get("block_ids", [])):
+                        existing = measured_full.get("independent_block")
+                        if existing is not None and block_id == plan.get("block_ids", [None])[0]:
+                            independent.append(existing)
+                            continue
+                        if used["interaction_evals"] >= recipe.max_interaction_evals:
+                            break
+                        single_plan = dict(plan)
+                        single_plan["mode"] = "block"
+                        single_plan["block_ids"] = [block_id]
+                        independent.append(dict(evaluate_candidate(single_plan, True, "interaction_independent") if evaluate_candidate else {}))
+                        used["interaction_evals"] += 1
+                else:
+                    block_metrics = measured_full.get("tica_block")
+                    if block_metrics is not None:
+                        independent.append(block_metrics)
+                    if used["interaction_evals"] < recipe.max_interaction_evals:
+                        ffn_plan = dict(plan)
+                        ffn_plan["mode"] = "ffn"
+                        ffn_plan["block_ids"] = []
+                        independent.append(dict(evaluate_candidate(ffn_plan, True, "interaction_independent") if evaluate_candidate else {}))
+                        used["interaction_evals"] += 1
+                interaction_metrics = {
+                    "available": bool(independent) and isinstance(full_metrics.get("quality_error"), (int, float)),
+                    "independent_count": len(independent),
+                    "joint_quality_error": full_metrics.get("quality_error"),
+                    "independent_quality_errors": [item.get("quality_error") for item in independent],
+                }
+                errors = [item.get("quality_error") for item in independent]
+                if interaction_metrics["available"] and all(isinstance(value, (int, float)) for value in errors):
+                    interaction_metrics["interaction_delta"] = float(full_metrics["quality_error"]) - sum(float(value) for value in errors)
+                else:
+                    interaction_metrics["available"] = False
+                    interaction_metrics["reason"] = "missing_measured_quality_error"
             candidates.append(
                 TICACandidate(
                     candidate_id="TICA-C%04d" % (index + 1),
@@ -597,4 +674,5 @@ __all__ = [
     "normalized_time_weights",
     "recipe_plan",
     "tica_score",
+    "tica_operator_spec",
 ]

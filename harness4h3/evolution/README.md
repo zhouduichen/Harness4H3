@@ -34,3 +34,28 @@ CPU fake verification:
 All fake results are marked `offline_simulation=true`. Real Wan2.1-T2V-1.3B
 execution uses the optional Diffusers adapter and must be run on a host with
 the checkpoint, CUDA, and the matching Diffusers dependency set.
+
+## TICA-Prune CPU research baseline
+
+TICA is enabled only by the separate `tica_prune: true` configuration flag;
+the legacy path and its output roots are unchanged. The reproducible Fake
+configuration is `configs/evolutionary-compression.tica.fake.yaml`:
+
+```bash
+uv run --with torch --with pytest python -m harness4h3 evolve-compression \
+  --config configs/evolutionary-compression.tica.fake.yaml --rounds 2 --json
+```
+
+The first algorithm is stored as `origin=human_baseline` and
+`not_agent_discovered=true`. Later rounds can revise its source through
+`AlgorithmAgent`; validation compares parent and child under the same fixed
+calibration manifest, source-independent model parent, and explicit search
+budget. Each TICA round writes `tica-profile.json`, `tica-search.json`, and
+the usual algorithm/model evidence. `tica_prune` is classified as an
+algorithm rule over the existing Block/FFN structural closure, not as a new
+primitive search-space operator.
+
+The current sparse-attention runtime interface is intentionally disabled. It
+records an interface-only proposal and cannot mutate weights or claim GPU
+speedup. Real Wan use requires an explicit cached-input manifest; a missing
+manifest is rejected rather than replaced by random probes.

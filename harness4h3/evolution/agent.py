@@ -490,6 +490,36 @@ def _deterministic_improvement_source(
     """Produce a source-level revision, not an unrelated fresh seed."""
 
     failure_text = " ".join(str(item).lower() for item in failures)
+    if "tica_prune" in parent.source:
+        formula = "late_log" if any(token in failure_text for token in ("quality", "regression", "interaction")) else "uniform"
+        source = (
+            "import math\n\n"
+            "def propose(profile, history):\n"
+            "    # Improve %s: revise TICA's timestep weighting after measured feedback; keep the trusted structural closure.\n"
+            "    tica = profile.get('tica', {})\n"
+            "    names = [str(item) for item in tica.get('timesteps', ['0.9', '0.5', '0.1'])]\n"
+            "    values = [float(item) for item in names]\n"
+            "    raw = [math.log1p(1.0 + 9.0 * (1.0 - value)) for value in values]\n"
+            "    if %r == 'uniform':\n"
+            "        raw = [1.0 for value in values]\n"
+            "    total = sum(raw)\n"
+            "    weights = [value / total for value in raw]\n"
+            "    ranked = []\n"
+            "    for item in profile.get('tica_block_sensitivity', []):\n"
+            "        per_timestep = item.get('per_timestep', {})\n"
+            "        risk = sum(weights[index] * float(per_timestep.get(names[index], 0.0)) for index in range(len(names)))\n"
+            "        ranked.append((risk, str(item.get('block_id'))))\n"
+            "    selected = sorted(ranked)[0][1] if ranked else str(profile.get('layers', [{'block_id': 'block.0'}])[0]['block_id'])\n"
+            "    width = int(profile.get('model', {}).get('ffn_width', 1))\n"
+            "    target = max(1, min(width - 1, int(width * 0.75)))\n"
+            "    return {'operator': 'tica_prune', 'args': {'block_ids': [selected], 'retained_indices': list(range(target)), 'mode': 'block_plus_ffn', 'time_weight_formula': %r, 'risk_limit': 0.25, 'activation_weight': 0.5, 'interaction_weight': 0.5, 'beam_width': 2, 'max_fast_evals': 8, 'max_full_evals': 4, 'max_interaction_evals': 2}}\n"
+        ) % (parent.algorithm_id, formula, formula)
+        return (
+            source,
+            "change TICA timestep weighting while preserving globally aligned Block+FFN execution",
+            "measured TICA feedback indicates the parent weighting rule is the actionable design variable",
+            "reweight denoising timesteps and keep the same trusted structural mutation for a fair algorithm comparison",
+        )
     if "quality" in failure_text or "integrity" in failure_text:
         source = (
             "def propose(profile, history):\n"

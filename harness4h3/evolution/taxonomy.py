@@ -26,6 +26,12 @@ def _operator_expressible(plan: Mapping[str, Any], active_names: set[str]) -> bo
     operator = str(plan.get("operator", ""))
     if operator in active_names:
         return True
+    if operator == "tica_prune":
+        # TICA is a bounded orchestration rule over the existing structural
+        # closure, not a newly reachable primitive transformation.
+        args = plan.get("args") if isinstance(plan.get("args"), Mapping) else {}
+        mode = str(args.get("mode", "block_plus_ffn"))
+        return mode in {"block", "ffn", "block_plus_ffn"} and {"prune_blocks", "prune_ffn_channels"}.issubset(active_names)
     if operator == "compose":
         steps = plan.get("args", {}).get("steps", []) if isinstance(plan.get("args"), Mapping) else []
         return isinstance(steps, list) and all(
@@ -70,11 +76,15 @@ def classify_algorithm_change(
         reachable = True
         counterexample = None
         evidence_status = "expressible_by_active_operator_closure"
-    elif source_changed and child_operator in RULE_FACTORIES:
+    elif source_changed and (child_operator in RULE_FACTORIES or child_operator == "tica_prune"):
         change_class = "algorithm_rule_evolution"
         reachable = True
         counterexample = None
-        evidence_status = "rule_delegates_to_existing_structural_operator"
+        evidence_status = (
+            "rule_delegates_to_existing_structural_operator"
+            if child_operator != "tica_prune"
+            else "tica_orchestrates_existing_structural_closure"
+        )
     elif source_changed and parent_expressible and child_expressible:
         change_class = "algorithm_rule_evolution"
         reachable = True

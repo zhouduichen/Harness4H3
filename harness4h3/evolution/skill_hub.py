@@ -65,8 +65,10 @@ class SkillHub:
             "parent_source_sha256": getattr(candidate, "parent_source_sha256", None),
             "source_sha256": getattr(candidate, "source_sha256", None),
             "source": getattr(candidate, "source", ""),
+            "source_diff": getattr(candidate, "source_diff", ""),
             "change_summary": getattr(candidate, "change_summary", ""),
             "change_rationale": getattr(candidate, "change_rationale", ""),
+            "metadata": dict(getattr(candidate, "metadata", {}) or {}),
             "validation_status": status,
             "architecture": str(architecture),
             "evidence": dict(evidence or {}),
@@ -178,8 +180,10 @@ class SkillHub:
                     "algorithm_id": record.get("algorithm_id"),
                     "algorithm_parent_id": record.get("parent_algorithm_id"),
                     "algorithm_source": record.get("source", ""),
+                    "algorithm_source_diff": record.get("source_diff", ""),
                     "change_summary": record.get("change_summary", ""),
                     "change_rationale": record.get("change_rationale", ""),
+                    "algorithm_metadata": dict(record.get("metadata") or {}),
                     "evidence": dict(record.get("evidence") or {}),
                 }
                 matches.append(((1, 1, 2, 0.0, str(record.get("algorithm_id", ""))), item))

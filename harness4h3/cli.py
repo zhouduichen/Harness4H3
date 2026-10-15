@@ -56,6 +56,7 @@ from research.experiments.remote_h3_closed_loop import RemoteCampaign
 from .adapters.wan import build_wan_adapter
 from .evolution import CompressionConfig, EvolutionLoop, PromotionPolicy, SearchPolicy, WanVideoEvaluationConfig, WanVideoEvaluator
 from .evolution.agent import AlgorithmAgent, build_algorithm_provider
+from .evolution.tica_calibration import TICACalibrationManifest
 from .operators.wan import build_wan_compression_registry
 from .profiler import CalibrationCorpus, CalibrationSampleSpec, FakeWanCalibrationProvider, profile_model
 from .sandbox import AlgorithmSandbox
@@ -163,6 +164,32 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         evaluator = WanVideoEvaluator(evaluator_config, baseline=parent)
     elif evaluator_backend and evaluator_backend != "structural_proxy":
         raise ValueError("fake evolutionary compression supports only the default structural proxy evaluator")
+    tica_manifest = None
+    if config.tica_prune:
+        if config.tica_calibration_manifest is not None:
+            raw_manifest = json.loads(config.tica_calibration_manifest.read_text(encoding="utf-8"))
+            normalized_specs = []
+            for raw_spec in raw_manifest.get("specs", []) if isinstance(raw_manifest, dict) else []:
+                if not isinstance(raw_spec, dict):
+                    continue
+                normalized = dict(raw_spec)
+                for key in ("latent_path", "encoder_hidden_states_path"):
+                    value = normalized.get(key)
+                    if value and not Path(str(value)).is_absolute():
+                        normalized[key] = str((config.tica_calibration_manifest.parent / str(value)).resolve())
+                normalized_specs.append(normalized)
+            if isinstance(raw_manifest, dict):
+                raw_manifest = {**raw_manifest, "specs": normalized_specs}
+            tica_manifest = TICACalibrationManifest.from_dict(raw_manifest)
+            if config.backend == "fake" and tica_manifest.provider_name != "fake_wan_cpu":
+                raise ValueError("fake TICA backend requires provider_name=fake_wan_cpu")
+            if config.backend == "diffusers" and tica_manifest.provider_name == "fake_wan_cpu":
+                raise ValueError("real Wan TICA backend cannot use fake calibration inputs")
+        elif config.backend == "fake":
+            structure = adapter.inspect(adapter.reload_model(parent))
+            tica_manifest = TICACalibrationManifest.from_fake(hidden_size=int(structure.hidden_size), seed=config.seed)
+        else:
+            raise ValueError("real Wan TICA requires an explicit cached calibration manifest")
     policy_path = config.output_root / "search-policy.json"
     search_policy = None if policy_path.exists() else SearchPolicy(exploit_ratio=config.exploit_ratio, seed=config.seed)
     loop = EvolutionLoop(
@@ -180,6 +207,9 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         algorithm_improvement=config.algorithm_improvement,
         search_space_evolution=config.search_space_evolution,
         candidate_screening=config.candidate_screening,
+        tica_prune=config.tica_prune,
+        tica_manifest=tica_manifest,
+        tica_recipe=config.tica_recipe,
     )
     outcomes = [loop.run_round().to_dict() for _ in range(int(args.rounds))]
     failed = sum(1 for item in outcomes if item["status"] == "failed")

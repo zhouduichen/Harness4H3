@@ -252,6 +252,19 @@ def _validate_static_args(plan: CompressionPlan, profile: Mapping[str, Any]) -> 
         width = int(profile.get("model", {}).get("ffn_width", 0) or 0)
         if not retained or any(int(item) < 0 or int(item) >= width for item in retained):
             raise ValueError("static_invalid_channel_selection")
+    if plan.operator == "tica_prune":
+        mode = str(plan.args.get("mode", ""))
+        if mode not in {"block", "ffn", "block_plus_ffn"}:
+            raise ValueError("static_invalid_tica_mode")
+        block_ids = plan.args.get("block_ids", [])
+        retained = plan.args.get("retained_indices", [])
+        width = int(profile.get("model", {}).get("ffn_width", 0) or 0)
+        if mode in {"block", "block_plus_ffn"} and (not block_ids or not set(block_ids) <= known_blocks):
+            raise ValueError("static_invalid_tica_block_selection")
+        if len(set(block_ids)) >= len(known_blocks):
+            raise ValueError("static_cannot_remove_all_blocks")
+        if mode in {"ffn", "block_plus_ffn"} and (not retained or any(int(item) < 0 or int(item) >= width for item in retained)):
+            raise ValueError("static_invalid_tica_channel_selection")
 
 
 def _assert_finite(model: Any) -> None:

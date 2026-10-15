@@ -28,6 +28,8 @@ from .screening import CandidateScreeningPipeline, ScreeningContext
 from .skill_hub import SkillHub
 from .store import AlgorithmStore
 from .taxonomy import classify_algorithm_change, classify_search_space_proposal
+from .tica_calibration import TICACalibrationManifest
+from .tica_prune import TICARecipe, TICAPruner, build_human_tica_source, collect_tica_profile, tica_operator_spec, tica_score
 from ..operators.wan import WanCompressionRegistry, build_wan_compression_registry
 
 
@@ -74,6 +76,9 @@ class EvolutionLoop:
         search_space_evolution: bool = False,
         candidate_screening: bool = False,
         search_space_manager: Optional[SearchSpaceManager] = None,
+        tica_prune: bool = False,
+        tica_manifest: Optional[TICACalibrationManifest] = None,
+        tica_recipe: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.adapter = adapter
         self.output_root = Path(output_root)
@@ -90,7 +95,15 @@ class EvolutionLoop:
         )
         self.agent = agent or AlgorithmAgent()
         self.sandbox = sandbox or AlgorithmSandbox(self.output_root / "sandbox")
-        self.registry = registry or build_wan_compression_registry()
+        self.tica_prune = bool(tica_prune)
+        self.tica_manifest = tica_manifest
+        if self.tica_prune and self.tica_manifest is None and bool(parent.metadata.get("offline_simulation", False)):
+            self.tica_manifest = TICACalibrationManifest.from_fake(hidden_size=int(parent.structure.hidden_size))
+        if self.tica_prune and self.tica_manifest is None:
+            raise ValueError("TICA requires an explicit cached-real-Wan calibration manifest")
+        self.tica_recipe = TICARecipe.from_mapping(tica_recipe)
+        self._custom_evaluator = evaluator is not None
+        self.registry = registry or build_wan_compression_registry(include_tica=self.tica_prune)
         self.evaluator = evaluator or self._default_evaluator
         self.search_policy = search_policy or self._load_search_policy()
         self.memory_enabled = bool(memory_enabled)
@@ -104,6 +117,8 @@ class EvolutionLoop:
         self.search_space_version = None
         self.search_space_proposal = None
         self.search_space_feedback: Mapping[str, Any] = {}
+        if self.tica_prune:
+            self.sandbox.operator_specs["tica_prune"] = tica_operator_spec()
         self.pareto_path = self.output_root / "pareto-front.json"
         self.parent = parent
         self._initialize_evolution_features()
@@ -193,10 +208,19 @@ class EvolutionLoop:
             self._write_round_state(round_dir, {"round_id": round_id, "parent_model_id": parent_candidate.id, "status": "in_progress"})
         profile_path = round_dir / "profile.json"
         profile = self._load_or_profile(profile_path, parent_artifact)
+        profile_payload: Mapping[str, Any] = profile.to_dict()
+        tica_profile_path = round_dir / "tica-profile.json"
+        tica_search_path = round_dir / "tica-search.json"
+        if self.tica_prune:
+            tica_profile = self._load_or_collect_tica_profile(tica_profile_path, parent_artifact)
+            profile_payload = {**dict(profile_payload), **dict(tica_profile)}
+            if not tica_search_path.exists():
+                search = self._run_tica_search(parent_artifact, profile_payload, round_dir)
+                _write_json(tica_search_path, search.to_dict())
         search_space_path = round_dir / "search-space.json"
         if self.search_space_version is not None and not search_space_path.exists():
             _write_json(search_space_path, self.search_space_version.to_dict())
-        architecture = str(profile.model["architecture"])
+        architecture = str(profile_payload["model"]["architecture"])
         skills = self.skill_hub.search(architecture=architecture, limit=8) if self.memory_enabled else []
         pareto_front = self._load_pareto_front()
         selection_history = self._selection_history()
@@ -255,19 +279,34 @@ class EvolutionLoop:
                         algorithm_id,
                         parent=improvement_parent,
                         parent_id=parent_candidate.id,
-                        profile=profile.to_dict(),
+                        profile=profile_payload,
                         history=agent_history,
                         failures=_history_failure_reasons(agent_history),
                         skills=skills,
                         search_space=self.search_space_version.to_dict() if self.search_space_version is not None else {},
                     )
                     improved_algorithm = True
+                elif self.tica_prune and not list(self.algorithm_store.read()):
+                    algorithm = AlgorithmCandidate.from_source(
+                        algorithm_id,
+                        build_human_tica_source(algorithm_id),
+                        parent_id=parent_candidate.id,
+                        parent_algorithm_id=parent_algorithm_id,
+                        hypothesis="human-designed TICA-Prune baseline using multi-timestep local risk and activation contribution",
+                        metadata={
+                            "origin": "human_baseline",
+                            "tica_baseline": True,
+                            "not_agent_discovered": True,
+                            "design_strategy": "tica_prune",
+                            "calibration_digest": self.tica_manifest.digest() if self.tica_manifest is not None else None,
+                        },
+                    )
                 else:
                     algorithm = self.agent.generate(
                         algorithm_id,
                         parent_id=parent_candidate.id,
                         parent_algorithm_id=parent_algorithm_id,
-                        profile=profile.to_dict(),
+                        profile=profile_payload,
                         history=agent_history,
                         skills=skills,
                         pareto_front=pareto_front,
@@ -306,7 +345,7 @@ class EvolutionLoop:
         sandbox_path = round_dir / "sandbox.json"
         sandbox_result = self._load_sandbox(sandbox_path)
         if sandbox_result is None:
-            sandbox_result = self.sandbox.run(algorithm.source, profile.to_dict(), skills)
+            sandbox_result = self.sandbox.run(algorithm.source, profile_payload, skills)
             _write_json(sandbox_path, _sandbox_dict(sandbox_result))
         if sandbox_result.status != "success" or sandbox_result.plan is None:
             return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "sandbox", sandbox_result.failure_type or "sandbox_failed", sandbox_result.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path)})
@@ -319,7 +358,7 @@ class EvolutionLoop:
                 validation_parent = self._algorithm_validation_parent(improvement_parent, parent_artifact)
                 validation_profiles = self._load_validation_profiles(validation_profiles_path)
                 if validation_profiles is None:
-                    validation_profiles = self._build_validation_profiles(validation_parent, profile)
+                    validation_profiles = self._build_validation_profiles(validation_parent, profile_payload)
                     _write_json(validation_profiles_path, {"profiles": list(validation_profiles)})
                 validation = AlgorithmValidator().validate(
                     improvement_parent,
@@ -332,7 +371,11 @@ class EvolutionLoop:
                         validation_profiles,
                         round_dir / "algorithm-validation-measurements",
                     ),
-                    budget={"sandbox_timeout_s": self.sandbox.timeout_s, "mode": "cpu_fake"},
+                    budget={
+                        "sandbox_timeout_s": self.sandbox.timeout_s,
+                        "mode": "cpu_fake" if bool(validation_parent.metadata.get("offline_simulation", False)) else "real_wan_structure",
+                        "tica_search_budget": self.tica_recipe.budget() if self.tica_prune else None,
+                    },
                     profiles=validation_profiles,
                 )
                 _write_json(validation_path, validation.to_dict())
@@ -352,12 +395,12 @@ class EvolutionLoop:
             algorithm.source,
             parent_plan_for_taxonomy,
             sandbox_result.plan.to_dict(),
-            self.search_space_version.to_dict() if self.search_space_version is not None else {"operators": []},
+            self.search_space_version.to_dict() if self.search_space_version is not None else default_search_space().to_dict(),
         )
         if self.search_space_proposal is not None:
             change_taxonomy["search_space_proposal"] = classify_search_space_proposal(
                 self.search_space_proposal.spec.to_dict(),
-                self.search_space_version.to_dict() if self.search_space_version is not None else {"operators": []},
+                self.search_space_version.to_dict() if self.search_space_version is not None else default_search_space().to_dict(),
                 self.search_space_proposal.validation,
             )
 
@@ -368,7 +411,7 @@ class EvolutionLoop:
                 algorithm_id=algorithm.algorithm_id,
                 parent_algorithm_id=algorithm.parent_algorithm_id,
                 search_choice=search_choice,
-                profile=profile.to_dict(),
+                profile=profile_payload,
                 history=agent_history,
                 plan=sandbox_result.plan.to_dict(),
                 hypothesis=algorithm.hypothesis,
@@ -383,7 +426,7 @@ class EvolutionLoop:
         screening_path = round_dir / "screening"
         if self.candidate_screening:
             screening = CandidateScreeningPipeline(screening_path)
-            pre_results = screening.run(self._screening_context(parent_artifact, profile, algorithm, sandbox_result.plan))
+            pre_results = screening.run(self._screening_context(parent_artifact, profile_payload, algorithm, sandbox_result.plan))
             if pre_results and pre_results[-1].status != "passed":
                 return self._finish_failure(
                     round_id,
@@ -412,20 +455,20 @@ class EvolutionLoop:
             algorithm.source,
             parent_plan_for_taxonomy,
             sandbox_result.plan.to_dict(),
-            self.search_space_version.to_dict() if self.search_space_version is not None else {"operators": []},
+            self.search_space_version.to_dict() if self.search_space_version is not None else default_search_space().to_dict(),
             structural_change=compression.structural_change,
         )
         if self.search_space_proposal is not None:
             change_taxonomy["search_space_proposal"] = classify_search_space_proposal(
                 self.search_space_proposal.spec.to_dict(),
-                self.search_space_version.to_dict() if self.search_space_version is not None else {"operators": []},
+                self.search_space_version.to_dict() if self.search_space_version is not None else default_search_space().to_dict(),
                 self.search_space_proposal.validation,
             )
         design = build_design_record(
             algorithm_id=algorithm.algorithm_id,
             parent_algorithm_id=algorithm.parent_algorithm_id,
             search_choice=search_choice,
-            profile=profile.to_dict(),
+            profile=profile_payload,
             history=agent_history,
             plan=sandbox_result.plan.to_dict(),
             hypothesis=algorithm.hypothesis,
@@ -448,7 +491,20 @@ class EvolutionLoop:
         evaluation = self._read_json(evaluation_path) if evaluation_path.exists() else None
         if evaluation is None:
             try:
-                evaluation = dict(self.evaluator(compression.child_checkpoint, profile.to_dict()))
+                if self.tica_prune and not self._custom_evaluator:
+                    measurement = AlgorithmModelEvaluator(
+                        self.adapter,
+                        self.registry,
+                        parent_artifact,
+                        profile_payload,
+                        round_dir / "model-evaluation",
+                        seed=int(profile_payload.get("provenance", {}).get("seed", 7)),
+                        calibration_manifest=self.tica_manifest,
+                        search_budget=self.tica_recipe.budget(),
+                    )
+                    evaluation = dict(measurement.evaluate(sandbox_result))
+                else:
+                    evaluation = dict(self.evaluator(compression.child_checkpoint, profile_payload))
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 evaluation = {"valid": False, "evaluation_status": "failed", "failure_type": "evaluator_failed", "failure_message": str(exc), "offline_simulation": False}
         if not child_integrity:
@@ -464,9 +520,9 @@ class EvolutionLoop:
         if self.candidate_screening:
             screening = CandidateScreeningPipeline(screening_path)
             full_results = screening.run(
-                self._screening_context(
-                    parent_artifact,
-                    profile,
+                    self._screening_context(
+                        parent_artifact,
+                        profile_payload,
                     algorithm,
                     sandbox_result.plan,
                     full_evaluator=lambda _: dict(evaluation),
@@ -562,6 +618,9 @@ class EvolutionLoop:
             self._update_pareto_front(child_candidate.id, evaluation)
             self.model_store.set_active(child_candidate.id)
         paths = {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "design": str(design_path), "compression": str(compression_path), "evaluation": str(evaluation_path), "decision": str(decision_path)}
+        if self.tica_prune:
+            paths["tica_profile"] = str(tica_profile_path)
+            paths["tica_search"] = str(tica_search_path)
         if self.search_space_version is not None:
             paths["search_space"] = str(search_space_path)
         if self.candidate_screening:
@@ -909,23 +968,107 @@ class EvolutionLoop:
         profile.write_json(path)
         return profile
 
+    def _load_or_collect_tica_profile(self, path: Path, parent: CheckpointArtifact) -> Mapping[str, Any]:
+        """Load one immutable calibration profile or collect it once.
+
+        The profile is separate from the legacy ProfileReport so old runs and
+        their JSON schema remain untouched.  A cached profile is accepted only
+        when it belongs to the same calibration manifest and parent checkpoint.
+        """
+
+        expected_digest = self.tica_manifest.digest() if self.tica_manifest is not None else None
+        if path.exists():
+            cached = self._read_json(path)
+            tica = cached.get("tica") if isinstance(cached.get("tica"), Mapping) else {}
+            if tica.get("calibration_digest") == expected_digest and cached.get("parent_checkpoint_sha256") == parent.sha256:
+                return cached
+        model = self.adapter.reload_model(parent)
+        if self.tica_manifest is None:
+            raise ValueError("TICA calibration manifest is unavailable")
+        collected = dict(collect_tica_profile(self.adapter, model, self.tica_manifest))
+        collected["parent_checkpoint_sha256"] = parent.sha256
+        collected["source_revision"] = "tica-prune-v1"
+        _write_json(path, collected)
+        return collected
+
+    def _run_tica_search(self, parent: CheckpointArtifact, profile: Mapping[str, Any], round_dir: Path) -> Any:
+        """Run the four named human baselines under one bounded budget.
+
+        Fast measurements come from the already executed local sensitivity
+        probes. Full and interaction measurements execute actual structural
+        candidates through AlgorithmModelEvaluator. No quality or interaction
+        constants are introduced here.
+        """
+
+        if self.tica_manifest is None:
+            raise ValueError("TICA search requires calibration manifest")
+        score = tica_score(profile, time_weight_formula=self.tica_recipe.time_weight_formula)
+        evaluator = AlgorithmModelEvaluator(
+            self.adapter,
+            self.registry,
+            parent,
+            profile,
+            round_dir / "tica-search-measurements",
+            seed=int(profile.get("provenance", {}).get("seed", 7)) if isinstance(profile.get("provenance"), Mapping) else 7,
+            calibration_manifest=self.tica_manifest,
+            search_budget=self.tica_recipe.budget(),
+        )
+
+        def measure(plan: Mapping[str, Any], full: bool, stage: str) -> Mapping[str, Any]:
+            if not full:
+                selected = [str(item) for item in plan.get("block_ids", [])]
+                risks = [score.block_risk.get(item) for item in selected if item in score.block_risk]
+                return {
+                    "valid": bool(risks),
+                    "evidence_level": "cpu_fake_local_output" if self.tica_manifest.provider_name == "fake_wan_cpu" else "real_wan_local_output",
+                    "evaluation_status": "local_output_screen",
+                    "quality_error": sum(risks) / max(len(risks), 1) if risks else None,
+                    "selected_blocks": selected,
+                    "time_weight_formula": self.tica_recipe.time_weight_formula,
+                    "stage": stage,
+                }
+            return evaluator.evaluate(
+                SandboxResult(
+                    "success",
+                    "0" * 64,
+                    SandboxCompressionPlan("tica_prune", dict(plan)),
+                    metadata={"stage": stage, "trusted_tica_baseline": True},
+                )
+            )
+
+        return TICAPruner().search(
+            self.adapter,
+            parent,
+            self.tica_manifest,
+            profile,
+            self.tica_recipe,
+            evaluate_candidate=measure,
+        )
+
     def _screening_context(
         self,
         parent: CheckpointArtifact,
-        profile: ProfileReport,
+        profile: Mapping[str, Any],
         algorithm: AlgorithmCandidate,
         plan: SandboxCompressionPlan,
         *,
         full_evaluator: Optional[Callable[[Any], Mapping[str, Any]]] = None,
     ) -> ScreeningContext:
+        search_space = self.search_space_version.to_dict() if self.search_space_version is not None else None
+        if self.tica_prune:
+            search_space = dict(search_space or {"operators": []})
+            search_space["operators"] = [
+                *list(search_space.get("operators", [])),
+                tica_operator_spec(),
+            ]
         return ScreeningContext(
             parent=parent,
             adapter=self.adapter,
-            profile=profile.to_dict(),
+            profile=profile,
             algorithm=algorithm,
             plan=plan,
             registry=self.registry,
-            search_space_version=self.search_space_version.to_dict() if self.search_space_version is not None else None,
+            search_space_version=search_space,
             full_evaluator=full_evaluator,
         )
 
@@ -956,6 +1099,8 @@ class EvolutionLoop:
                     scenario_profile,
                     output_root / digest,
                     seed=int(seed_value or 7),
+                    calibration_manifest=self.tica_manifest if self.tica_prune else None,
+                    search_budget=self.tica_recipe.budget() if self.tica_prune else {"max_fast_evals": 8, "max_full_evals": 4, "max_interaction_evals": 2},
                 )
                 evaluators[digest] = evaluator
             return evaluator.evaluate(result)
@@ -1082,13 +1227,14 @@ class EvolutionLoop:
             "expected_gain": "increase reachable compression/quality trade-offs only if validation supplies a structural counterexample",
         }
 
-    def _build_validation_profiles(self, parent: CheckpointArtifact, profile: ProfileReport) -> tuple[Mapping[str, Any], ...]:
+    def _build_validation_profiles(self, parent: CheckpointArtifact, profile: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
         """Create fixed, same-parent diagnostic scenarios for algorithm comparison."""
 
         model = self.adapter.reload_model(parent)
-        seed = int(profile.provenance.get("seed", 7) or 7) if isinstance(profile.provenance, Mapping) else 7
-        if str(profile.model.get("checkpoint_sha256", "")) == parent.sha256:
-            base = profile.to_dict()
+        provenance = profile.get("provenance") if isinstance(profile, Mapping) else None
+        seed = int(provenance.get("seed", 7) or 7) if isinstance(provenance, Mapping) else 7
+        if str(profile.get("model", {}).get("checkpoint_sha256", "")) == parent.sha256:
+            base = dict(profile)
         else:
             base = profile_model(
                 self.adapter,
@@ -1104,6 +1250,10 @@ class EvolutionLoop:
             advanced=self.advanced_profiling,
             channel_chunk_size=16 if self.advanced_profiling else None,
         ).to_dict()
+        if self.tica_prune:
+            tica = dict(collect_tica_profile(self.adapter, model, self.tica_manifest)) if self.tica_manifest is not None else {}
+            base = {**dict(base), **tica}
+            alternate = {**dict(alternate), **tica}
         alternate_provenance = dict(alternate.get("provenance") or {})
         alternate_provenance["validation_scenario"] = "alternate_seed"
         alternate["provenance"] = alternate_provenance
@@ -1157,6 +1307,9 @@ class EvolutionLoop:
                 scenario_results=tuple(dict(item) for item in raw.get("scenario_results", []) if isinstance(item, Mapping)),
                 reasons=tuple(str(item) for item in raw.get("reasons", [])),
                 created_at=str(raw.get("created_at", "")),
+                calibration_digest=str(raw["calibration_digest"]) if raw.get("calibration_digest") else None,
+                search_budget=dict(raw.get("search_budget") or {}),
+                interaction_evidence=dict(raw.get("interaction_evidence") or {}),
             )
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None

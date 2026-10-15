@@ -42,7 +42,7 @@ provider creates the same mapping deterministically on CPU and marks it
 The adapter protocol gains a narrow calibration boundary:
 
 ```python
-adapter.calibration_samples(model, manifest) -> tuple[CalibrationInput, ...]
+adapter.tica_calibration_inputs(model, manifest) -> tuple[TICACalibrationInput, ...]
 adapter.forward_denoising(model, calibration_input, timestep) -> Any
 ```
 
@@ -71,7 +71,7 @@ The human baseline recipe has four independently addressable stages:
    weights are normalized inverse-noise weights over the manifest schedule,
    with the exact formula and values recorded in the recipe.
 2. **Block risk.** Use local probes to rank block removals. Re-evaluate only
-   the top `max_full_block_evals` candidates by executing the complete model
+   the top `max_full_evals` candidates by executing the complete model
    path for every selected timestep. The risk is the weighted relative error,
    not a fixed score or operator label.
 3. **FFN contribution.** Estimate each channel's activation contribution from

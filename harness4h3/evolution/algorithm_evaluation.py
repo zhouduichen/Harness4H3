@@ -183,6 +183,7 @@ class AlgorithmModelEvaluator:
                 "compute_metrics": compute,
                 "estimated_flops": child_flops,
                 "output_metrics": output,
+                "quality_error": float(output.get("quality_error", output.get("normalized_mse", 0.0))),
                 "quality_score": quality,
                 "search_score": quality + 0.10 * reduction_score,
                 "checkpoint_size_bytes": checkpoint_bytes,

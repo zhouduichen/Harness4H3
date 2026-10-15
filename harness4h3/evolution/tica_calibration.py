@@ -148,6 +148,33 @@ class TICACalibrationManifest:
             }
         )
 
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "TICACalibrationManifest":
+        if not isinstance(raw, Mapping):
+            raise TypeError("TICA calibration manifest must be an object")
+        specs = tuple(
+            TICACalibrationSpec(
+                sample_id=str(item["sample_id"]),
+                prompt=str(item["prompt"]),
+                seed=int(item["seed"]),
+                latent_shape=tuple(int(value) for value in item["latent_shape"]),
+                timesteps=tuple(float(value) for value in item["timesteps"]),
+                latent_path=str(item["latent_path"]) if item.get("latent_path") else None,
+                encoder_hidden_states_path=(
+                    str(item["encoder_hidden_states_path"])
+                    if item.get("encoder_hidden_states_path")
+                    else None
+                ),
+            )
+            for item in raw.get("specs", [])
+            if isinstance(item, Mapping)
+        )
+        return cls(
+            specs=specs,
+            provider_name=str(raw.get("provider_name", "cached_real_wan")),
+            manifest_id=str(raw.get("manifest_id", "")),
+        )
+
     def timesteps(self) -> tuple[float, ...]:
         values: list[float] = []
         for spec in self.specs:

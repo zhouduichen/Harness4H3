@@ -10,5 +10,8 @@ from .policy import SearchPolicy
 from .skill_hub import SkillHub
 from .store import AlgorithmStore
 from .screening import CandidateScreeningPipeline, ScreeningContext, ScreeningResult, ScreeningStage
+from .runtime_operator import RuntimeCompressionRequest, SparseAttentionRuntimeOperator
+from .tica_calibration import TICACalibrationInput, TICACalibrationManifest, TICACalibrationSpec
+from .tica_prune import TICAPruner, TICARecipe, TICASearchResult
 
-__all__ = ["AlgorithmAgent", "AlgorithmCandidate", "AlgorithmImprovementRequest", "AlgorithmStore", "AlgorithmValidationRecord", "AlgorithmValidator", "CandidateScreeningPipeline", "CompressionConfig", "CompressionConfigError", "CompressionPlan", "EvolutionLoop", "EvolutionRound", "PromotionPolicy", "ScreeningContext", "ScreeningResult", "ScreeningStage", "SearchPolicy", "SkillHub", "WanEvaluationError", "WanVideoEvaluationConfig", "WanVideoEvaluator"]
+__all__ = ["AlgorithmAgent", "AlgorithmCandidate", "AlgorithmImprovementRequest", "AlgorithmStore", "AlgorithmValidationRecord", "AlgorithmValidator", "CandidateScreeningPipeline", "CompressionConfig", "CompressionConfigError", "CompressionPlan", "EvolutionLoop", "EvolutionRound", "PromotionPolicy", "RuntimeCompressionRequest", "SparseAttentionRuntimeOperator", "ScreeningContext", "ScreeningResult", "ScreeningStage", "SearchPolicy", "SkillHub", "TICACalibrationInput", "TICACalibrationManifest", "TICACalibrationSpec", "TICAPruner", "TICARecipe", "TICASearchResult", "WanEvaluationError", "WanVideoEvaluationConfig", "WanVideoEvaluator"]

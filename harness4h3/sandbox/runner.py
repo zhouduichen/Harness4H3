@@ -118,6 +118,10 @@ class CompressionPlan:
                 raise ValueError("algorithm_output_invalid: %s must be a list of integers" % key)
             if type_name == "float" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
                 raise ValueError("algorithm_output_invalid: %s must be numeric" % key)
+            if type_name == "int" and (not isinstance(value, int) or isinstance(value, bool)):
+                raise ValueError("algorithm_output_invalid: %s must be an integer" % key)
+            if type_name == "str" and not isinstance(value, str):
+                raise ValueError("algorithm_output_invalid: %s must be a string" % key)
         return cls(str(operator), {str(key): value for key, value in args.items()})
 
     def to_dict(self) -> dict[str, Any]:

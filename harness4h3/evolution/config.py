@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 import yaml
 
@@ -31,6 +31,9 @@ class CompressionConfig:
     algorithm_improvement: bool = False
     search_space_evolution: bool = False
     candidate_screening: bool = False
+    tica_prune: bool = False
+    tica_calibration_manifest: Optional[Path] = None
+    tica_recipe: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.backend not in {"fake", "diffusers"}:
@@ -53,7 +56,7 @@ class CompressionConfig:
             raise CompressionConfigError("unable to read compression config: %s" % exc) from exc
         if not isinstance(raw, Mapping):
             raise CompressionConfigError("compression config must be a mapping")
-        allowed = {"backend", "checkpoint", "output_root", "device", "dtype", "local_files_only", "fake", "controller", "evaluator", "memory_enabled", "adapt_search_policy", "sandbox_timeout_s", "exploit_ratio", "seed", "advanced_profiling", "algorithm_improvement", "search_space_evolution", "candidate_screening"}
+        allowed = {"backend", "checkpoint", "output_root", "device", "dtype", "local_files_only", "fake", "controller", "evaluator", "memory_enabled", "adapt_search_policy", "sandbox_timeout_s", "exploit_ratio", "seed", "advanced_profiling", "algorithm_improvement", "search_space_evolution", "candidate_screening", "tica_prune", "tica_calibration_manifest", "tica_recipe"}
         unknown = sorted(set(raw) - allowed)
         if unknown:
             raise CompressionConfigError("unsupported compression config field(s): %s" % ", ".join(unknown))
@@ -70,6 +73,15 @@ class CompressionConfig:
         evaluator = raw.get("evaluator", {})
         if not isinstance(evaluator, Mapping):
             raise CompressionConfigError("evaluator must be a mapping")
+        recipe = raw.get("tica_recipe", {})
+        if not isinstance(recipe, Mapping):
+            raise CompressionConfigError("tica_recipe must be a mapping")
+        manifest_raw = raw.get("tica_calibration_manifest")
+        manifest_path = None
+        if manifest_raw:
+            manifest_path = Path(str(manifest_raw)).expanduser()
+            if not manifest_path.is_absolute():
+                manifest_path = (source.parent / manifest_path).resolve()
         return cls(
             backend=str(raw.get("backend", "fake")),
             checkpoint=str(raw.get("checkpoint", "fake://baseline")),
@@ -89,4 +101,7 @@ class CompressionConfig:
             algorithm_improvement=bool(raw.get("algorithm_improvement", False)),
             search_space_evolution=bool(raw.get("search_space_evolution", False)),
             candidate_screening=bool(raw.get("candidate_screening", False)),
+            tica_prune=bool(raw.get("tica_prune", False)),
+            tica_calibration_manifest=manifest_path,
+            tica_recipe=dict(recipe),
         )
