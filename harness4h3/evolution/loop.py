@@ -14,13 +14,16 @@ from ..archive.model_store import ModelStore
 from ..h3.state import ModelState
 from ..memory.design_gene import DesignGene
 from ..memory.experience import ExperienceRecord, ExperienceStore
-from ..profiler import ProfileReport, profile_model
+from ..profiler import CalibrationCorpus, CalibrationSampleSpec, FakeWanCalibrationProvider, ProfileReport, profile_model
+from ..operators.wan import OperatorSpec, SearchSpaceManager
 from ..sandbox.runner import AlgorithmSandbox, CompressionPlan as SandboxCompressionPlan, SandboxResult
 from .agent import AlgorithmAgent
 from .candidate import AlgorithmCandidate
 from .design import build_design_record
 from .evaluator import PromotionPolicy
+from .improvement import AlgorithmValidationRecord, AlgorithmValidator
 from .policy import SearchPolicy
+from .screening import CandidateScreeningPipeline, ScreeningContext
 from .skill_hub import SkillHub
 from .store import AlgorithmStore
 from ..operators.wan import WanCompressionRegistry, build_wan_compression_registry
@@ -64,6 +67,11 @@ class EvolutionLoop:
         memory_enabled: bool = True,
         adapt_search_policy: bool = True,
         promotion_policy: Optional[PromotionPolicy] = None,
+        advanced_profiling: bool = False,
+        algorithm_improvement: bool = False,
+        search_space_evolution: bool = False,
+        candidate_screening: bool = False,
+        search_space_manager: Optional[SearchSpaceManager] = None,
     ) -> None:
         self.adapter = adapter
         self.output_root = Path(output_root)
@@ -82,9 +90,91 @@ class EvolutionLoop:
         self.memory_enabled = bool(memory_enabled)
         self.adapt_search_policy = bool(adapt_search_policy)
         self.promotion_policy = promotion_policy or PromotionPolicy()
+        self.advanced_profiling = bool(advanced_profiling)
+        self.algorithm_improvement = bool(algorithm_improvement)
+        self.search_space_evolution = bool(search_space_evolution)
+        self.candidate_screening = bool(candidate_screening)
+        self.search_space_manager: Optional[SearchSpaceManager] = search_space_manager
+        self.search_space_version = None
+        self.search_space_proposal = None
         self.pareto_path = self.output_root / "pareto-front.json"
         self.parent = parent
+        self._initialize_evolution_features()
         self._initialize_parent()
+
+    def _initialize_evolution_features(self) -> None:
+        """Initialize additive features without changing legacy defaults."""
+
+        if not self.search_space_evolution:
+            return
+        self.search_space_manager = self.search_space_manager or SearchSpaceManager(self.output_root / "search-space")
+        self.search_space_version = self.search_space_manager.active
+        # The first extension is deliberately an offline CPU demonstration.
+        # Real Wan runs only consume an extension after an explicit validation
+        # artifact exists; no new operator is silently trusted on GPU.
+        if bool(self.parent.metadata.get("offline_simulation", False)) and "prune_ffn_by_weight_threshold" not in self.search_space_version.operator_names():
+            spec = OperatorSpec(
+                name="prune_ffn_by_weight_threshold",
+                version="1",
+                argument_schema={"block_ids": "list[str]", "threshold": "float"},
+                granularity="channel",
+                constraints=("wan_ffn_width_aligned", "threshold_must_change_width"),
+                limitations=("weight_proxy_only", "not_real_wan_validated"),
+                trusted_factory_key="prune_ffn_by_weight_threshold",
+            )
+            existing = next((item for item in self.search_space_manager.store.read_proposals() if item.spec.name == spec.name), None)
+            if existing is None:
+                existing = self.search_space_manager.propose(spec, "CPU Fake threshold proxy for a channel-importance plateau", ("offline-bootstrap",))
+            if existing.status == "proposed":
+                existing = self.search_space_manager.validate(
+                    existing,
+                    self.adapter,
+                    self.parent,
+                    output_dir=self.output_root / "search-space" / "validation" / existing.proposal_id,
+                )
+            self.search_space_proposal = existing
+            if existing.status == "validated":
+                self.search_space_version = self.search_space_manager.register(existing)
+        self.registry = self.search_space_manager.registry_for(self.search_space_version, self.registry)
+        self.sandbox.operator_specs.update(
+            {
+                item.name: item.to_dict()
+                for item in self.search_space_version.operators
+                if item.trusted_factory_key
+            }
+        )
+        self._record_search_space_gene()
+
+    def _record_search_space_gene(self) -> None:
+        if self.search_space_version is None or self.skill_hub.genes is None:
+            return
+        proposal = self.search_space_proposal
+        if proposal is None or proposal.status != "validated":
+            return
+        gene_id = "G-SS-" + proposal.proposal_id
+        if any(item.gene_id == gene_id for item in self.skill_hub.genes.read()):
+            return
+        spec = proposal.spec
+        validation = dict(proposal.validation)
+        self.skill_hub.genes.append(
+            DesignGene(
+                gene_id=gene_id,
+                status="accepted",
+                state={
+                    "architecture": self.parent.structure.architecture,
+                    "search_space_version": self.search_space_version.version_id,
+                    "offline_simulation": bool(validation.get("offline_simulation", True)),
+                },
+                bottleneck={"kind": "search_space_extension", "evidence_refs": list(proposal.evidence_ids)},
+                intervention={"operator": spec.name, "strategy": "validated_search_space_extension", "argument_schema": spec.argument_schema},
+                controlled_conditions={"proposal_id": proposal.proposal_id, "parent_version_id": proposal.parent_version_id},
+                benefit=dict(validation.get("metrics") or {}),
+                remaining_limitation={"reason": "not_real_wan_validated", "limitations": list(spec.limitations)},
+                risks_lessons=["new execution capability is trusted only after interface, reload, and finite-value checks"],
+                evidence={"proposal_id": proposal.proposal_id, "search_space_version": self.search_space_version.version_id, "validation": validation},
+                confidence="partial",
+            )
+        )
 
     def _initialize_parent(self) -> None:
         if self.model_store.lineage():
@@ -117,6 +207,9 @@ class EvolutionLoop:
             self._write_round_state(round_dir, {"round_id": round_id, "parent_model_id": parent_candidate.id, "status": "in_progress"})
         profile_path = round_dir / "profile.json"
         profile = self._load_or_profile(profile_path, parent_artifact)
+        search_space_path = round_dir / "search-space.json"
+        if self.search_space_version is not None and not search_space_path.exists():
+            _write_json(search_space_path, self.search_space_version.to_dict())
         architecture = str(profile.model["architecture"])
         skills = self.skill_hub.search(architecture=architecture, limit=8) if self.memory_enabled else []
         pareto_front = self._load_pareto_front()
@@ -138,22 +231,46 @@ class EvolutionLoop:
         # still the version that the next algorithm should inherit from.
         latest_algorithm = self.algorithm_store.latest()
         parent_algorithm_id = latest_algorithm.algorithm_id if latest_algorithm is not None else None
+        improvement_parent = latest_algorithm
+        improved_algorithm = False
         if persisted_algorithm:
             algorithm = AlgorithmCandidate.from_dict(persisted_algorithm)
+            if self.algorithm_improvement and algorithm.parent_algorithm_id and algorithm.parent_source_sha256:
+                try:
+                    improvement_parent = self.algorithm_store.get(algorithm.parent_algorithm_id)
+                except ValueError:
+                    improvement_parent = None
+                improved_algorithm = improvement_parent is not None
             if not any(item.algorithm_id == algorithm.algorithm_id for item in self.algorithm_store.read()):
-                self.algorithm_store.create(algorithm)
+                if algorithm.parent_algorithm_id and algorithm.parent_source_sha256:
+                    self.algorithm_store.create_child(algorithm, algorithm.parent_source_sha256)
+                else:
+                    self.algorithm_store.create(algorithm)
         else:
             try:
-                algorithm = self.agent.generate(
-                    algorithm_id,
-                    parent_id=parent_candidate.id,
-                    parent_algorithm_id=parent_algorithm_id,
-                    profile=profile.to_dict(),
-                    history=agent_history,
-                    skills=skills,
-                    pareto_front=pareto_front,
-                    search_choice=search_choice,
-                )
+                if self.algorithm_improvement and improvement_parent is not None:
+                    algorithm = self.agent.improve(
+                        algorithm_id,
+                        parent=improvement_parent,
+                        parent_id=parent_candidate.id,
+                        profile=profile.to_dict(),
+                        history=agent_history,
+                        failures=_history_failure_reasons(agent_history),
+                        skills=skills,
+                        search_space=self.search_space_version.to_dict() if self.search_space_version is not None else {},
+                    )
+                    improved_algorithm = True
+                else:
+                    algorithm = self.agent.generate(
+                        algorithm_id,
+                        parent_id=parent_candidate.id,
+                        parent_algorithm_id=parent_algorithm_id,
+                        profile=profile.to_dict(),
+                        history=agent_history,
+                        skills=skills,
+                        pareto_front=pareto_front,
+                        search_choice=search_choice,
+                    )
             except (RuntimeError, TypeError, ValueError) as exc:
                 algorithm = AlgorithmCandidate.from_source(
                     algorithm_id,
@@ -167,7 +284,10 @@ class EvolutionLoop:
                 return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "generation", "algorithm_generation_failed", str(exc), {"profile": str(profile_path), "algorithm": str(algorithm_path)}, algorithm_persisted=False)
             _write_json(algorithm_path, algorithm.to_dict())
             try:
-                self.algorithm_store.create(algorithm)
+                if improved_algorithm:
+                    self.algorithm_store.create_child(algorithm, improvement_parent.source_sha256)  # type: ignore[union-attr]
+                else:
+                    self.algorithm_store.create(algorithm)
             except ValueError as exc:
                 return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "generation", "duplicate_algorithm", str(exc), {"profile": str(profile_path), "algorithm": str(algorithm_path)}, algorithm_persisted=False)
         self._write_round_state(round_dir, {**round_state, "round_id": round_id, "parent_model_id": parent_candidate.id, "search_choice": search_choice, "algorithm_id": algorithm.algorithm_id, "status": "in_progress"})
@@ -179,6 +299,28 @@ class EvolutionLoop:
             _write_json(sandbox_path, _sandbox_dict(sandbox_result))
         if sandbox_result.status != "success" or sandbox_result.plan is None:
             return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "sandbox", sandbox_result.failure_type or "sandbox_failed", sandbox_result.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path)})
+
+        validation_path = round_dir / "algorithm-validation.json"
+        if improved_algorithm and improvement_parent is not None:
+            validation = self._load_algorithm_validation(validation_path)
+            if validation is None:
+                validation = AlgorithmValidator().validate(
+                    improvement_parent,
+                    algorithm,
+                    self.sandbox,
+                    profile.to_dict(),
+                    agent_history,
+                    self._algorithm_proxy_evaluator,
+                    budget={"sandbox_timeout_s": self.sandbox.timeout_s, "mode": "cpu_fake"},
+                )
+                _write_json(validation_path, validation.to_dict())
+            algorithm = replace(
+                algorithm,
+                validation_status="validated" if validation.valid else "rejected",
+                validation_record_path=str(validation_path),
+            )
+            self.algorithm_store.update(algorithm)
+            _write_json(algorithm_path, algorithm.to_dict())
 
         design_path = round_dir / "design.json"
         design = self._read_json(design_path) if design_path.exists() else {}
@@ -193,6 +335,24 @@ class EvolutionLoop:
                 hypothesis=algorithm.hypothesis,
             )
             _write_json(design_path, design)
+
+        screening_path = round_dir / "screening"
+        if self.candidate_screening:
+            screening = CandidateScreeningPipeline(screening_path)
+            pre_results = screening.run(self._screening_context(parent_artifact, profile, algorithm, sandbox_result.plan))
+            if pre_results and pre_results[-1].status != "passed":
+                return self._finish_failure(
+                    round_id,
+                    round_dir,
+                    parent_candidate,
+                    algorithm,
+                    search_choice,
+                    "screening",
+                    "candidate_screening_rejected",
+                    "; ".join(pre_results[-1].reasons) or "candidate screening rejected",
+                    {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "design": str(design_path), "screening": str(screening.path)},
+                    design=design,
+                )
 
         compression_dir = round_dir / "checkpoint"
         compression_path = round_dir / "compression.json"
@@ -227,6 +387,22 @@ class EvolutionLoop:
             }
         if not evaluation_path.exists() or not child_integrity:
             _write_json(evaluation_path, evaluation)
+        if self.candidate_screening:
+            screening = CandidateScreeningPipeline(screening_path)
+            full_results = screening.run(
+                self._screening_context(
+                    parent_artifact,
+                    profile,
+                    algorithm,
+                    sandbox_result.plan,
+                    full_evaluator=lambda _: dict(evaluation),
+                )
+            )
+            full = next((item for item in full_results if item.stage == "full"), None)
+            if full is not None and full.status == "passed":
+                evaluation = dict(full.metrics)
+                if not evaluation_path.exists() or not child_integrity:
+                    _write_json(evaluation_path, evaluation)
         child_candidate = self._existing_or_create_child(parent_candidate, compression.child_checkpoint, algorithm, evaluation)
         evaluation_offline = bool(evaluation.get("offline_simulation", False))
         parent_offline = bool(parent_candidate.state.provenance.get("offline_simulation", False))
@@ -266,6 +442,10 @@ class EvolutionLoop:
             "pareto_front_before": self._load_pareto_front(),
             "search_policy": {"choice": search_choice, **self.search_policy.to_dict()},
         }
+        if self.search_space_version is not None:
+            decision["search_space_version"] = self.search_space_version.version_id
+        if self.candidate_screening:
+            decision["screening"] = [item.to_dict() for item in CandidateScreeningPipeline(screening_path).load()]
         decision_path = round_dir / "decision.json"
         _write_json(decision_path, decision)
         self._finalize_round_state(
@@ -283,7 +463,14 @@ class EvolutionLoop:
         if feasible:
             self._update_pareto_front(child_candidate.id, evaluation)
             self.model_store.set_active(child_candidate.id)
-        return EvolutionRound(round_id, parent_candidate.id, algorithm.algorithm_id, decision_status, child_candidate.id, decision, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "design": str(design_path), "compression": str(compression_path), "evaluation": str(evaluation_path), "decision": str(decision_path)})
+        paths = {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "design": str(design_path), "compression": str(compression_path), "evaluation": str(evaluation_path), "decision": str(decision_path)}
+        if self.search_space_version is not None:
+            paths["search_space"] = str(search_space_path)
+        if self.candidate_screening:
+            paths["screening"] = str(screening_path / "screening.json")
+        if validation_path.exists():
+            paths["algorithm_validation"] = str(validation_path)
+        return EvolutionRound(round_id, parent_candidate.id, algorithm.algorithm_id, decision_status, child_candidate.id, decision, paths)
 
     def _finish_failure(self, round_id: str, round_dir: Path, parent: ModelCandidate, algorithm: AlgorithmCandidate, search_choice: str, stage: str, failure_type: str, message: str, paths: Mapping[str, str], *, algorithm_persisted: bool = True, design: Optional[Mapping[str, Any]] = None) -> EvolutionRound:
         self._update_search_policy(feasible=False, improved=False, failure_type=failure_type)
@@ -580,9 +767,99 @@ class EvolutionLoop:
                     return profile
             except (OSError, TypeError, ValueError, json.JSONDecodeError):
                 pass
-        profile = profile_model(self.adapter, self.adapter.reload_model(parent), seed=7)
+        model = self.adapter.reload_model(parent)
+        if self.advanced_profiling:
+            calibration = None
+            if bool(parent.metadata.get("offline_simulation", False)):
+                calibration = CalibrationCorpus(
+                    specs=(
+                        CalibrationSampleSpec(
+                            prompt="a representative Wan video calibration prompt",
+                            seed=7,
+                            latent_shape=(2, int(parent.structure.hidden_size)),
+                            timesteps=(0.9, 0.5, 0.1),
+                        ),
+                    ),
+                    provider=FakeWanCalibrationProvider(int(parent.structure.hidden_size)),
+                )
+            profile = profile_model(
+                self.adapter,
+                model,
+                seed=7,
+                calibration=calibration,
+                advanced=True,
+                channel_chunk_size=16,
+            )
+        else:
+            profile = profile_model(self.adapter, model, seed=7)
         profile.write_json(path)
         return profile
+
+    def _screening_context(
+        self,
+        parent: CheckpointArtifact,
+        profile: ProfileReport,
+        algorithm: AlgorithmCandidate,
+        plan: SandboxCompressionPlan,
+        *,
+        full_evaluator: Optional[Callable[[Any], Mapping[str, Any]]] = None,
+    ) -> ScreeningContext:
+        return ScreeningContext(
+            parent=parent,
+            adapter=self.adapter,
+            profile=profile.to_dict(),
+            algorithm=algorithm,
+            plan=plan,
+            registry=self.registry,
+            search_space_version=self.search_space_version.to_dict() if self.search_space_version is not None else None,
+            full_evaluator=full_evaluator,
+        )
+
+    def _algorithm_proxy_evaluator(self, result: SandboxResult) -> Mapping[str, Any]:
+        """Compare algorithm plans with an offline proxy, never promotion evidence."""
+
+        if result.plan is None:
+            return {"valid": False, "offline_simulation": True}
+        operator = result.plan.operator
+        scores = {
+            "prune_blocks": (0.78, 0.82),
+            "prune_ffn_channels": (0.88, 0.68),
+            "compose": (0.92, 0.55),
+            "prune_ffn_by_weight_threshold": (0.90, 0.66),
+        }
+        score, cost = scores.get(operator, (0.50, 1.0))
+        return {
+            "valid": True,
+            "offline_simulation": True,
+            "evaluation_status": "cpu_fake_algorithm_proxy",
+            "search_score": score,
+            "model_size_gb": cost,
+            "cost_units": cost,
+        }
+
+    @staticmethod
+    def _load_algorithm_validation(path: Path) -> Optional[AlgorithmValidationRecord]:
+        if not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return AlgorithmValidationRecord(
+                algorithm_id=str(raw["algorithm_id"]),
+                parent_algorithm_id=str(raw["parent_algorithm_id"]),
+                parent_source_sha256=str(raw["parent_source_sha256"]),
+                candidate_source_sha256=str(raw["candidate_source_sha256"]),
+                valid=bool(raw["valid"]),
+                evidence_level=str(raw["evidence_level"]),
+                controlled_conditions_digest=str(raw["controlled_conditions_digest"]),
+                parent_plan=raw.get("parent_plan"),
+                candidate_plan=raw.get("candidate_plan"),
+                parent_metrics=dict(raw.get("parent_metrics") or {}),
+                candidate_metrics=dict(raw.get("candidate_metrics") or {}),
+                reasons=tuple(str(item) for item in raw.get("reasons", [])),
+                created_at=str(raw.get("created_at", "")),
+            )
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
 
     def _selection_history(self) -> list[Mapping[str, Any]]:
         """Return local operator selections without exposing evaluator evidence.
@@ -613,15 +890,14 @@ class EvolutionLoop:
             )
         return history
 
-    @classmethod
-    def _load_sandbox(cls, path: Path) -> Optional[SandboxResult]:
+    def _load_sandbox(self, path: Path) -> Optional[SandboxResult]:
         if not path.exists():
             return None
-        raw = cls._read_json(path)
+        raw = self._read_json(path)
         status = str(raw.get("status", ""))
         plan = None
         if raw.get("plan") is not None:
-            plan = SandboxCompressionPlan.from_mapping(raw["plan"])
+            plan = SandboxCompressionPlan.from_mapping(raw["plan"], operator_specs=self.sandbox.operator_specs)
         return SandboxResult(
             status=status,
             source_sha256=str(raw.get("source_sha256", "")),
@@ -712,6 +988,29 @@ def algorithm_plan_operator(result: SandboxResult) -> str:
     if result.plan is None:
         raise ValueError("algorithm plan is unavailable")
     return result.plan.operator
+
+
+def _history_failure_reasons(history: list[Mapping[str, Any]]) -> tuple[str, ...]:
+    values: list[str] = []
+    for item in history:
+        if not isinstance(item, Mapping):
+            continue
+        decision = item.get("decision")
+        if isinstance(decision, Mapping):
+            if decision.get("failure_type"):
+                values.append(str(decision["failure_type"]))
+            promotion = decision.get("promotion")
+            if isinstance(promotion, Mapping):
+                reasons = promotion.get("reasons", [])
+                if isinstance(reasons, (list, tuple)):
+                    values.extend(str(reason) for reason in reasons if str(reason).strip())
+        if item.get("failure_reason"):
+            values.append(str(item["failure_reason"]))
+    unique: list[str] = []
+    for value in values:
+        if value not in unique:
+            unique.append(value)
+    return tuple(unique[:16])
 
 
 def _sandbox_dict(result: SandboxResult) -> dict[str, Any]:

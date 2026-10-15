@@ -421,7 +421,7 @@ def _deterministic_improvement_source(
         "            if channel.get('importance_score') is not None:\n"
         "                records.append(channel)\n"
         "    ordered = sorted(records, key=lambda item: float(item.get('importance_score', 0.0)))\n"
-        "    retained_indices = [int(item['channel']) for item in ordered[:target]]\n"
+        "    retained_indices = sorted({int(item['channel']) for item in ordered[:target]})\n"
         "    if not retained_indices:\n"
         "        retained_indices = list(range(target))\n"
         "    block_ids = [item['block_id'] for item in profile.get('layers', [])]\n"

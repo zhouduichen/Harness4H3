@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from ..adapters.wan.contracts import CheckpointArtifact, WanModelAdapter
-from ..evolution.candidate import AlgorithmCandidate
 from ..operators.wan import WanCompressionRegistry
 from ..sandbox.policy import SourcePolicyError, validate_source
 from ..sandbox.runner import CompressionPlan
+from .candidate import AlgorithmCandidate
 
 
 class ScreeningStage(str, Enum):
@@ -102,6 +102,8 @@ class CandidateScreeningPipeline:
         if diagnostic.status != "passed":
             return tuple(results)
 
+        if context.full_evaluator is None:
+            return tuple(results)
         full = _find(results, ScreeningStage.FULL.value)
         if full is None:
             full = self._full(context)
@@ -123,7 +125,12 @@ class CandidateScreeningPipeline:
         reasons: list[str] = []
         try:
             validate_source(context.algorithm.source)
-            plan = CompressionPlan.from_mapping(context.plan.to_dict())
+            extension_specs = {
+                str(item["name"]): dict(item)
+                for item in (context.search_space_version or {}).get("operators", [])
+                if isinstance(item, Mapping) and item.get("name")
+            }
+            plan = CompressionPlan.from_mapping(context.plan.to_dict(), operator_specs=extension_specs)
             if plan.operator not in context.registry.names():
                 reasons.append("operator_not_in_active_registry")
             _validate_static_args(plan, context.profile)
@@ -186,16 +193,6 @@ class CandidateScreeningPipeline:
 
     def _full(self, context: ScreeningContext) -> ScreeningResult:
         started = time.monotonic()
-        if context.full_evaluator is None:
-            return ScreeningResult(
-                stage=ScreeningStage.FULL.value,
-                status="skipped",
-                elapsed_s=time.monotonic() - started,
-                evidence_level="none",
-                reasons=("full_evaluator_not_configured",),
-                metrics={"valid": False},
-                offline_simulation=True,
-            )
         try:
             metrics = dict(context.full_evaluator(context))
             offline = bool(metrics.get("offline_simulation", False))

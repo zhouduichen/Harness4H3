@@ -57,7 +57,7 @@ from .adapters.wan import build_wan_adapter
 from .evolution import CompressionConfig, EvolutionLoop, PromotionPolicy, SearchPolicy, WanVideoEvaluationConfig, WanVideoEvaluator
 from .evolution.agent import AlgorithmAgent, build_algorithm_provider
 from .operators.wan import build_wan_compression_registry
-from .profiler import profile_model
+from .profiler import CalibrationCorpus, CalibrationSampleSpec, FakeWanCalibrationProvider, profile_model
 from .sandbox import AlgorithmSandbox
 
 
@@ -91,7 +91,28 @@ def cmd_profile_wan(args: argparse.Namespace) -> int:
     config = _compression_config(args)
     adapter = _build_compression_adapter(config)
     model = adapter.load_model(config.checkpoint, device=config.device, dtype=config.dtype)
-    report = profile_model(adapter, model, seed=config.seed)
+    calibration = None
+    if config.advanced_profiling and config.backend == "fake":
+        structure = adapter.inspect(model)
+        calibration = CalibrationCorpus(
+            specs=(
+                CalibrationSampleSpec(
+                    prompt="a representative Wan video calibration prompt",
+                    seed=config.seed,
+                    latent_shape=(2, int(structure.hidden_size)),
+                    timesteps=(0.9, 0.5, 0.1),
+                ),
+            ),
+            provider=FakeWanCalibrationProvider(int(structure.hidden_size)),
+        )
+    report = profile_model(
+        adapter,
+        model,
+        seed=config.seed,
+        calibration=calibration,
+        advanced=config.advanced_profiling,
+        channel_chunk_size=16 if config.advanced_profiling else None,
+    )
     output = Path(args.output).resolve() if args.output else config.output_root / "profile.json"
     report.write_json(output)
     _emit({"status": "success", "profile": str(output), "model": report.model, "provenance": report.provenance}, args.json)
@@ -155,6 +176,10 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         search_policy=search_policy,
         memory_enabled=config.memory_enabled,
         adapt_search_policy=config.adapt_search_policy,
+        advanced_profiling=config.advanced_profiling,
+        algorithm_improvement=config.algorithm_improvement,
+        search_space_evolution=config.search_space_evolution,
+        candidate_screening=config.candidate_screening,
     )
     outcomes = [loop.run_round().to_dict() for _ in range(int(args.rounds))]
     failed = sum(1 for item in outcomes if item["status"] == "failed")

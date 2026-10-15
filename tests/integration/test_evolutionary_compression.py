@@ -264,3 +264,44 @@ def test_incomplete_round_reuses_persisted_compression_after_process_crash(tmp_p
     assert calls["count"] == 1
     assert not (tmp_path / "run" / "rounds" / "R0002").exists()
     assert len(list(restarted.algorithm_store.read())) == 1
+
+
+def test_evo_compress_features_form_restartable_cpu_fake_pipeline(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=5, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    loop = EvolutionLoop(
+        adapter=adapter,
+        parent=parent,
+        output_root=tmp_path / "run",
+        advanced_profiling=True,
+        algorithm_improvement=True,
+        search_space_evolution=True,
+        candidate_screening=True,
+    )
+
+    first = loop.run_round()
+    second = loop.run_round()
+
+    assert first.status in {"promoted", "rejected"}
+    assert second.status in {"promoted", "rejected"}
+    first_dir = tmp_path / "run" / "rounds" / first.round_id
+    second_dir = tmp_path / "run" / "rounds" / second.round_id
+    first_profile = json.loads((first_dir / "profile.json").read_text())
+    assert first_profile["calibration"]["provider"] == "FakeWanCalibrationProvider"
+    assert first_profile["evidence"]["advanced"] is True
+    search_space = json.loads((first_dir / "search-space.json").read_text())
+    assert search_space["version_id"] == "S0002"
+    assert "prune_ffn_by_weight_threshold" in {item["name"] for item in search_space["operators"]}
+    screening = json.loads((second_dir / "screening" / "screening.json").read_text())
+    assert [item["stage"] for item in screening["results"]] == ["static", "diagnostic", "full"]
+    validation = json.loads((second_dir / "algorithm-validation.json").read_text())
+    assert validation["parent_algorithm_id"] == "A0001"
+    assert validation["evidence_level"] == "cpu_fake"
+    algorithm = json.loads((second_dir / "algorithm.json").read_text())
+    assert algorithm["parent_algorithm_id"] == "A0001"
+    assert algorithm["parent_source_sha256"] == validation["parent_source_sha256"]
+    assert algorithm["validation_status"] in {"validated", "rejected"}
+    genes = [json.loads(line) for line in (tmp_path / "run" / "design-genes.jsonl").read_text().splitlines()]
+    assert any(item["gene_id"].startswith("G-SS-") for item in genes)
+    assert any(item["gene_id"] == "G-" + first.round_id for item in genes)
+    assert any(item["gene_id"] == "G-" + second.round_id for item in genes)

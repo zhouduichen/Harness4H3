@@ -280,10 +280,19 @@ class AlgorithmSandbox:
         self.root.mkdir(parents=True, exist_ok=True)
         self.timeout_s = float(timeout_s)
         self.max_output_bytes = int(max_output_bytes)
-        self.operator_specs = {
-            str(item.name): item.to_dict() if callable(getattr(item, "to_dict", None)) else dict(item)
-            for item in operator_specs
-        }
+        self.operator_specs = {}
+        for item in operator_specs:
+            if callable(getattr(item, "to_dict", None)):
+                name = getattr(item, "name", None)
+                value = item.to_dict()
+            elif isinstance(item, Mapping):
+                name = item.get("name")
+                value = dict(item)
+            else:
+                raise TypeError("operator specification must be an object or mapping")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("operator specification requires a name")
+            self.operator_specs[name] = value
         self.executor = LocalProcessExecutor(timeout_s=self.timeout_s)
 
     def run(self, source: str, profile: Mapping[str, Any], history: Sequence[Mapping[str, Any]]) -> SandboxResult:

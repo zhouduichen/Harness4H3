@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+from harness4h3.evolution.config import CompressionConfig
+
+
+def test_evolution_features_are_default_off(tmp_path):
+    path = tmp_path / "compression.yaml"
+    path.write_text("backend: fake\ncheckpoint: fake://baseline\n", encoding="utf-8")
+    config = CompressionConfig.from_path(path)
+    assert config.advanced_profiling is False
+    assert config.algorithm_improvement is False
+    assert config.search_space_evolution is False
+    assert config.candidate_screening is False
+
+
+def test_evolution_features_can_be_enabled_independently(tmp_path):
+    path = tmp_path / "compression.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "backend: fake",
+                "checkpoint: fake://baseline",
+                "advanced_profiling: true",
+                "algorithm_improvement: true",
+                "search_space_evolution: true",
+                "candidate_screening: true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = CompressionConfig.from_path(path)
+    assert config.advanced_profiling is True
+    assert config.algorithm_improvement is True
+    assert config.search_space_evolution is True
+    assert config.candidate_screening is True
