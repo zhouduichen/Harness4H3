@@ -55,8 +55,9 @@ the usual algorithm/model evidence. `tica_prune` is classified as an
 algorithm rule over the existing Block/FFN structural closure, not as a new
 primitive search-space operator.
 
-The runtime attention boundary now includes an executable top-k KV backend and
-a block-local self-attention window policy. Both are weight-neutral and
+The runtime attention boundary now includes an executable top-k KV backend,
+anchor-based Token Merge/unmerge, and a block-local self-attention window
+policy. These policies are weight-neutral and
 preserve the ordered runtime manifest; the Diffusers path keeps Wan's Q/K
 normalization, RoPE positions, and output projection. These paths do not claim
 an SVOO/SparseVideo CUDA implementation or GPU speedup without independent

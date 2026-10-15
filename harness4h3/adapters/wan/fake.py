@@ -17,7 +17,7 @@ from .contracts import (
     checkpoint_content_sha256,
 )
 from ...operators.wan.runtime_gating import TimestepGateRule, normalized_timesteps, rule_matches, validate_timestep_gate_plan
-from ...operators.wan.runtime_policy import AttentionWindowPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy, select_sampling_steps
+from ...operators.wan.runtime_policy import AttentionWindowPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
 from .attention import prune_attention_module_heads
 
 
@@ -80,6 +80,26 @@ def _fake_attention_module(hidden_size: int, heads: int, head_dim: int | None = 
             squeeze = value.ndim == 2
             hidden = value.unsqueeze(1) if squeeze else value
             context = hidden if encoder_hidden_states is None else encoder_hidden_states
+            merge_groups = None
+            merge = getattr(self, "_harness4h3_token_merge_policy", None)
+            if merge and encoder_hidden_states is None and hidden.ndim >= 3 and hidden.shape[1] > 1:
+                keep = max(1, min(int(hidden.shape[1]), int(round(float(hidden.shape[1]) * float(merge["keep_ratio"])))) )
+                positions = torch.arange(int(hidden.shape[1]), device=hidden.device)
+                merge_groups = torch.div(positions * keep, int(hidden.shape[1]), rounding_mode="floor")
+                merged = hidden.new_zeros((hidden.shape[0], keep, hidden.shape[2]))
+                merged.scatter_add_(1, merge_groups.view(1, -1, 1).expand(hidden.shape[0], -1, hidden.shape[2]), hidden)
+                counts = torch.bincount(merge_groups, minlength=keep).clamp_min(1).to(hidden.dtype).view(1, keep, 1)
+                hidden = merged / counts
+                context = hidden
+                anchors = torch.empty(keep, device=hidden.device, dtype=torch.long)
+                for group in range(keep):
+                    anchors[group] = positions[merge_groups == group][0]
+                self._harness4h3_token_merge_stats = {
+                    "input_tokens": int(positions.numel()),
+                    "merged_tokens": int(keep),
+                    "groups": int(keep),
+                    "anchors": anchors.detach().cpu().tolist(),
+                }
             policy = getattr(self, "_harness4h3_sparse_policy", None)
             if policy and context.ndim >= 3 and context.shape[1] > 1 and encoder_hidden_states is None:
                 keep = max(1, min(int(context.shape[1]), int(round(float(context.shape[1]) * float(policy["keep_ratio"])))) )
@@ -100,6 +120,8 @@ def _fake_attention_module(hidden_size: int, heads: int, head_dim: int | None = 
                 self._harness4h3_window_stats = {"query_tokens": int(hidden.shape[1]), "selected_kv_tokens": int(selected), "windows": len(pieces)}
             else:
                 result = self._attend(hidden, context)
+            if merge_groups is not None:
+                result = result.index_select(1, merge_groups)
             return result.squeeze(1) if squeeze else result
 
     return Attention()
@@ -146,7 +168,7 @@ def _copy_module(module: Any) -> Any:
 class FakeWanDiT:
     """Small Torch module kept separate so the adapter owns structure policy."""
 
-    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None, num_heads: int = 4, attention_head_dim: int | None = None, runtime_gate_rules: Sequence[Mapping[str, Any]] | None = None, token_sparsity_policy: Mapping[str, Any] | None = None, sparse_runtime_policy: Mapping[str, Any] | None = None, attention_window_policy: Mapping[str, Any] | None = None, sampling_step_policy: Mapping[str, Any] | None = None, runtime_operations: Sequence[Mapping[str, Any]] | None = None) -> None:
+    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None, num_heads: int = 4, attention_head_dim: int | None = None, runtime_gate_rules: Sequence[Mapping[str, Any]] | None = None, token_sparsity_policy: Mapping[str, Any] | None = None, token_merge_policy: Mapping[str, Any] | None = None, sparse_runtime_policy: Mapping[str, Any] | None = None, attention_window_policy: Mapping[str, Any] | None = None, sampling_step_policy: Mapping[str, Any] | None = None, runtime_operations: Sequence[Mapping[str, Any]] | None = None) -> None:
         _, nn = _torch()
         widths = list(ffn_widths or [ffn_width] * block_count)
         if len(widths) != block_count:
@@ -167,6 +189,7 @@ class FakeWanDiT:
         self._artifact_sha256 = "0" * 64
         self.runtime_gate_rules = [dict(item) for item in (runtime_gate_rules or [])]
         self._harness4h3_token_sparsity_policy = dict(token_sparsity_policy or {})
+        self._harness4h3_token_merge_policy = dict(token_merge_policy or {})
         self._harness4h3_sparse_runtime_policy = dict(sparse_runtime_policy or {})
         self._harness4h3_attention_window_policy = dict(attention_window_policy or {})
         self._harness4h3_sampling_step_policy = dict(sampling_step_policy or {})
@@ -174,6 +197,9 @@ class FakeWanDiT:
         if self._harness4h3_sparse_runtime_policy:
             for block in self.blocks:
                 block.attn1._harness4h3_sparse_policy = dict(self._harness4h3_sparse_runtime_policy)
+        if self._harness4h3_token_merge_policy:
+            for block in self.blocks:
+                block.attn1._harness4h3_token_merge_policy = dict(self._harness4h3_token_merge_policy)
         if self._harness4h3_attention_window_policy:
             for block in self.blocks:
                 block.attn1._harness4h3_attention_window_policy = dict(self._harness4h3_attention_window_policy)
@@ -296,6 +322,7 @@ class FakeWanDiTAdapter:
                 attention_head_dim=int(config.get("attention_head_dim", int(config["hidden_size"]) // int(config.get("num_heads", 4)))),
                 runtime_gate_rules=config.get("runtime_gate_rules", []),
                 token_sparsity_policy=config.get("token_sparsity_policy", {}),
+                token_merge_policy=config.get("token_merge_policy", {}),
                 sparse_runtime_policy=config.get("sparse_runtime_policy", {}),
                 attention_window_policy=config.get("attention_window_policy", {}),
                 sampling_step_policy=config.get("sampling_step_policy", {}),
@@ -330,6 +357,7 @@ class FakeWanDiTAdapter:
                 "num_attention_heads": int(model.blocks[0].attn1.heads),
                 "attention_head_dim": int(model.blocks[0].attn1.inner_dim // model.blocks[0].attn1.heads),
                 "token_sparsity_policy": dict(model._harness4h3_token_sparsity_policy),
+                "token_merge_policy": dict(model._harness4h3_token_merge_policy),
                 "sparse_runtime_policy": dict(model._harness4h3_sparse_runtime_policy),
                 "attention_window_policy": dict(model._harness4h3_attention_window_policy),
                 "sampling_step_policy": dict(model._harness4h3_sampling_step_policy),
@@ -441,6 +469,17 @@ class FakeWanDiTAdapter:
         model._harness4h3_runtime_operations.append({"operator": "prune_tokens", "args": parsed.to_dict()})
         return StructuralChange("runtime_token_sparsity", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
 
+    def apply_token_merge(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
+        parsed = TokenMergePolicy.from_mapping(policy)
+        unknown = sorted(set(parsed.block_ids) - set(model.block_ids))
+        if unknown:
+            raise ValueError("invalid_token_selection: unknown block %s" % unknown[0])
+        model._harness4h3_token_merge_policy = parsed.to_dict()
+        for block in model.blocks:
+            block.attn1._harness4h3_token_merge_policy = parsed.to_dict()
+        model._harness4h3_runtime_operations.append({"operator": "token_merge", "args": parsed.to_dict()})
+        return StructuralChange("runtime_token_merge", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0, "unmerge": True})
+
     def apply_sparse_runtime(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
         parsed = SparseRuntimePolicy.from_mapping(policy)
         if model._harness4h3_attention_window_policy:
@@ -493,6 +532,7 @@ class FakeWanDiTAdapter:
             "attention_head_dim": int(model.blocks[0].attn1.inner_dim // model.blocks[0].attn1.heads),
             "runtime_gate_rules": list(model.runtime_gate_rules),
             "token_sparsity_policy": dict(model._harness4h3_token_sparsity_policy),
+            "token_merge_policy": dict(model._harness4h3_token_merge_policy),
             "sparse_runtime_policy": dict(model._harness4h3_sparse_runtime_policy),
             "attention_window_policy": dict(model._harness4h3_attention_window_policy),
             "sampling_step_policy": dict(model._harness4h3_sampling_step_policy),
@@ -543,11 +583,14 @@ class FakeWanDiTAdapter:
         )
         estimate = float(output + blocks + attention)
         token_policy = getattr(model, "_harness4h3_token_sparsity_policy", {})
+        token_merge_policy = getattr(model, "_harness4h3_token_merge_policy", {})
         sparse_policy = getattr(model, "_harness4h3_sparse_runtime_policy", {})
         window_policy = getattr(model, "_harness4h3_attention_window_policy", {})
         sampling_policy = getattr(model, "_harness4h3_sampling_step_policy", {})
         if token_policy:
             estimate *= float(token_policy.get("keep_ratio", 1.0))
+        if token_merge_policy:
+            estimate *= float(token_merge_policy.get("keep_ratio", 1.0)) ** 2
         if sparse_policy:
             estimate *= float(sparse_policy.get("keep_ratio", 1.0))
         if window_policy:

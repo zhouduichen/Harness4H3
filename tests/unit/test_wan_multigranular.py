@@ -22,6 +22,7 @@ def _parent(tmp_path):
         ("prune_attention_heads", {"head_indices": [0]}),
         ("prune_heads", {"head_indices": [0]}),
         ("prune_tokens", {"keep_ratio": 0.5}),
+        ("token_merge", {"keep_ratio": 0.5, "mode": "adjacent"}),
         ("sparse_runtime", {"keep_ratio": 0.5, "attention": "attn1"}),
         ("attention_window", {"window_size": 3, "attention": "attn1"}),
         ("sampling_step_skip", {"target_steps": 4}),
@@ -79,6 +80,36 @@ def test_attention_window_reduces_fake_attention_context(tmp_path):
     assert stats["query_tokens"] == 7
     assert stats["selected_kv_tokens"] < 7 * 7
     assert stats["windows"] == 4
+
+
+def test_token_merge_reduces_fake_attention_and_unmerges_after_reload(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "token_merge", adapter, parent, {"keep_ratio": 0.5, "mode": "adjacent"}, tmp_path / "merge"
+    )
+    assert result.status == "success", result.message
+    child = adapter.reload_model(result.child_checkpoint)
+    hidden = torch.randn(2, 7, 8)
+    with torch.no_grad():
+        output = child.blocks[0].attn1(hidden)
+    assert tuple(output.shape) == (2, 7, 8)
+    stats = child.blocks[0].attn1._harness4h3_token_merge_stats
+    assert stats["input_tokens"] == 7
+    assert stats["merged_tokens"] == 4
+    assert len(stats["anchors"]) == 4
+    assert child._harness4h3_token_merge_policy["keep_ratio"] == 0.5
+
+
+def test_token_merge_ratio_one_is_dense_equivalent():
+    adapter = FakeWanDiTAdapter(block_count=3, hidden_size=8, ffn_width=12)
+    plain = adapter.load_model("fake://baseline")
+    merged = adapter.load_model("fake://baseline")
+    adapter.apply_token_merge(merged, {"keep_ratio": 1.0, "mode": "adjacent"})
+    hidden = torch.randn(2, 7, 8)
+    with torch.no_grad():
+        expected = plain.blocks[0].attn1(hidden)
+        actual = merged.blocks[0].attn1(hidden)
+    assert torch.equal(expected, actual)
 
 
 def test_attention_window_rejects_cross_attention_and_sparse_composition(tmp_path):
@@ -163,6 +194,13 @@ def test_diffusers_wan_attention_contract_is_structurally_executable():
     ]
     output = model(torch.randn(1, 5, 8), torch.tensor([500]), torch.randn(1, 4, 8))
     assert tuple(output.shape) == (1, 5, 8)
+
+    merge_model = TinyWan()
+    adapter.apply_token_merge(merge_model, {"keep_ratio": 0.5, "mode": "adjacent"})
+    with torch.no_grad():
+        merge_output = merge_model.blocks[0].attn1(torch.randn(1, 5, 8), None, None, rotary)
+    assert tuple(merge_output.shape) == (1, 5, 8)
+    assert merge_model._harness4h3_token_merge_stats["merged_tokens"] == 2
 
     window_model = TinyWan()
     adapter.apply_attention_window(window_model, {"window_size": 2, "attention": "attn1"})

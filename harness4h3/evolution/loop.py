@@ -1950,6 +1950,7 @@ class EvolutionLoop:
         plan_digests: dict[str, list[str]] = {}
         failure_counts: dict[str, int] = {}
         stagnant_rounds = 0
+        diminishing_gain_rounds: list[str] = []
         for item in reversed(rounds):
             decision = item.get("decision") if isinstance(item.get("decision"), Mapping) else {}
             evaluation = item.get("evaluation") if isinstance(item.get("evaluation"), Mapping) else {}
@@ -1969,6 +1970,13 @@ class EvolutionLoop:
             improved = bool(promotion.get("accepted")) and not bool(evaluation.get("critical_regression"))
             if not improved:
                 stagnant_rounds += 1
+                hardware = evaluation.get("hardware_metrics") if isinstance(evaluation.get("hardware_metrics"), Mapping) else {}
+                has_efficiency_signal = any(
+                    isinstance(value, (int, float)) and float(value) < 1.0
+                    for value in hardware.values()
+                ) or float(evaluation.get("estimated_compute_ratio", 1.0) or 1.0) < 1.0
+                if has_efficiency_signal and item.get("round_id"):
+                    diminishing_gain_rounds.append(str(item["round_id"]))
             else:
                 break
         duplicate_plans = [round_ids for round_ids in plan_digests.values() if len(round_ids) >= 2]
@@ -1980,6 +1988,13 @@ class EvolutionLoop:
             signals.append("repeated_algorithm_plan")
         if repeated_failures:
             signals.append("repeated_failure")
+        # A candidate can make a real structural/runtime improvement while
+        # still missing the promotion threshold.  Treat repeated evidence of
+        # that diminishing return as a bottleneck instead of waiting for two
+        # completely failed rounds; this is especially important after the
+        # default evaluator starts measuring head/FFN/runtime changes fairly.
+        if diminishing_gain_rounds:
+            signals.append("latency_diminishing_efficiency_gain")
         ready = len(rounds) >= 2 and bool(signals)
         return {
             "ready": ready,
@@ -1988,6 +2003,7 @@ class EvolutionLoop:
             "stagnant_rounds": stagnant_rounds,
             "signals": signals,
             "repeated_failures": repeated_failures,
+            "diminishing_gain_rounds": list(reversed(diminishing_gain_rounds)),
             "duplicate_plan_rounds": duplicate_plans,
             "evidence_ids": evidence_ids[-16:],
             "bottleneck": ";".join(signals) or "insufficient_evidence",
@@ -2235,9 +2251,36 @@ class EvolutionLoop:
 
     @staticmethod
     def _default_evaluator(child: CheckpointArtifact, profile: Mapping[str, Any]) -> Mapping[str, Any]:
-        before = int(profile["model"]["block_count"])
+        model_profile = profile.get("model", {}) if isinstance(profile, Mapping) else {}
+        before = int(model_profile.get("block_count", 1))
         after = int(child.structure.block_count)
-        ratio = float(after) / float(max(before, 1))
+        block_ratio = float(after) / float(max(before, 1))
+        parent_parameters = int(model_profile.get("parameter_count", child.structure.parameter_count))
+        parameter_ratio = float(child.structure.parameter_count) / float(max(parent_parameters, 1))
+        # Block pruning has a direct layer-count proxy; other structural
+        # operators (FFN/head packing) are represented by the actual child
+        # parameter count.  This keeps the Fake evaluator from silently
+        # treating real head/FFN mutations as zero compute change.
+        ratio = block_ratio if after < before else parameter_ratio
+        runtime_ratio = 1.0
+        runtime_operations = child.structure.metadata.get("runtime_operations", [])
+        if isinstance(runtime_operations, (list, tuple)):
+            for item in runtime_operations:
+                if not isinstance(item, Mapping):
+                    continue
+                operator = str(item.get("operator", ""))
+                args = item.get("args", {})
+                if not isinstance(args, Mapping):
+                    continue
+                if operator in {"prune_tokens", "sparse_runtime"}:
+                    runtime_ratio *= float(args.get("keep_ratio", 1.0))
+                elif operator == "token_merge":
+                    runtime_ratio *= float(args.get("keep_ratio", 1.0)) ** 2
+                elif operator == "attention_window":
+                    runtime_ratio *= min(1.0, float(args.get("window_size", 64)) / 64.0)
+                elif operator == "sampling_step_skip":
+                    runtime_ratio *= min(1.0, float(args.get("target_steps", 16)) / 16.0)
+        ratio = max(0.01, min(1.0, ratio * runtime_ratio))
         baseline_quality = 0.99
         quality = max(0.0, baseline_quality - (1.0 - ratio) * 0.01)
         baseline_hardware = {"latency_s": 1.0, "peak_memory_gb": 1.0, "model_size_gb": 1.0}
@@ -2250,6 +2293,8 @@ class EvolutionLoop:
             "peak_memory_gb": 1.0 * ratio,
             "model_size_gb": max(0.01, 1.0 * ratio),
             "hardware_metrics": {"latency_s": 1.0 * ratio, "peak_memory_gb": 1.0 * ratio, "model_size_gb": max(0.01, 1.0 * ratio)},
+            "parameter_reduction_ratio": max(0.0, 1.0 - parameter_ratio),
+            "estimated_compute_ratio": ratio,
             "valid": True,
             "feasible": True,
             "critical_regression": False,

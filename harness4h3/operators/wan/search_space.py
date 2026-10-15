@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, CompressionResult, OperatorCapability, WanModelAdapter
 from ...sandbox import AlgorithmSandbox
-from .compression import AttentionHeadPruningOperator, AttentionWindowOperator, FFNChannelPruningOperator, HeadPruningOperator, LayerPruningOperator, SamplingStepSkipOperator, SparseRuntimeOperator, TimestepBlockGatingOperator, TokenPruningOperator, WanCompressionRegistry
+from .compression import AttentionHeadPruningOperator, AttentionWindowOperator, FFNChannelPruningOperator, HeadPruningOperator, LayerPruningOperator, SamplingStepSkipOperator, SparseRuntimeOperator, TimestepBlockGatingOperator, TokenMergeOperator, TokenPruningOperator, WanCompressionRegistry
 
 
 def _jsonable(value: Any) -> Any:
@@ -305,6 +305,7 @@ def default_search_space() -> SearchSpaceVersion:
             OperatorSpec("prune_attention_heads", "1", {"head_indices": "list[int]", "attention_names": "list[str]"}, "attention_head", ("retain_at_least_one_head",), (), "prune_attention_heads", implementation_ref="harness4h3.operators.wan.compression.AttentionHeadPruningOperator"),
             OperatorSpec("prune_heads", "1", {"head_indices": "list[int]", "attention_names": "list[str]"}, "head", ("retain_at_least_one_head",), (), "prune_heads", implementation_ref="harness4h3.operators.wan.compression.HeadPruningOperator"),
             OperatorSpec("prune_tokens", "1", {"keep_ratio": "float"}, "token", ("keep_at_least_one_token",), ("dynamic_policy",), "prune_tokens", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.TokenPruningOperator"),
+            OperatorSpec("token_merge", "1", {"keep_ratio": "float", "block_ids": "list[str]", "mode": "str"}, "token", ("self_attention_pre_rope_merge", "unmerge_to_residual_shape"), ("dynamic_policy", "adjacent_groups_only"), "token_merge", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.TokenMergeOperator"),
             OperatorSpec("sparse_runtime", "1", {"keep_ratio": "float", "attention": "str"}, "sparse_runtime", ("self_attention_top_k",), ("dynamic_policy",), "sparse_runtime", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.SparseRuntimeOperator"),
             OperatorSpec("attention_window", "1", {"window_size": "int", "attention": "str"}, "attention", ("self_attention_local_window",), ("dynamic_policy", "requires_sequence_order"), "attention_window", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.AttentionWindowOperator"),
             OperatorSpec("sampling_step_skip", "1", {"target_steps": "int"}, "sampling_step", ("preserve_endpoints",), ("dynamic_policy",), "sampling_step_skip", execution_domain="sampler", implementation_ref="harness4h3.operators.wan.compression.SamplingStepSkipOperator"),
@@ -399,6 +400,8 @@ class SearchSpaceManager:
                 plan_args = {"head_indices": [0], "attention_names": ["attn1", "attn2"]}
             elif implementation_key == "prune_tokens":
                 plan_args = {"keep_ratio": 0.75}
+            elif implementation_key == "token_merge":
+                plan_args = {"keep_ratio": 0.75, "mode": "adjacent"}
             elif implementation_key == "sparse_runtime":
                 plan_args = {"keep_ratio": 0.75, "attention": "attn1"}
             elif implementation_key == "attention_window":
@@ -648,6 +651,7 @@ _TRUSTED_FACTORIES: dict[str, Callable[[], Any]] = {
     "prune_attention_heads": AttentionHeadPruningOperator,
     "prune_heads": HeadPruningOperator,
     "prune_tokens": TokenPruningOperator,
+    "token_merge": TokenMergeOperator,
     "sparse_runtime": SparseRuntimeOperator,
     "attention_window": AttentionWindowOperator,
     "sampling_step_skip": SamplingStepSkipOperator,

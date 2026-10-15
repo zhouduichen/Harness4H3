@@ -36,6 +36,28 @@ class TokenSparsityPolicy:
 
 
 @dataclass(frozen=True)
+class TokenMergePolicy:
+    """Self-attention token merging policy with an explicit unmerge map."""
+
+    keep_ratio: float
+    block_ids: tuple[str, ...] = ()
+    mode: str = "adjacent"
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "TokenMergePolicy":
+        block_ids = raw.get("block_ids", [])
+        if not isinstance(block_ids, (list, tuple)) or not all(isinstance(item, str) for item in block_ids):
+            raise ValueError("token_merge.block_ids must be a list of strings")
+        mode = str(raw.get("mode", "adjacent"))
+        if mode not in {"adjacent"}:
+            raise ValueError("unsupported token merge mode")
+        return cls(_ratio(raw.get("keep_ratio"), "token_merge.keep_ratio"), tuple(block_ids), mode)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**asdict(self), "block_ids": list(self.block_ids)}
+
+
+@dataclass(frozen=True)
 class SparseRuntimePolicy:
     keep_ratio: float
     attention: str = "attn1"

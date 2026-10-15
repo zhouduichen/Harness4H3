@@ -141,6 +141,8 @@ def _search_program_suffix(algorithm_id: str, *, exploration: bool = False) -> s
         "        add({'operator': 'prune_attention_heads', 'args': {'head_indices': [int(sorted(head_rows, key=lambda item: float(item.get('importance_score', 0.0) or 0.0))[0]['head'])]}})\n"
         "    if 'prune_tokens' in names:\n"
         "        add({'operator': 'prune_tokens', 'args': {'keep_ratio': 0.75}})\n"
+        "    if 'token_merge' in names:\n"
+        "        add({'operator': 'token_merge', 'args': {'keep_ratio': 0.75, 'block_ids': [], 'mode': 'adjacent'}})\n"
         "    if 'sparse_runtime' in names:\n"
         "        add({'operator': 'sparse_runtime', 'args': {'keep_ratio': 0.75, 'attention': 'attn1'}})\n"
         "    if 'attention_window' in names:\n"

@@ -6,7 +6,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, ChannelPruningConfig, CompressionResult, WanModelAdapter
 from .runtime_gating import validate_timestep_gate_plan
-from .runtime_policy import AttentionWindowPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy
+from .runtime_policy import AttentionWindowPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy
 
 
 class CompressionOperator(Protocol):
@@ -162,6 +162,15 @@ class TokenPruningOperator:
         return _execute_runtime_policy(adapter, parent, plan, output_dir, policy_name="token_sparsity", parser=TokenSparsityPolicy.from_mapping, adapter_method="apply_token_sparsity", failure_type="token_pruning_failed")
 
 
+class TokenMergeOperator:
+    """Merge Self-Attention tokens and restore the original residual shape."""
+
+    name = "token_merge"
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        return _execute_runtime_policy(adapter, parent, plan, output_dir, policy_name="token_merge", parser=TokenMergePolicy.from_mapping, adapter_method="apply_token_merge", failure_type="token_merge_failed")
+
+
 class SparseRuntimeOperator:
     """Dynamic sparse self-attention policy with top-k key selection."""
 
@@ -292,6 +301,7 @@ class CompositeCompressionOperator:
         "prune_attention_heads": AttentionHeadPruningOperator,
         "prune_heads": HeadPruningOperator,
         "prune_tokens": TokenPruningOperator,
+        "token_merge": TokenMergeOperator,
         "sparse_runtime": SparseRuntimeOperator,
         "attention_window": AttentionWindowOperator,
         "sampling_step_skip": SamplingStepSkipOperator,
@@ -415,6 +425,7 @@ def build_wan_compression_registry(*, include_tica: bool = False, include_multig
                 AttentionHeadPruningOperator(),
                 HeadPruningOperator(),
                 TokenPruningOperator(),
+                TokenMergeOperator(),
                 SparseRuntimeOperator(),
                 AttentionWindowOperator(),
                 SamplingStepSkipOperator(),

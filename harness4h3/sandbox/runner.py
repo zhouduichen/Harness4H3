@@ -44,6 +44,7 @@ class CompressionPlan:
         "prune_attention_heads",
         "prune_heads",
         "prune_tokens",
+        "token_merge",
         "sparse_runtime",
         "attention_window",
         "sampling_step_skip",
@@ -57,6 +58,7 @@ class CompressionPlan:
         "prune_attention_heads",
         "prune_heads",
         "prune_tokens",
+        "token_merge",
         "sparse_runtime",
         "attention_window",
         "sampling_step_skip",
@@ -142,6 +144,21 @@ class CompressionPlan:
                 raise ValueError("algorithm_output_invalid: block_ids must contain strings")
             if "attention" in args and not isinstance(args["attention"], str):
                 raise ValueError("algorithm_output_invalid: attention must be a string")
+        if operator == "token_merge":
+            allowed = (
+                {"keep_ratio"},
+                {"keep_ratio", "block_ids"},
+                {"keep_ratio", "mode"},
+                {"keep_ratio", "block_ids", "mode"},
+            )
+            if set(args) not in allowed:
+                raise ValueError("algorithm_output_invalid: token_merge has unsupported arguments")
+            if not isinstance(args["keep_ratio"], (int, float)) or isinstance(args["keep_ratio"], bool) or not 0.0 < float(args["keep_ratio"]) <= 1.0:
+                raise ValueError("algorithm_output_invalid: keep_ratio must be in (0, 1]")
+            if "block_ids" in args and (not isinstance(args["block_ids"], list) or not all(isinstance(item, str) for item in args["block_ids"])):
+                raise ValueError("algorithm_output_invalid: block_ids must contain strings")
+            if "mode" in args and not isinstance(args["mode"], str):
+                raise ValueError("algorithm_output_invalid: mode must be a string")
         if operator == "attention_window":
             if set(args) not in ({"window_size"}, {"window_size", "attention"}):
                 raise ValueError("algorithm_output_invalid: attention_window has unsupported arguments")

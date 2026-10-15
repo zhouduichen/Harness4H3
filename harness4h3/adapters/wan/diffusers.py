@@ -11,7 +11,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange
 from .attention import prune_attention_module_heads
 from ...operators.wan.runtime_gating import normalized_timesteps, rule_matches, rules_to_dict, validate_timestep_gate_plan
-from ...operators.wan.runtime_policy import AttentionWindowPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy, select_sampling_steps
+from ...operators.wan.runtime_policy import AttentionWindowPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
 
 
 def _torch_modules() -> tuple[Any, Any]:
@@ -110,6 +110,35 @@ def _slice_rotary(rotary: Any, indices: Any, sequence_length: int) -> Any:
             selected = value
         result.append(selected)
     return tuple(result)
+
+
+def _merge_token_sequence(hidden_states: Any, keep_ratio: float, torch: Any) -> tuple[Any, Any, Any]:
+    """Merge contiguous token groups and return (merged, source_groups, anchors).
+
+    The groups are a deterministic TokenMap over the flattened Wan token order.
+    This keeps the first token in every group as the positional/RoPE anchor and
+    averages only the pre-RoPE hidden states.  ``source_groups`` is the
+    unmerge map from every original position to its merged destination.
+    """
+
+    sequence_length = int(hidden_states.shape[1])
+    target = max(1, min(sequence_length, int(round(sequence_length * float(keep_ratio)))))
+    if target >= sequence_length:
+        return hidden_states, None, None
+    positions = torch.arange(sequence_length, device=hidden_states.device)
+    source_groups = torch.div(positions * target, sequence_length, rounding_mode="floor")
+    merged = hidden_states.new_zeros((hidden_states.shape[0], target, hidden_states.shape[2]))
+    merged.scatter_add_(1, source_groups.view(1, -1, 1).expand(hidden_states.shape[0], -1, hidden_states.shape[2]), hidden_states)
+    counts = torch.bincount(source_groups, minlength=target).clamp_min(1).to(hidden_states.dtype).view(1, target, 1)
+    merged = merged / counts
+    anchors = torch.empty(target, device=hidden_states.device, dtype=torch.long)
+    if hasattr(anchors, "scatter_reduce_"):
+        anchors.fill_(sequence_length)
+        anchors.scatter_reduce_(0, source_groups, positions, reduce="amin", include_self=True)
+    else:  # pragma: no cover - supported by the target torch runtime
+        for group in range(target):
+            anchors[group] = positions[source_groups == group][0]
+    return merged, source_groups, anchors
 
 
 def _apply_wan_rotary(hidden_states: Any, rotary_emb: Any) -> Any:
@@ -344,6 +373,8 @@ class DiffusersWanAdapter:
                     self.apply_timestep_block_gating(pipe, args.get("rules", []))
                 elif operator == "prune_tokens":
                     self.apply_token_sparsity(pipe, args)
+                elif operator == "token_merge":
+                    self.apply_token_merge(pipe, args)
                 elif operator == "sparse_runtime":
                     self.apply_sparse_runtime(pipe, args)
                 elif operator == "attention_window":
@@ -361,6 +392,9 @@ class DiffusersWanAdapter:
             token_policy = getattr(config, "harness4h3_token_sparsity", None)
             if token_policy:
                 self.apply_token_sparsity(pipe, token_policy)
+            token_merge_policy = getattr(config, "harness4h3_token_merge", None)
+            if token_merge_policy:
+                self.apply_token_merge(pipe, token_merge_policy)
             sparse_policy = getattr(config, "harness4h3_sparse_runtime", None)
             if sparse_policy:
                 self.apply_sparse_runtime(pipe, sparse_policy)
@@ -551,6 +585,60 @@ class DiffusersWanAdapter:
         _record_runtime_operation(transformer, "prune_tokens", parsed.to_dict())
         return StructuralChange("runtime_token_sparsity", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
 
+    def apply_token_merge(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
+        torch, _ = _torch_modules()
+        parsed = TokenMergePolicy.from_mapping(policy)
+        transformer = self._transformer(model)
+        _path, blocks = self._blocks(model)
+        known = {"block.%d" % index for index in range(len(blocks))}
+        unknown = sorted(set(parsed.block_ids) - known)
+        if unknown:
+            raise ValueError("invalid_token_selection: unknown block %s" % unknown[0])
+        _register_config(transformer, "harness4h3_token_merge", parsed.to_dict())
+        transformer._harness4h3_token_merge_policy = parsed.to_dict()
+        transformer._harness4h3_token_merge_stats = {
+            "input_tokens": 0,
+            "merged_tokens": 0,
+            "groups": 0,
+            "calls": 0,
+            "last_anchors": [],
+        }
+        for index, block in enumerate(blocks):
+            block_id = "block.%d" % index
+            attention = getattr(block, "attn1", None)
+            if attention is None or hasattr(attention, "_harness4h3_token_merge_base_forward"):
+                continue
+            base = attention.forward
+
+            def merge_forward(attention_self: Any, hidden_states: Any, encoder_hidden_states: Any = None, attention_mask: Any = None, rotary_emb: Any = None, *args: Any, _block_id: str = block_id, _base: Any = base, **kwargs: Any) -> Any:
+                active = getattr(transformer, "_harness4h3_token_merge_policy", parsed.to_dict())
+                if (
+                    encoder_hidden_states is not None
+                    or attention_mask is not None
+                    or hidden_states.ndim < 3
+                    or hidden_states.shape[1] <= 1
+                    or (active.get("block_ids") and _block_id not in active["block_ids"])
+                ):
+                    return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
+                merged, source_groups, anchors = _merge_token_sequence(hidden_states, float(active["keep_ratio"]), torch)
+                if source_groups is None:
+                    return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
+                merged_rotary = _slice_rotary(rotary_emb, anchors, int(hidden_states.shape[1]))
+                output = _base(merged, None, None, merged_rotary, *args, **kwargs)
+                restored = output.index_select(1, source_groups)
+                stats = transformer._harness4h3_token_merge_stats
+                stats["input_tokens"] += int(hidden_states.shape[1])
+                stats["merged_tokens"] += int(merged.shape[1])
+                stats["groups"] = int(merged.shape[1])
+                stats["calls"] += 1
+                stats["last_anchors"] = anchors.detach().cpu().tolist()
+                return restored
+
+            attention._harness4h3_token_merge_base_forward = base
+            attention.forward = MethodType(merge_forward, attention)
+        _record_runtime_operation(transformer, "token_merge", parsed.to_dict())
+        return StructuralChange("runtime_token_merge", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0, "unmerge": True})
+
     def apply_sparse_runtime(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
         torch, _ = _torch_modules()
         parsed = SparseRuntimePolicy.from_mapping(policy)
@@ -708,11 +796,14 @@ class DiffusersWanAdapter:
                 head_dim = int(getattr(attention, "inner_dim", heads) // max(heads, 1))
                 total += 4.0 * heads * head_dim * 64.0 * 64.0
         token_policy = getattr(transformer, "_harness4h3_token_sparsity_policy", {})
+        token_merge_policy = getattr(transformer, "_harness4h3_token_merge_policy", {})
         sparse_policy = getattr(transformer, "_harness4h3_sparse_runtime_policy", {})
         window_policy = getattr(transformer, "_harness4h3_attention_window_policy", {})
         sampling_policy = getattr(transformer, "_harness4h3_sampling_step_policy", {})
         if token_policy:
             total *= float(token_policy.get("keep_ratio", 1.0))
+        if token_merge_policy:
+            total *= float(token_merge_policy.get("keep_ratio", 1.0)) ** 2
         if sparse_policy:
             total *= float(sparse_policy.get("keep_ratio", 1.0))
         if window_policy:
