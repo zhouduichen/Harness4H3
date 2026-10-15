@@ -127,6 +127,10 @@ class AlgorithmModelEvaluator:
         self._parent_flops = self._estimate_flops(self._parent_model)
         self._parent_bytes = _checkpoint_bytes(self.parent.path)
         self._parent_transformer_bytes = _logical_bytes(Path(self.parent.path) / "transformer")
+        self._parent_fixed_component_bytes = {
+            name: _logical_bytes(Path(self.parent.path) / name)
+            for name in ("text_encoder", "text_encoder_2", "tokenizer", "tokenizer_2", "vae")
+        }
         self._invocations = 0
         self._tica_samples: tuple[Any, ...] = ()
         self._parent_tica_outputs: dict[tuple[str, float], Any] = {}
@@ -187,6 +191,10 @@ class AlgorithmModelEvaluator:
             quality = max(-1.0, min(1.0, float(output["quality_score"]))) if "quality_score" in output else max(-1.0, min(1.0, float(output["cosine_similarity"]) - float(output["normalized_mse"])))
             checkpoint_bytes = _checkpoint_bytes(compression.child_checkpoint.path)
             transformer_bytes = _logical_bytes(Path(compression.child_checkpoint.path) / "transformer")
+            fixed_component_bytes = {
+                name: _logical_bytes(Path(compression.child_checkpoint.path) / name)
+                for name in self._parent_fixed_component_bytes
+            }
             reduction_score = max(0.0, min(1.0, float(parameter_reduction)))
             return {
                 "valid": True,
@@ -215,17 +223,25 @@ class AlgorithmModelEvaluator:
                 "pipeline_model_size_bytes": checkpoint_bytes,
                 "transformer_model_size_bytes": transformer_bytes,
                 "parent_transformer_model_size_bytes": self._parent_transformer_bytes,
+                "fixed_component_size_bytes": fixed_component_bytes,
+                "parent_fixed_component_size_bytes": dict(self._parent_fixed_component_bytes),
                 "model_size_scope": "pipeline_logical_unique_files",
                 "transformer_model_size_scope": "transformer_logical_unique_files",
                 "parameter_count_scope": "transformer_only",
+                "hardware_measurement_scope": "not_measured_on_cpu_fake",
                 "hardware_metrics": {
                     "latency_s": None,
                     "peak_memory_gb": None,
                     "model_size_gb": float(checkpoint_bytes) / float(1024**3),
                     "pipeline_model_size_gb": float(checkpoint_bytes) / float(1024**3),
                     "transformer_model_size_gb": float(transformer_bytes) / float(1024**3) if transformer_bytes else None,
+                    "fixed_component_size_gb": {
+                        name: float(value) / float(1024**3) if value else None
+                        for name, value in fixed_component_bytes.items()
+                    },
                     "model_size_scope": "pipeline_logical_unique_files",
                     "transformer_model_size_scope": "transformer_logical_unique_files",
+                    "parameter_count_scope": "transformer_only",
                     "available": False,
                     "unavailable_reason": "CPU Fake algorithm evaluator does not measure GPU hardware",
                 },
@@ -319,6 +335,10 @@ class AlgorithmModelEvaluator:
             "normalized_mse": normalized_mse,
             "cosine_similarity": cosine,
             "quality_error": weighted_error,
+            "risk_metric": "normalized_mse",
+            "risk_value": weighted_error,
+            "risk_scale": "normalized_mse",
+            "risk_is_approximate": False,
             "quality_score": max(-1.0, min(1.0, 1.0 - weighted_error)),
             "timestep_records": records,
             "timestep_weights": weights,

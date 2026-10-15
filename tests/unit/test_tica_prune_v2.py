@@ -41,6 +41,10 @@ def _measure(plan, full, stage):
     return {
         "valid": True,
         "quality_error": error,
+        "risk_metric": "normalized_mse" if full else "local_relative_output_error",
+        "risk_value": error,
+        "risk_scale": "normalized_mse" if full else "profile_relative_error",
+        "risk_is_approximate": not full,
         "quality_score": 1.0 - error,
         "parameter_reduction_ratio": 0.10 + 0.05 * count,
     }
@@ -110,7 +114,7 @@ def test_risk_time_and_activation_rules_change_search_decisions():
         _manifest(),
         profile,
         TICARecipe(include_baseline_suite=False, risk_limit=0.8, activation_weight=0.0, max_full_evals=4, max_fast_evals=8),
-        evaluate_candidate=lambda plan, full, stage: {"quality_error": 0.10, "quality_score": 0.90, "parameter_reduction_ratio": 0.2},
+        evaluate_candidate=lambda plan, full, stage: {"valid": True, "quality_error": 0.10, "risk_metric": "normalized_mse" if full else "local_relative_output_error", "risk_value": 0.10, "risk_scale": "normalized_mse" if full else "profile_relative_error", "risk_is_approximate": not full, "quality_score": 0.90, "parameter_reduction_ratio": 0.2},
     )
     strict = TICAPruner().search(
         None,
@@ -118,7 +122,7 @@ def test_risk_time_and_activation_rules_change_search_decisions():
         _manifest(),
         profile,
         TICARecipe(include_baseline_suite=False, risk_limit=0.05, activation_weight=1.0, max_full_evals=4, max_fast_evals=8),
-        evaluate_candidate=lambda plan, full, stage: {"quality_error": 0.10, "quality_score": 0.90, "parameter_reduction_ratio": 0.2},
+        evaluate_candidate=lambda plan, full, stage: {"valid": True, "quality_error": 0.10, "risk_metric": "normalized_mse" if full else "local_relative_output_error", "risk_value": 0.10, "risk_scale": "normalized_mse" if full else "profile_relative_error", "risk_is_approximate": not full, "quality_score": 0.90, "parameter_reduction_ratio": 0.2},
     )
     assert loose.selected_plan_digest != strict.selected_plan_digest or loose.selected_candidate_id != strict.selected_candidate_id
     early = recipe_plan(profile, TICARecipe(time_weight_formula="early_log"))
@@ -131,7 +135,7 @@ def test_interaction_full_measurements_share_the_full_budget_and_cache():
 
     def measure(plan, full, stage):
         calls.append((full, stage, tuple(plan.get("block_ids", [])), plan.get("mode")))
-        return {"valid": True, "quality_error": 0.10, "quality_score": 0.90, "parameter_reduction_ratio": 0.2}
+        return {"valid": True, "quality_error": 0.10, "risk_metric": "normalized_mse" if full else "local_relative_output_error", "risk_value": 0.10, "risk_scale": "normalized_mse" if full else "profile_relative_error", "risk_is_approximate": not full, "quality_score": 0.90, "parameter_reduction_ratio": 0.2}
 
     result = TICAPruner().search(
         None,
@@ -164,7 +168,7 @@ def test_search_refuses_test_split_and_missing_ffn_evidence():
         evaluate_candidate=_measure,
     )
     assert result.selected_candidate_id is None
-    assert all(item["status"] in {"baseline", "risk_unknown", "risk_rejected", "screened"} for item in result.search_states)
+    assert all(item["status"] in {"baseline", "fast_risk_unknown", "fast_risk_rejected", "screened", "full_risk_unavailable", "full_risk_rejected"} for item in result.search_states)
 
     missing_blocks = _profile()
     missing_blocks["tica_block_sensitivity"] = [
@@ -179,6 +183,90 @@ def test_search_refuses_test_split_and_missing_ffn_evidence():
         evaluate_candidate=_measure,
     )
     assert result.selected_candidate_id is None
+
+
+def test_fast_low_full_high_risk_is_rejected_and_not_pareto():
+    def measure(plan, full, stage):
+        if full:
+            return {
+                "valid": True,
+                "quality_error": 0.90,
+                    "risk_metric": "normalized_mse",
+                    "risk_value": 0.90,
+                    "risk_scale": "normalized_mse",
+                    "risk_is_approximate": False,
+                    "quality_score": 0.10,
+                "parameter_reduction_ratio": 0.50,
+            }
+        return {
+            "valid": True,
+            "quality_error": 0.01,
+            "risk_metric": "local_relative_output_error",
+            "risk_value": 0.01,
+            "risk_scale": "profile_relative_error",
+            "risk_is_approximate": True,
+        }
+
+    result = TICAPruner().search(
+        None,
+        None,
+        _manifest(),
+        _profile(),
+        TICARecipe(include_baseline_suite=False, max_full_evals=2, max_fast_evals=4, risk_limit=0.25),
+        evaluate_candidate=measure,
+    )
+    assert result.selected_candidate_id is None
+    assert result.pareto_front == ()
+    assert all(item.status == "full_risk_rejected" for item in result.candidates if item.full_metrics)
+
+
+def test_full_risk_scale_mismatch_fails_closed():
+    def measure(plan, full, stage):
+        return {
+            "valid": True,
+            "quality_error": 0.01,
+            "risk_metric": "local_relative_output_error",
+            "risk_value": 0.01,
+            "risk_scale": "profile_relative_error",
+            "quality_score": 0.99,
+            "parameter_reduction_ratio": 0.20,
+        }
+
+    result = TICAPruner().search(
+        None,
+        None,
+        _manifest(),
+        _profile(),
+        TICARecipe(include_baseline_suite=False, max_full_evals=2, max_fast_evals=4),
+        evaluate_candidate=measure,
+    )
+    assert result.selected_candidate_id is None
+    assert all(item.status == "full_risk_unavailable" for item in result.candidates if item.full_metrics)
+
+
+def test_full_approximate_risk_is_not_authoritative():
+    def measure(plan, full, stage):
+        return {
+            "valid": True,
+            "quality_error": 0.01,
+            "risk_metric": "normalized_mse" if full else "local_relative_output_error",
+            "risk_value": 0.01,
+            "risk_scale": "normalized_mse" if full else "profile_relative_error",
+            "risk_is_approximate": True,
+            "quality_score": 0.99,
+            "parameter_reduction_ratio": 0.20,
+        }
+
+    result = TICAPruner().search(
+        None,
+        None,
+        _manifest(),
+        _profile(),
+        TICARecipe(include_baseline_suite=False, max_full_evals=2, max_fast_evals=4),
+        evaluate_candidate=measure,
+    )
+    assert result.selected_candidate_id is None
+    assert all(item.status == "full_risk_unavailable" for item in result.candidates if item.full_metrics)
 
 
 def test_evaluation_splits_reject_reused_cached_source_hash():

@@ -22,4 +22,12 @@
 
 ## 运行边界
 
-真实实验应使用固定 checkpoint、固定 GPU、固定 dtype、固定随机种子和固定 Evaluation Recipe。任何控制器失败、manifest 不一致、Test split 被读取或计划 digest 不一致，都应停止该轮并记录失败，不能把失败轮当作算法结果。
+真实 Evolution 应使用 Validation；只有算法、模型 checkpoint、源码版本和评测协议冻结后，才运行独立的 `final-evaluate` Test。任何控制器失败、manifest 不一致、Test split 被 Evolution 读取或计划 digest 不一致，都应停止该轮并记录失败，不能把失败轮当作算法结果。FinalEvaluation 只写独立报告，不更新 Memory、SearchPolicy、模型晋升或 Agent 输入。
+
+## 指标与预算口径
+
+- `parameter_count` 和 `transformer_model_size_*` 只统计压缩目标 Transformer；`pipeline_model_size_*` 统计完整 Pipeline 的逻辑唯一文件大小，并按 inode 去重，因此硬链接、软链接和共享的文本编码器/VAE 不会被重复计数。报告同时保留 `fixed_component_size_*`，不能把固定组件的变化算成 Transformer 收益。
+- 延迟是固定生成条件下的去噪加 VAE 解码时间；峰值显存只接受实际 `generation_device` 对应 CUDA 设备的正数监控值，缺失或异常时保留为 `null`，不会填零。
+- TICA 搜索报告分别记录 `fast_evals`、`full_evals`、`interaction_evals`、每层实际深度、预算耗尽原因、共享 Calibration profiling 成本和总成本。启用四个 baseline 时，它们共享同一个搜索预算，属于候选种子对照，不是四次独立算法实验。
+
+在 GPU 主机运行前，先执行 `tools/preflight_wan_tica.py`。它只检查 checkpoint 文件布局、三份 manifest 的来源哈希和划分泄漏，不加载 Wan；`runtime_probe` 仍必须在目标主机对实际加载的 Transformer 验证 FFN 路径、Hook 输出维度和全局通道对齐。

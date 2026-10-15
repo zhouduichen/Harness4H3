@@ -26,8 +26,9 @@ candidate_screening: true
 - `rounds/Rxxxx/tica-search.json`：TICA-Prune v2 的规范化 SearchState、候选计划摘要、选中候选、Pareto 前沿、预算账本和缓存命中记录。交互分析的独立模型执行同时计入 `full_evals`。
 - TICA 指标口径固定为：`parameter_count`/Transformer 权重大小只描述压缩目标 Transformer；`pipeline_model_size` 描述包含文本编码器、VAE 和配置的完整 Pipeline 逻辑大小，并按 inode 去重硬链接/软链接；CUDA 峰值显存只接受实际执行 Device 上的正数监控值，不可用时写 `null`。
 - TICA 的校准输入只能用于敏感度和候选搜索；算法比较使用独立 Validation manifest，最终 Wan 视频评价使用 held-out Test manifest，Test split 不会进入搜索或反馈。`TICAEvaluationSplits` 会拒绝复用 sample ID 的划分；真实 Wan TICA 运行必须显式提供三份 manifest。
-- 真实 Wan TICA 配置必须将 `evaluator.evaluation_split` 设为 `test`；这表示最终晋升只读取独立 held-out 视频评测结果，不能把 Calibration/Validation 指标冒充最终结果。
+- 真实 Wan TICA 的 Evolution 配置必须将 `evaluator.evaluation_split` 设为 `validation`；Test 只能在算法、模型、源码版本和评测协议冻结后，通过独立的 `final-evaluate` 命令运行，不能把 held-out 指标回流到晋升或记忆。
 - TICA 搜索结果是最终执行计划的唯一来源。`decision.json` 同时记录 `selected_candidate_id`、`selected_plan_digest` 和 `final_plan_digest`，摘要不一致时不会进入压缩和晋升流程。
+- 评测报告区分 Transformer 参数/权重、完整 Pipeline 唯一文件体积、固定文本编码器/VAE 体积、实际 CUDA 设备峰值显存和去噪+解码延迟；缺失硬件值保持缺失。搜索结果还记录每层实际深度、Fast/Full/Interaction 预算、Calibration profiling 和缓存命中，不能把同一模型的多 case 测量当成多次算法实验。
 - `rounds/Rxxxx/screening/screening.json`：静态、诊断、完整评测三阶段及每阶段成本/证据等级。
 - `design-genes.jsonl` 与 `algorithm-skills.jsonl`：可供下一轮 SkillHub 检索的算法、源码哈希、改动理由、验证状态和搜索空间经验。
 

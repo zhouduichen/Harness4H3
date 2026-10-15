@@ -21,6 +21,7 @@ tica_prune: true
 tica_recipe:
   time_weight_formula: early_log
   risk_limit: 0.25
+  fast_risk_limit: 0.50
   activation_weight: 0.5
   interaction_weight: 0.5
   beam_width: 2

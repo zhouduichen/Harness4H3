@@ -75,6 +75,7 @@ class EvolutionLoop:
         algorithm_improvement: bool = False,
         search_space_evolution: bool = False,
         candidate_screening: bool = False,
+        phase: str = "evolution",
         search_space_manager: Optional[SearchSpaceManager] = None,
         tica_prune: bool = False,
         tica_manifest: Optional[TICACalibrationManifest] = None,
@@ -111,10 +112,15 @@ class EvolutionLoop:
         if self.tica_prune and self.tica_splits is None:
             raise ValueError("TICA requires Calibration/Validation/Test split manifests")
         if self.tica_prune:
-            if any(manifest.provider_name != "fake_wan_cpu" for manifest in (self.tica_splits.calibration, self.tica_splits.validation, self.tica_splits.test)):  # type: ignore[union-attr]
-                for manifest in (self.tica_splits.calibration, self.tica_splits.validation, self.tica_splits.test):  # type: ignore[union-attr]
+            # Evolution may inspect Calibration and Validation sources only.
+            # The Test manifest remains reserved for FinalEvaluation and is
+            # deliberately not opened or hash-verified on this path.
+            if any(manifest.provider_name != "fake_wan_cpu" for manifest in (self.tica_splits.calibration, self.tica_splits.validation)):  # type: ignore[union-attr]
+                for manifest in (self.tica_splits.calibration, self.tica_splits.validation):  # type: ignore[union-attr]
                     manifest.verify_cached_sources()
-            _write_json(self.output_root / "tica-splits.json", self.tica_splits.to_dict())  # type: ignore[union-attr]
+            split_payload = self.tica_splits.to_dict()  # type: ignore[union-attr]
+            split_payload.pop("test", None)
+            _write_json(self.output_root / "tica-splits.json", split_payload)
         self.tica_recipe = TICARecipe.from_mapping(tica_recipe)
         self._custom_evaluator = evaluator is not None
         self.registry = registry or build_wan_compression_registry(include_tica=self.tica_prune)
@@ -127,6 +133,9 @@ class EvolutionLoop:
         self.algorithm_improvement = bool(algorithm_improvement)
         self.search_space_evolution = bool(search_space_evolution)
         self.candidate_screening = bool(candidate_screening)
+        self.phase = str(phase).strip().lower() or "evolution"
+        if self.phase != "evolution":
+            raise ValueError("EvolutionLoop only supports phase=evolution; use FinalEvaluation for Test")
         self.search_space_manager: Optional[SearchSpaceManager] = search_space_manager
         self.search_space_version = None
         self.search_space_proposal = None
@@ -295,6 +304,7 @@ class EvolutionLoop:
                         failures=_history_failure_reasons(agent_history),
                         skills=skills,
                         search_space=self.search_space_version.to_dict() if self.search_space_version is not None else {},
+                        protocol_mode="tica" if self.tica_prune else "standard",
                     )
                     improved_algorithm = True
                 elif self.tica_prune and not list(self.algorithm_store.read()):
@@ -322,6 +332,7 @@ class EvolutionLoop:
                         skills=skills,
                         pareto_front=pareto_front,
                         search_choice=search_choice,
+                        protocol_mode="tica" if self.tica_prune else "standard",
                     )
             except (RuntimeError, TypeError, ValueError) as exc:
                 algorithm = AlgorithmCandidate.from_source(
@@ -452,24 +463,27 @@ class EvolutionLoop:
                 if validation_profiles is None:
                     validation_profiles = self._build_validation_profiles(validation_parent, profile_payload)
                     _write_json(validation_profiles_path, {"profiles": list(validation_profiles)})
+                measurement_evaluator = self._algorithm_measurement_evaluator(
+                    validation_parent,
+                    validation_profiles,
+                    round_dir / "algorithm-validation-measurements",
+                    recipe=active_tica_recipe,
+                )
                 validation = AlgorithmValidator().validate(
                     improvement_parent,
                     algorithm,
                     self.sandbox,
                     validation_profiles[0],
                     agent_history,
-                    self._algorithm_measurement_evaluator(
-                        validation_parent,
-                        validation_profiles,
-                        round_dir / "algorithm-validation-measurements",
-                        recipe=active_tica_recipe,
-                    ),
+                    measurement_evaluator,
                     budget={
                         "sandbox_timeout_s": self.sandbox.timeout_s,
                         "mode": "cpu_fake" if bool(validation_parent.metadata.get("offline_simulation", False)) else "real_wan_structure",
                         "tica_search_budget": (active_tica_recipe or self.tica_recipe).budget() if self.tica_prune else None,
                     },
                     profiles=validation_profiles,
+                    complete_search=measurement_evaluator if self.tica_prune else None,
+                    algorithm_profile=profile_payload if self.tica_prune else None,
                 )
                 _write_json(validation_path, validation.to_dict())
             algorithm = replace(
@@ -1110,6 +1124,8 @@ class EvolutionLoop:
         return collected
 
     def _tica_manifest_for_split(self, split: str) -> TICACalibrationManifest:
+        if str(split).lower() == "test":
+            raise ValueError("Test split is unavailable during Evolution phase")
         if self.tica_splits is None:
             if self.tica_manifest is None:
                 raise ValueError("TICA split manifest is unavailable")
@@ -1123,6 +1139,7 @@ class EvolutionLoop:
         for name in (
             "time_weight_formula",
             "risk_limit",
+            "fast_risk_limit",
             "activation_weight",
             "interaction_weight",
             "beam_width",
@@ -1180,6 +1197,10 @@ class EvolutionLoop:
                     "evidence_level": "cpu_fake_local_output" if self.tica_manifest.provider_name == "fake_wan_cpu" else "real_wan_local_output",
                     "evaluation_status": "local_output_screen",
                     "quality_error": sum(risks) / max(len(risks), 1) if risks else None,
+                    "risk_metric": "local_relative_output_error",
+                    "risk_value": sum(risks) / max(len(risks), 1) if risks else None,
+                    "risk_scale": "profile_relative_error",
+                    "risk_is_approximate": True,
                     "selected_blocks": selected,
                     "time_weight_formula": recipe.time_weight_formula,
                     "stage": stage,
@@ -1245,6 +1266,9 @@ class EvolutionLoop:
         from that same artifact, independent of the model-promotion path.
         """
 
+        if self.tica_prune:
+            return self._complete_tica_algorithm_measurement_evaluator(parent, profiles, output_root, recipe=recipe)
+
         evaluators: dict[str, AlgorithmModelEvaluator] = {}
         evaluator_recipe = recipe or self.tica_recipe
 
@@ -1269,6 +1293,132 @@ class EvolutionLoop:
                 )
                 evaluators[digest] = evaluator
             return evaluator.evaluate(result)
+
+        return evaluate
+
+    def _complete_tica_algorithm_measurement_evaluator(
+        self,
+        parent: CheckpointArtifact,
+        profiles: tuple[Mapping[str, Any], ...],
+        output_root: Path,
+        *,
+        recipe: Optional[TICARecipe] = None,
+    ) -> Callable[..., Mapping[str, Any]]:
+        """Compare TICA rules by running each rule's complete Calibration search.
+
+        Sandbox only validates the rule boundary.  The returned callback then
+        executes an independent TICAPruner search for each source, from the
+        same immutable checkpoint, calibration manifest, search-space version,
+        seed and budget.  Only the selected Calibration candidate is measured
+        on the independent Validation manifest; Test is unreachable here.
+        """
+
+        if self.tica_manifest is None or self.tica_splits is None:
+            raise ValueError("complete TICA algorithm validation requires split manifests")
+        evaluator_recipe = recipe or self.tica_recipe
+        calibration_cache: dict[str, Mapping[str, Any]] = {}
+        search_cache: dict[str, Any] = {}
+        validation_evaluators: dict[str, AlgorithmModelEvaluator] = {}
+        output_root = Path(output_root)
+
+        def calibration_profile() -> Mapping[str, Any]:
+            key = stable_digest({"parent": parent.sha256, "manifest": self.tica_manifest.digest()})
+            if key in calibration_cache:
+                return calibration_cache[key]
+            model = self.adapter.reload_model(parent)
+            profile = dict(collect_tica_profile(self.adapter, model, self.tica_manifest))
+            profile["evaluation_split"] = "calibration"
+            profile["parent_checkpoint_sha256"] = parent.sha256
+            profile["profiling_digest"] = stable_digest({"profile": profile, "manifest": self.tica_manifest.digest()})
+            calibration_cache[key] = profile
+            return profile
+
+        def evaluate(result: SandboxResult, scenario_profile: Mapping[str, Any]) -> Mapping[str, Any]:
+            if result.plan is None:
+                return {"valid": False, "failure_reason": "algorithm_plan_missing"}
+            if str(scenario_profile.get("evaluation_split", "validation")).lower() == "test":
+                raise ValueError("TICA algorithm validation cannot consume Test split")
+            rule = self._tica_recipe_from_plan(result.plan.args)
+            rule_digest = stable_digest(
+                {
+                    "source_sha256": result.source_sha256,
+                    "plan": result.plan.to_dict(),
+                    "recipe": rule.to_dict(),
+                    "parent": parent.sha256,
+                    "calibration": self.tica_manifest.digest(),
+                }
+            )
+            search = search_cache.get(rule_digest)
+            if search is None:
+                search = self._run_tica_search(
+                    parent,
+                    calibration_profile(),
+                    output_root / "search" / rule_digest,
+                    recipe=rule,
+                    seed_plan=result.plan.args,
+                )
+                search_cache[rule_digest] = search
+            selected = next(
+                (item for item in search.candidates if item.candidate_id == search.selected_candidate_id),
+                None,
+            )
+            base = {
+                "parent_checkpoint_sha256": parent.sha256,
+                "calibration_digest": search.calibration_digest,
+                "search_space_version": self.search_space_version.version_id if self.search_space_version is not None else "default",
+                "search_seed": int((calibration_profile().get("provenance") or {}).get("seed", 7)) if isinstance(calibration_profile().get("provenance"), Mapping) else 7,
+                "profiling_digest": calibration_profile().get("profiling_digest"),
+                "search_budget": rule.budget(),
+                "search_usage": dict(search.budget),
+                "search_cost": {
+                    "observed_depth": int(search.observed_search_depth),
+                    "termination_reason": search.termination_reason,
+                    "candidate_count": len(search.candidates),
+                    "feasible_count": sum(1 for item in search.candidates if item.feasible),
+                    "level_stats": list(search.level_stats),
+                    "budget_audit": list(search.budget_audit),
+                },
+                "profiling_cost": dict(search.profiling_cost),
+                "total_cost": dict(search.total_cost),
+                "pareto_front": list(search.pareto_front),
+                "selected_candidate_id": search.selected_candidate_id,
+                "selected_plan_digest": search.selected_plan_digest,
+                "search_result_digest": stable_digest(search.to_dict()),
+            }
+            if selected is None or not selected.feasible:
+                return {**base, "valid": False, "failure_reason": "no_feasible_calibration_candidate"}
+            validation_digest = stable_digest({"profile": scenario_profile, "manifest": self.tica_splits.validation.digest()})
+            evaluator = validation_evaluators.get(validation_digest)
+            if evaluator is None:
+                seed_value = scenario_profile.get("provenance", {}).get("seed", 7) if isinstance(scenario_profile.get("provenance"), Mapping) else 7
+                evaluator = AlgorithmModelEvaluator(
+                    self.adapter,
+                    self.registry,
+                    parent,
+                    scenario_profile,
+                    output_root / "validation" / validation_digest,
+                    seed=int(seed_value or 7),
+                    calibration_manifest=self.tica_splits.validation,
+                    search_budget=rule.budget(),
+                )
+                validation_evaluators[validation_digest] = evaluator
+            validation_result = dict(
+                evaluator.evaluate(
+                    SandboxResult(
+                        "success",
+                        result.source_sha256,
+                        SandboxCompressionPlan("tica_prune", dict(selected.plan)),
+                        metadata={"complete_tica_search": True, "calibration_search_digest": base["search_result_digest"]},
+                    )
+                )
+            )
+            return {
+                **validation_result,
+                **base,
+                "valid": bool(validation_result.get("valid") is True and validation_result.get("output_metrics")),
+                "validation_selected_candidate": selected.to_dict(),
+                "validation_evaluation": validation_result,
+            }
 
         return evaluate
 
@@ -1416,11 +1566,25 @@ class EvolutionLoop:
             channel_chunk_size=16 if self.advanced_profiling else None,
         ).to_dict()
         if self.tica_prune:
-            tica = dict(collect_tica_profile(self.adapter, model, self._tica_manifest_for_split("validation"))) if self.tica_prune else {}
-            base = {**dict(base), **tica}
-            alternate = {**dict(alternate), **tica}
-            base["evaluation_split"] = "validation"
-            alternate["evaluation_split"] = "validation"
+            # Validation is an independent comparison/evaluation input.  It
+            # must not be profiled into a new TICA search profile: all search
+            # rules, candidate generation, and search scoring are bound to the
+            # immutable Calibration profile collected by the complete-search
+            # evaluator.  Keep only structural/provenance metadata here.
+            def validation_view(value: Mapping[str, Any]) -> dict[str, Any]:
+                view = {
+                    key: item
+                    for key, item in dict(value).items()
+                    if key not in {"tica", "tica_block_sensitivity", "tica_channel_sensitivity", "profiling_cost"}
+                }
+                view["evaluation_split"] = "validation"
+                provenance_view = dict(view.get("provenance") or {})
+                provenance_view["search_profile_source"] = "calibration_only"
+                view["provenance"] = provenance_view
+                return view
+
+            base = validation_view(base)
+            alternate = validation_view(alternate)
         alternate_provenance = dict(alternate.get("provenance") or {})
         alternate_provenance["validation_scenario"] = "alternate_seed"
         alternate["provenance"] = alternate_provenance

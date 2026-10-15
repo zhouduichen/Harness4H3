@@ -126,6 +126,7 @@ class AlgorithmAgent:
         skills: Sequence[Mapping[str, Any]] = (),
         pareto_front: Sequence[Mapping[str, Any]] = (),
         search_choice: str = "exploit",
+        protocol_mode: str = "standard",
     ) -> AlgorithmCandidate:
         if self.provider is None:
             previously_selected = self._previously_selected_blocks(history)
@@ -186,6 +187,7 @@ class AlgorithmAgent:
             "pareto_front": _compact_pareto_front(pareto_front),
             "parent_id": parent_id,
             "search_policy": {"choice": search_choice},
+            "protocol_mode": str(protocol_mode).strip().lower() or "standard",
         }
         raw = self.provider(payload)
         if not isinstance(raw, Mapping):
@@ -219,6 +221,7 @@ class AlgorithmAgent:
         failures: Sequence[str] = (),
         skills: Sequence[Mapping[str, Any]] = (),
         search_space: Optional[Mapping[str, Any]] = None,
+        protocol_mode: str = "standard",
     ) -> AlgorithmCandidate:
         """Improve an existing source with bounded, explicit feedback context."""
 
@@ -266,6 +269,7 @@ class AlgorithmAgent:
             "search_space": dict(search_space or {}),
             "parent_id": parent_id,
             "task": "improve_existing_algorithm_source",
+            "protocol_mode": str(protocol_mode).strip().lower() or "standard",
         }
         raw = self.provider(payload)
         if not isinstance(raw, Mapping):
@@ -512,7 +516,7 @@ def _deterministic_improvement_source(
             "    selected = sorted(ranked)[0][1] if ranked else str(profile.get('layers', [{'block_id': 'block.0'}])[0]['block_id'])\n"
             "    width = int(profile.get('model', {}).get('ffn_width', 1))\n"
             "    target = max(1, min(width - 1, int(width * 0.75)))\n"
-            "    return {'operator': 'tica_prune', 'args': {'block_ids': [selected], 'retained_indices': list(range(target)), 'mode': 'block_plus_ffn', 'time_weight_formula': %r, 'risk_limit': 0.25, 'activation_weight': 0.5, 'interaction_weight': 0.5, 'beam_width': 2, 'max_fast_evals': 8, 'max_full_evals': 4, 'max_interaction_evals': 2, 'strategy': 'greedy_beam', 'max_search_depth': 3}}\n"
+            "    return {'operator': 'tica_prune', 'args': {'block_ids': [selected], 'retained_indices': list(range(target)), 'mode': 'block_plus_ffn', 'time_weight_formula': %r, 'risk_limit': 0.25, 'fast_risk_limit': 0.50, 'activation_weight': 0.5, 'interaction_weight': 0.5, 'beam_width': 2, 'max_fast_evals': 8, 'max_full_evals': 4, 'max_interaction_evals': 2, 'strategy': 'greedy_beam', 'max_search_depth': 3}}\n"
         ) % (parent.algorithm_id, formula, formula)
         return (
             source,
@@ -760,6 +764,7 @@ def build_algorithm_provider(
     endpoint: str,
     api_key_env: str = "OPENAI_API_KEY",
     timeout_s: float = 180.0,
+    protocol_mode: str = "standard",
 ) -> Provider:
     """Build an LLM callable that returns only the bounded algorithm fields."""
 
@@ -780,6 +785,9 @@ def build_algorithm_provider(
 
     def call(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         task = str(payload.get("task", "generate_algorithm"))
+        active_protocol = str(payload.get("protocol_mode", protocol_mode)).strip().lower() or "standard"
+        if active_protocol not in {"standard", "tica"}:
+            raise ValueError("unsupported_algorithm_protocol_mode: %s" % active_protocol)
         if task == "improve_existing_algorithm_source":
             instruction = (
                 "Improve the complete parent algorithm source included in this request. "
@@ -827,6 +835,21 @@ def build_algorithm_provider(
             "Never output paths, devices, shell commands, imports outside the sandbox allowlist, "
             "or evaluator settings.\n\n"
         )
+        tica_rules = (
+            "This is TICA-Prune protocol mode. Return an algorithm source whose propose(profile, history) "
+            "returns exactly {'operator': 'tica_prune', 'args': {...}}. This is a bounded search rule and "
+            "initial suggestion for the trusted TICAPruner; it is not a final model mutation and must not "
+            "execute model, CUDA, filesystem, or arbitrary imports. Allowed TICA args are block_ids, "
+            "retained_indices, mode in {'block','ffn','block_plus_ffn'}, time_weight_formula in "
+            "{'uniform','early_log','late_log'}, risk_limit, fast_risk_limit, activation_weight, "
+            "interaction_weight, beam_width, max_fast_evals, max_full_evals, max_interaction_evals, "
+            "strategy in {'greedy','greedy_beam'}, and max_search_depth. Numeric values must stay within "
+            "the supplied search-space bounds. The trusted searcher computes multi-step candidates, runs "
+            "full normalized-MSE checks, and owns Pareto selection. You may change timestep weighting, "
+            "scoring weights, interaction handling, ranking, and bounded search controls. Do not invent a "
+            "new compression primitive; unsupported capability must be proposed through SearchSpaceManager. "
+            "The returned parent_id must exactly match the supplied parent_id.\n\n"
+        )
         search_space_rules = (
             "Return JSON only with spec, rationale, and evidence_ids. The spec must describe "
             "one new declarative capability not already present in search_space. Do not include "
@@ -834,7 +857,13 @@ def build_algorithm_provider(
             "implementation. A generated_channel_rule may include bounded implementation_source "
             "only; it must delegate to prune_ffn_channels and will be sandboxed.\n\n"
         )
-        prompt = instruction + (search_space_rules if task == "propose_search_space_extension" else algorithm_rules)
+        if task == "propose_search_space_extension":
+            protocol_rules = search_space_rules
+        elif active_protocol == "tica":
+            protocol_rules = tica_rules
+        else:
+            protocol_rules = algorithm_rules
+        prompt = instruction + protocol_rules
         prompt += json.dumps(dict(payload), ensure_ascii=False, sort_keys=True)
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if provider in {"openai", "openai_compatible", "vllm"} and api_key_env:

@@ -461,6 +461,45 @@ class WanVideoEvaluator:
             "source_revision": self.config.source_revision,
         }
 
+    def evaluate_final(self, artifact: CheckpointArtifact) -> Mapping[str, Any]:
+        """Evaluate one frozen checkpoint on Test without adaptive side effects.
+
+        This method intentionally does not compare against or update the active
+        model.  ``FinalEvaluationRunner`` owns the immutable request envelope;
+        this evaluator only measures the requested artifact under the Test
+        recipe and returns a result that is explicitly non-promotable.
+        """
+
+        if str(self.config.evaluation_split).lower() != "test":
+            raise WanEvaluationError("final_test_evaluation_requires_test_split")
+        try:
+            measured = dict(self._evaluate_artifact(artifact))
+        except WanEvaluationError as exc:
+            return {
+                "valid": False,
+                "evaluation_status": "final_test_failed",
+                "failure_type": "evaluation_failed",
+                "failure_message": str(exc),
+                "offline_simulation": False,
+                "promotable": False,
+                "adaptive_state_mutated": False,
+                "evaluation_manifest_sha256": self.manifest_sha256,
+                "evaluator_recipe_sha256": self.recipe_digest,
+                "evaluator_version": EVALUATOR_VERSION,
+                "source_revision": self.config.source_revision,
+            }
+        return {
+            **measured,
+            "evaluation_status": "final_test_measured",
+            "evaluation_split": "test",
+            "promotable": False,
+            "adaptive_state_mutated": False,
+            "evaluation_manifest_sha256": self.manifest_sha256,
+            "evaluator_recipe_sha256": self.recipe_digest,
+            "evaluator_version": EVALUATOR_VERSION,
+            "source_revision": self.config.source_revision,
+        }
+
     def _evaluate_artifact(self, artifact: CheckpointArtifact) -> Mapping[str, Any]:
         cached = self._cache.get(artifact.sha256)
         if cached is not None:
@@ -571,6 +610,10 @@ class WanVideoEvaluator:
             )
             pipeline_model_size_gb = self._checkpoint_size_gb(artifact.path)
             transformer_model_size_gb = self._component_size_gb(Path(artifact.path) / "transformer")
+            fixed_component_sizes_gb = {
+                name: self._component_size_gb(Path(artifact.path) / name)
+                for name in ("text_encoder", "text_encoder_2", "tokenizer", "tokenizer_2", "vae")
+            }
             result = {
                 "status": "success",
                 "checkpoint_sha256": artifact.sha256,
@@ -608,10 +651,12 @@ class WanVideoEvaluator:
                     "model_size_gb": pipeline_model_size_gb,
                     "pipeline_model_size_gb": pipeline_model_size_gb,
                     "transformer_model_size_gb": transformer_model_size_gb,
+                    "fixed_component_size_gb": fixed_component_sizes_gb,
                     "model_size_scope": "pipeline_logical_unique_files",
                     "parameter_count": int(artifact.structure.parameter_count),
                     "transformer_parameter_count": int(artifact.structure.parameter_count),
                     "parameter_count_scope": "transformer",
+                    "hardware_measurement_scope": "generation_device_only",
                     "case_count": len(cases),
                 },
                 "resumed_case_count": resumed_case_count,
@@ -683,15 +728,16 @@ class WanVideoEvaluator:
 
     def _reset_peak_memory(self, torch: Any) -> None:
         try:
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and self._cuda_device(torch).type == "cuda":
                 torch.cuda.reset_peak_memory_stats(self._cuda_device(torch))
         except (AttributeError, RuntimeError):
             pass
 
     def _peak_memory_gb(self, torch: Any) -> Optional[float]:
         try:
-            if torch.cuda.is_available():
-                value = float(torch.cuda.max_memory_allocated(self._cuda_device(torch))) / float(1024**3)
+            device = self._cuda_device(torch)
+            if device.type == "cuda" and torch.cuda.is_available():
+                value = float(torch.cuda.max_memory_allocated(device)) / float(1024**3)
                 if math.isfinite(value) and value > 0.0:
                     return value
         except (AttributeError, RuntimeError):

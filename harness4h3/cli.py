@@ -54,7 +54,7 @@ from .executor.local import LocalProcessExecutor
 from .target.profile import load_target_profile
 from research.experiments.remote_h3_closed_loop import RemoteCampaign
 from .adapters.wan import build_wan_adapter
-from .evolution import CompressionConfig, EvolutionLoop, PromotionPolicy, SearchPolicy, WanVideoEvaluationConfig, WanVideoEvaluator
+from .evolution import CompressionConfig, EvolutionLoop, FinalEvaluationRequest, FinalEvaluationRunner, PromotionPolicy, SearchPolicy, WanVideoEvaluationConfig, WanVideoEvaluator
 from .evolution.agent import AlgorithmAgent, build_algorithm_provider
 from .evolution.tica_calibration import TICACalibrationManifest, TICAEvaluationSplits
 from .operators.wan import build_wan_compression_registry
@@ -154,6 +154,8 @@ def _load_tica_manifest(path: Path) -> TICACalibrationManifest:
 
 def cmd_evolve_compression(args: argparse.Namespace) -> int:
     config = _compression_config(args)
+    if config.phase != "evolution":
+        raise ValueError("evolve-compression requires phase=evolution; final Test evaluation is a separate command")
     if int(args.rounds) <= 0:
         raise ValueError("rounds must be positive")
     adapter, parent = _compression_context(config)
@@ -178,8 +180,8 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         if evaluator_backend != "wan_video":
             raise ValueError("diffusers evolutionary compression requires evaluator.backend=wan_video; structural proxy is disabled for real checkpoints")
         evaluator_config = WanVideoEvaluationConfig.from_mapping(config.evaluator, config.output_root / "real-evaluation")
-        if config.tica_prune and evaluator_config.evaluation_split != "test":
-            raise ValueError("real TICA promotion requires evaluator.evaluation_split=test")
+        if config.tica_prune and evaluator_config.evaluation_split != "validation":
+            raise ValueError("real TICA Evolution requires evaluator.evaluation_split=validation")
         evaluator = WanVideoEvaluator(evaluator_config, baseline=parent)
     elif evaluator_backend and evaluator_backend != "structural_proxy":
         raise ValueError("fake evolutionary compression supports only the default structural proxy evaluator")
@@ -195,7 +197,9 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
             tica_splits = TICAEvaluationSplits(calibration=calibration, validation=validation, test=test)
             tica_manifest = tica_splits.calibration
             if config.backend == "diffusers":
-                for manifest in (calibration, validation, test):
+                # Test is frozen input for FinalEvaluation; Evolution must not
+                # open its tensor sources or use them for adaptive decisions.
+                for manifest in (calibration, validation):
                     manifest.verify_cached_sources()
             if config.backend == "fake" and tica_manifest.provider_name != "fake_wan_cpu":
                 raise ValueError("fake TICA backend requires provider_name=fake_wan_cpu")
@@ -228,6 +232,7 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         algorithm_improvement=config.algorithm_improvement,
         search_space_evolution=config.search_space_evolution,
         candidate_screening=config.candidate_screening,
+        phase=config.phase,
         tica_prune=config.tica_prune,
         tica_manifest=tica_manifest,
         tica_splits=tica_splits,
@@ -237,6 +242,40 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
     failed = sum(1 for item in outcomes if item["status"] == "failed")
     _emit({"status": "success" if failed == 0 else "failed", "rounds": outcomes, "failed_rounds": failed}, args.json)
     return 0 if failed == 0 else 1
+
+
+def cmd_final_evaluate(args: argparse.Namespace) -> int:
+    """Run one frozen Test evaluation without opening an evolution boundary."""
+
+    config = _compression_config(args)
+    if config.phase != "final_evaluation":
+        raise ValueError("final-evaluate requires phase=final_evaluation")
+    if str(config.evaluator.get("backend", "")).strip().lower() != "wan_video":
+        raise ValueError("final-evaluate requires evaluator.backend=wan_video")
+    if str(config.evaluator.get("evaluation_split", "")).strip().lower() != "test":
+        raise ValueError("final-evaluate requires evaluator.evaluation_split=test")
+    if config.tica_prune:
+        if config.tica_test_manifest is None:
+            raise ValueError("final-evaluate requires tica_test_manifest for TICA")
+        # Test sources are opened only inside this frozen command; no
+        # adaptive object is constructed from their measurements.
+        _load_tica_manifest(config.tica_test_manifest).verify_cached_sources()
+    adapter, artifact = _compression_context(config)
+    evaluator_config = WanVideoEvaluationConfig.from_mapping(config.evaluator, config.output_root / "final-evaluation")
+    evaluator = WanVideoEvaluator(evaluator_config, baseline=artifact)
+    request = FinalEvaluationRequest(
+        model_id=str(args.model_id),
+        algorithm_id=str(args.algorithm_id),
+        model_checkpoint_sha256=artifact.sha256,
+        algorithm_source_sha256=str(args.algorithm_source_sha256),
+        source_revision=str(args.source_revision or evaluator_config.source_revision),
+        protocol_digest=str(args.protocol_digest),
+    )
+    output_path = Path(args.output).resolve() if args.output else config.output_root / "final-evaluation.json"
+    payload = FinalEvaluationRunner(evaluator, output_path).run(request, artifact)
+    payload = {**payload, "artifact": artifact.to_dict(), "output": str(output_path)}
+    _emit(payload, args.json)
+    return 0 if bool(payload.get("evaluation", {}).get("valid", False)) else 1
 
 
 def _config(args: argparse.Namespace) -> AppConfig:
@@ -940,6 +979,20 @@ def build_parser() -> argparse.ArgumentParser:
     evolve_compression.add_argument("--rounds", type=int, default=1)
     _json_flag(evolve_compression)
     evolve_compression.set_defaults(handler=cmd_evolve_compression)
+
+    final_evaluate = subparsers.add_parser(
+        "final-evaluate",
+        help="evaluate one frozen Wan checkpoint on the held-out Test split without adaptive updates",
+    )
+    final_evaluate.add_argument("--config", dest="compression_config", required=True)
+    final_evaluate.add_argument("--model-id", required=True)
+    final_evaluate.add_argument("--algorithm-id", required=True)
+    final_evaluate.add_argument("--algorithm-source-sha256", required=True)
+    final_evaluate.add_argument("--protocol-digest", required=True)
+    final_evaluate.add_argument("--source-revision")
+    final_evaluate.add_argument("--output")
+    _json_flag(final_evaluate)
+    final_evaluate.set_defaults(handler=cmd_final_evaluate)
 
     validate = subparsers.add_parser("validate-config", help="validate configuration, workflow, and tasks without calling ComfyUI")
     validate.add_argument("--tasks")

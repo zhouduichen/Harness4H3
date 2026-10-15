@@ -144,6 +144,77 @@ class DiffusersWanAdapter:
         self._device = "cpu"
         self._dtype = "float32"
 
+    @staticmethod
+    def preflight_checkpoint(checkpoint: str | Path) -> Mapping[str, Any]:
+        """Check a Wan checkpoint shell without loading weights or CUDA.
+
+        This is intentionally a file/layout check only.  The returned
+        ``runtime_probe_required`` flag stays true until a GPU host calls
+        :meth:`preflight_loaded_model` on the actually loaded Diffusers
+        pipeline.
+        """
+
+        root = Path(checkpoint).expanduser()
+        if not root.is_dir():
+            raise ValueError("wan_preflight_checkpoint_missing: %s" % root)
+        index = root / "model_index.json"
+        transformer = root / "transformer"
+        config_path = transformer / "config.json"
+        missing = [str(path.relative_to(root)) for path in (index, transformer, config_path) if not path.exists()]
+        if missing:
+            raise ValueError("wan_preflight_layout_missing: %s" % ", ".join(missing))
+        try:
+            model_index = json.loads(index.read_text(encoding="utf-8"))
+            transformer_config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("wan_preflight_metadata_invalid: %s" % exc) from exc
+        if not isinstance(model_index, Mapping) or not isinstance(transformer_config, Mapping):
+            raise ValueError("wan_preflight_metadata_invalid: expected JSON objects")
+        return {
+            "valid": True,
+            "checkpoint": str(root),
+            "model_index_sha256": hashlib.sha256(index.read_bytes()).hexdigest(),
+            "transformer_config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+            "transformer_config": {
+                key: transformer_config.get(key)
+                for key in ("num_layers", "num_single_layers", "hidden_size", "inner_dim", "ffn_dim", "in_channels", "text_dim")
+                if key in transformer_config
+            },
+            "runtime_probe_required": True,
+            "cuda_loaded": False,
+        }
+
+    def preflight_loaded_model(self, model: Any) -> Mapping[str, Any]:
+        """Validate every real FFN path and global channel shape after load."""
+
+        path, blocks = self._blocks(model)
+        widths: list[int] = []
+        activation_paths: list[str] = []
+        for index, block in enumerate(blocks):
+            components = self.ffn_components(block)
+            if components is None:
+                raise ValueError("wan_preflight_ffn_path_unavailable: block.%d" % index)
+            up, activation, down = components
+            width = int(getattr(up, "out_features", 0))
+            if width <= 1 or int(getattr(down, "in_features", 0)) != width:
+                raise ValueError("wan_preflight_ffn_width_mismatch: block.%d" % index)
+            if not callable(getattr(activation, "register_forward_hook", None)):
+                raise ValueError("wan_preflight_activation_hook_unavailable: block.%d" % index)
+            widths.append(width)
+            activation_paths.append(type(activation).__name__)
+        if len(set(widths)) != 1:
+            raise ValueError("wan_preflight_global_ffn_alignment_failed")
+        return {
+            "valid": True,
+            "block_path": path,
+            "block_count": len(blocks),
+            "ffn_width": widths[0],
+            "ffn_widths": widths,
+            "activation_modules": activation_paths,
+            "runtime_probe_required": False,
+            "cuda_loaded": str(self._device).startswith("cuda"),
+        }
+
     def load_model(self, checkpoint: str, *, device: Optional[str] = None, dtype: Optional[str] = None) -> Any:
         torch, _ = _torch_modules()
         pipeline_cls = _import_pipeline()

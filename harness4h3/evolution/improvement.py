@@ -104,6 +104,8 @@ class AlgorithmValidator:
         *,
         budget: Optional[Mapping[str, Any]] = None,
         profiles: Sequence[Mapping[str, Any]] = (),
+        complete_search: Optional[PlanEvaluator] = None,
+        algorithm_profile: Optional[Mapping[str, Any]] = None,
     ) -> AlgorithmValidationRecord:
         if child.parent_algorithm_id != parent.algorithm_id:
             return self._failed(parent, child, profile, history, "parent_algorithm_mismatch", budget=budget, profiles=profiles)
@@ -113,8 +115,13 @@ class AlgorithmValidator:
         scenario_profiles = tuple(profiles) or (profile,)
         scenario_results: list[Mapping[str, Any]] = []
         for index, scenario_profile in enumerate(scenario_profiles):
-            parent_result = sandbox.run(parent.source, scenario_profile, history)
-            child_result = sandbox.run(child.source, scenario_profile, history)
+            # TICA rules are generated from the immutable Calibration profile;
+            # the scenario profile is reserved for the independent Validation
+            # measurement performed after complete search.  Standard callers
+            # retain the historical one-profile behavior.
+            sandbox_profile = algorithm_profile if algorithm_profile is not None else scenario_profile
+            parent_result = sandbox.run(parent.source, sandbox_profile, history)
+            child_result = sandbox.run(child.source, sandbox_profile, history)
             scenario: dict[str, Any] = {
                 "scenario_id": "scenario-%02d" % index,
                 "profile_digest": stable_digest(scenario_profile),
@@ -130,14 +137,20 @@ class AlgorithmValidator:
                 scenario_results.append(scenario)
                 continue
             try:
-                parent_metrics = dict(_call_plan_evaluator(evaluate_plan, parent_result, scenario_profile))
-                child_metrics = dict(_call_plan_evaluator(evaluate_plan, child_result, scenario_profile))
+                # TICA algorithm validation must compare the algorithms after
+                # their complete bounded search, not the first plan emitted by
+                # Sandbox.  The legacy one-plan evaluator remains available
+                # for standard operators and older callers.
+                evaluator = complete_search or evaluate_plan
+                parent_metrics = dict(_call_plan_evaluator(evaluator, parent_result, scenario_profile))
+                child_metrics = dict(_call_plan_evaluator(evaluator, child_result, scenario_profile))
             except (RuntimeError, TypeError, ValueError) as exc:
                 scenario["valid"] = False
                 scenario["reasons"] = ["algorithm_comparison_failed:%s" % exc]
                 scenario_results.append(scenario)
                 continue
             scenario["valid"] = True
+            scenario["evaluation_mode"] = "complete_search" if complete_search is not None else "single_plan"
             scenario["parent_plan"] = parent_result.plan.to_dict()
             scenario["candidate_plan"] = child_result.plan.to_dict()
             scenario["parent_metrics"] = parent_metrics
@@ -320,6 +333,9 @@ def _fairness_mismatch(parent: Mapping[str, Any], child: Mapping[str, Any]) -> O
         ("parent_checkpoint_sha256", "comparison_parent_checkpoint_mismatch"),
         ("calibration_digest", "comparison_calibration_mismatch"),
         ("search_budget", "comparison_search_budget_mismatch"),
+        ("search_space_version", "comparison_search_space_mismatch"),
+        ("search_seed", "comparison_seed_mismatch"),
+        ("profiling_digest", "comparison_profiling_mismatch"),
     ):
         left = parent.get(key)
         right = child.get(key)

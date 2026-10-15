@@ -66,6 +66,7 @@ def test_human_source_is_profile_dependent_and_auditable(tmp_path):
                     "mode": "string",
                     "time_weight_formula": "string",
                     "risk_limit": "number",
+                    "fast_risk_limit": "number",
                     "activation_weight": "number",
                     "interaction_weight": "number",
                     "beam_width": "number",
@@ -101,8 +102,8 @@ def test_recipe_budget_is_explicit_and_bounded():
 
 def test_interaction_delta_is_derived_from_measured_errors():
     result = TICAPruner().measure_interaction(
-        [{"quality_error": 0.10}, {"quality_error": 0.20}],
-        {"quality_error": 0.45},
+        [{"valid": True, "quality_error": 0.10, "risk_metric": "normalized_mse", "risk_value": 0.10, "risk_scale": "normalized_mse", "risk_is_approximate": False}, {"valid": True, "quality_error": 0.20, "risk_metric": "normalized_mse", "risk_value": 0.20, "risk_scale": "normalized_mse", "risk_is_approximate": False}],
+        {"valid": True, "quality_error": 0.45, "risk_metric": "normalized_mse", "risk_value": 0.45, "risk_scale": "normalized_mse", "risk_is_approximate": False},
     )
     assert result["available"] is True
     assert result["interaction_delta"] == pytest.approx(0.15)
@@ -115,7 +116,7 @@ def test_search_obeys_full_and_interaction_budgets():
 
     def measure(plan, full, stage):
         calls.append((full, stage, dict(plan)))
-        return {"quality_error": 0.1, "parameter_reduction_ratio": 0.2}
+        return {"valid": True, "quality_error": 0.1, "risk_metric": "normalized_mse" if full else "local_relative_output_error", "risk_value": 0.1, "risk_scale": "normalized_mse" if full else "profile_relative_error", "risk_is_approximate": not full, "parameter_reduction_ratio": 0.2}
 
     result = TICAPruner().search(
         adapter=None,

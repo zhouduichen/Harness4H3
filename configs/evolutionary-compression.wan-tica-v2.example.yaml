@@ -24,6 +24,7 @@ tica_recipe:
   max_search_depth: 3
   time_weight_formula: early_log
   risk_limit: 0.25
+  fast_risk_limit: 0.50
   activation_weight: 0.5
   interaction_weight: 0.5
   beam_width: 2
@@ -51,7 +52,8 @@ evaluator:
   latency_warmup: 1
   latency_repeats: 3
   max_quality_drop: 0.05
-  evaluation_split: test
+  # Evolution uses Validation.  Test is reserved for the frozen final-evaluate command.
+  evaluation_split: validation
   source_revision: replace-with-committed-revision
   visual_quality_gate:
     enabled: true

@@ -37,6 +37,7 @@ def tica_operator_spec() -> dict[str, Any]:
             "mode": "str",
             "time_weight_formula": "str",
             "risk_limit": "float",
+            "fast_risk_limit": "float",
             "activation_weight": "float",
             "interaction_weight": "float",
             "beam_width": "int",
@@ -68,6 +69,7 @@ class TICARecipe:
     baseline_name: str = "tica_block_ffn"
     time_weight_formula: str = "early_log"
     risk_limit: float = 0.25
+    fast_risk_limit: float = 0.50
     activation_weight: float = 0.5
     interaction_weight: float = 0.5
     beam_width: int = 2
@@ -86,6 +88,8 @@ class TICARecipe:
             raise ValueError("unsupported TICA time weight formula: %s" % self.time_weight_formula)
         if not 0.0 <= float(self.risk_limit) <= 1.0:
             raise ValueError("TICA risk_limit must be in [0, 1]")
+        if not 0.0 <= float(self.fast_risk_limit) <= 1.0:
+            raise ValueError("TICA fast_risk_limit must be in [0, 1]")
         if not 0.0 <= float(self.activation_weight) <= 1.0:
             raise ValueError("TICA activation_weight must be in [0, 1]")
         if not 0.0 <= float(self.interaction_weight) <= 1.0:
@@ -171,6 +175,11 @@ class TICASearchResult:
     search_states: tuple[Mapping[str, Any], ...] = ()
     budget_audit: tuple[Mapping[str, Any], ...] = ()
     seed_plan: Mapping[str, Any] = field(default_factory=dict)
+    observed_search_depth: int = 0
+    level_stats: tuple[Mapping[str, Any], ...] = ()
+    termination_reason: str = "unknown"
+    profiling_cost: Mapping[str, Any] = field(default_factory=dict)
+    total_cost: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -178,6 +187,7 @@ class TICASearchResult:
             "candidates": [item.to_dict() for item in self.candidates],
             "pareto_front": [_jsonable(item) for item in self.pareto_front],
             "budget": dict(self.budget),
+            "budget_scope": "shared_across_baseline_roots" if self.recipe.include_baseline_suite else "single_algorithm_root",
             "calibration_digest": self.calibration_digest,
             "evidence_level": self.evidence_level,
             "score": _jsonable(self.score),
@@ -186,6 +196,12 @@ class TICASearchResult:
             "search_states": [_jsonable(item) for item in self.search_states],
             "budget_audit": [_jsonable(item) for item in self.budget_audit],
             "seed_plan": _jsonable(self.seed_plan),
+            "observed_search_depth": int(self.observed_search_depth),
+            "configured_max_search_depth": int(self.recipe.max_search_depth),
+            "level_stats": [_jsonable(item) for item in self.level_stats],
+            "termination_reason": self.termination_reason,
+            "profiling_cost": _jsonable(self.profiling_cost),
+            "total_cost": _jsonable(self.total_cost),
         }
 
 
@@ -302,6 +318,7 @@ class TICASearchState:
             "mode": self.mode,
             "time_weight_formula": recipe.time_weight_formula,
             "risk_limit": float(recipe.risk_limit),
+            "fast_risk_limit": float(recipe.fast_risk_limit),
             "activation_weight": float(recipe.activation_weight),
             "interaction_weight": float(recipe.interaction_weight),
             "beam_width": int(recipe.beam_width),
@@ -520,6 +537,7 @@ def recipe_plan(profile: Mapping[str, Any], recipe: TICARecipe) -> dict[str, Any
         "mode": mode,
         "time_weight_formula": recipe.time_weight_formula,
         "risk_limit": float(recipe.risk_limit),
+        "fast_risk_limit": float(recipe.fast_risk_limit),
         "activation_weight": float(recipe.activation_weight),
         "interaction_weight": float(recipe.interaction_weight),
         "beam_width": int(recipe.beam_width),
@@ -571,7 +589,7 @@ def propose(profile, history):
     return {'operator': 'tica_prune', 'args': {
         'block_ids': [selected], 'retained_indices': retained,
         'mode': mode, 'time_weight_formula': 'early_log',
-        'risk_limit': 0.25, 'activation_weight': 0.5,
+        'risk_limit': 0.25, 'fast_risk_limit': 0.50, 'activation_weight': 0.5,
         'interaction_weight': 0.5, 'beam_width': 2,
         'max_fast_evals': 8, 'max_full_evals': 4,
         'max_interaction_evals': 2,
@@ -720,6 +738,8 @@ def collect_tica_profile(adapter: Any, model: Any, manifest: Any, *, max_block_p
     forward = getattr(adapter, "forward_denoising", None)
     if not callable(forward):
         raise ValueError("TICA profile requires adapter.forward_denoising")
+    preflight = getattr(adapter, "preflight_loaded_model", None)
+    runtime_preflight = dict(preflight(model)) if callable(preflight) else {"runtime_preflight": "not_available"}
     block_refs = adapter.get_blocks(model)
     if max_block_probes is not None:
         block_refs = block_refs[: int(max_block_probes)]
@@ -764,6 +784,15 @@ def collect_tica_profile(adapter: Any, model: Any, manifest: Any, *, max_block_p
             "status": "cpu_fake_quality_proxy" if manifest.provider_name == "fake_wan_cpu" else "real_wan_structure",
             "local_output_measurements": len(block_rows) * sum(len(item.spec.timesteps) for item in samples),
             "activation_measurements": sum(len(item.get("channels", ())) for item in channel_rows),
+            "runtime_preflight": runtime_preflight,
+        },
+        "profiling_cost": {
+            "block_probe_count": len(block_rows),
+            "local_output_measurements": len(block_rows) * sum(len(item.spec.timesteps) for item in samples),
+            "activation_hook_count": sum(1 for item in channel_rows if item.get("available") is True),
+            "sample_count": len(samples),
+            "timestep_count": len(manifest.timesteps()),
+            "scope": "shared_fixed_calibration_profile",
         },
     }
 
@@ -922,7 +951,7 @@ class TICAPruner:
         return float(risk)
 
     @staticmethod
-    def _synthetic_metrics(state: TICASearchState, profile: Mapping[str, Any], risk: Optional[float]) -> dict[str, Any]:
+    def _synthetic_metrics(state: TICASearchState, profile: Mapping[str, Any], risk: Optional[float], *, full: bool = False) -> dict[str, Any]:
         block_count = max(int((profile.get("model") or {}).get("block_count", len(profile.get("layers", ()))) or 1), 1)
         width = max(int((profile.get("model") or {}).get("ffn_width", 1) or 1), 1)
         removed_blocks = len(state.block_ids)
@@ -932,6 +961,10 @@ class TICAPruner:
             "valid": risk is not None,
             "quality_error": risk,
             "quality_score": 1.0 - risk if risk is not None else None,
+            "risk_metric": "normalized_mse" if full else "local_relative_output_error",
+            "risk_value": risk,
+            "risk_scale": "normalized_mse" if full else "profile_relative_error",
+            "risk_is_approximate": not full,
             "parameter_reduction_ratio": reduction,
             "selected_blocks": list(state.block_ids),
             "mode": state.mode,
@@ -975,39 +1008,54 @@ class TICAPruner:
             if not budget.can_consume("fast"):
                 return TICACandidate("", state.baseline_name, plan, status="budget_exhausted:fast", state_id=state.state_id, plan_digest=digest, risk=risk)
             budget.consume("fast", plan_digest=digest)
-            fast_metrics = dict(evaluate_candidate(plan, False, "fast") if evaluate_candidate else self._synthetic_metrics(state, profile, risk))
+            try:
+                fast_metrics = dict(evaluate_candidate(plan, False, "fast") if evaluate_candidate else self._synthetic_metrics(state, profile, risk, full=False))
+            except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                fast_metrics = {"valid": False, "failure_reason": "fast_measurement_failed:%s" % exc}
             entry["fast"] = fast_metrics
         else:
             cache_hit = True
             budget.consume("fast", plan_digest=digest, cache_hit=True)
-        observed_risk = fast_metrics.get("quality_error")
-        if not isinstance(observed_risk, (int, float)) or not math.isfinite(float(observed_risk)):
-            observed_risk = risk
-        # A real fast screen is the authoritative risk measurement for this
-        # state.  The profile risk is only a pre-execution estimate and is
-        # still required when no measured screen is available.
-        effective_risk = float(observed_risk) if isinstance(observed_risk, (int, float)) else risk
-        evidence_required = state.mode not in {"ffn", "block_plus_ffn"} or risk is not None
-        feasible = evidence_required and effective_risk is not None and float(effective_risk) <= float(recipe.risk_limit)
-        if effective_risk is None:
-            feasible = False
-        elif float(effective_risk) > float(recipe.risk_limit):
-            feasible = False
+        fast_risk = self._risk_evidence(fast_metrics, stage="fast")
+        # Fast local relative error is only a pre-filter.  It has its own
+        # threshold and can never stand in for a full normalized-MSE result.
+        profile_evidence_available = risk is not None
+        fast_measurement_valid = isinstance(fast_metrics, Mapping) and fast_metrics.get("valid") is True
+        feasible = profile_evidence_available and fast_measurement_valid and fast_risk is not None and fast_risk[0] <= float(recipe.fast_risk_limit)
         status = "screened"
         if not feasible:
-            status = "risk_rejected" if observed_risk is not None else "risk_unknown"
+            if not profile_evidence_available or fast_risk is None:
+                status = "fast_risk_unknown"
+            elif not fast_measurement_valid:
+                status = "fast_measurement_invalid"
+            else:
+                status = "fast_risk_rejected"
         elif not full_metrics:
             if not budget.can_consume("full"):
                 status = "budget_exhausted:full"
                 feasible = False
             else:
                 budget.consume("full", plan_digest=digest)
-                full_metrics = dict(evaluate_candidate(plan, True, "full") if evaluate_candidate else self._synthetic_metrics(state, profile, risk))
+                try:
+                    full_metrics = dict(evaluate_candidate(plan, True, "full") if evaluate_candidate else self._synthetic_metrics(state, profile, risk, full=True))
+                except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                    full_metrics = {"valid": False, "failure_reason": "full_measurement_failed:%s" % exc}
                 entry["full"] = full_metrics
                 full_cache[structure_digest] = full_metrics
         else:
             cache_hit = True
             budget.consume("full", plan_digest=digest, cache_hit=True)
+        full_risk = self._risk_evidence(full_metrics, stage="full") if full_metrics else None
+        if feasible:
+            if not full_metrics or full_metrics.get("valid") is not True:
+                feasible = False
+                status = "full_measurement_invalid"
+            elif full_risk is None:
+                feasible = False
+                status = "full_risk_unavailable"
+            elif full_risk[0] > float(recipe.risk_limit):
+                feasible = False
+                status = "full_risk_rejected"
         interaction: Mapping[str, Any] = {}
         if feasible and full_metrics and state.baseline_name in {"interaction_block", "tica_block_ffn"}:
             if not budget.can_consume("interaction", cache_hit=True):
@@ -1026,7 +1074,10 @@ class TICAPruner:
                         if not budget.can_consume("full"):
                             break
                         budget.consume("full", plan_digest=independent_digest)
-                        metrics = dict(evaluate_candidate(independent_plan, True, "interaction_independent") if evaluate_candidate else {})
+                        try:
+                            metrics = dict(evaluate_candidate(independent_plan, True, "interaction_independent") if evaluate_candidate else {})
+                        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                            metrics = {"valid": False, "failure_reason": "interaction_measurement_failed:%s" % exc}
                         independent_entry["full"] = metrics
                         full_cache[independent_structure_digest] = metrics
                     independent.append(metrics)
@@ -1042,12 +1093,9 @@ class TICAPruner:
                     elif float(interaction.get("interaction_delta", 0.0)) > 0.0:
                         penalty = float(recipe.interaction_weight) * float(interaction["interaction_delta"])
                         interaction = {**dict(interaction), "risk_penalty": penalty}
-                        if float(observed_risk or 0.0) + penalty > float(recipe.risk_limit):
+                        if full_risk is None or float(full_risk[0]) + penalty > float(recipe.risk_limit):
                             feasible = False
                             status = "interaction_risk_rejected"
-        if full_metrics and "valid" in full_metrics and full_metrics.get("valid") is not True:
-            feasible = False
-            status = "full_measurement_invalid"
         if feasible and status == "screened":
             status = "measured"
         return TICACandidate(
@@ -1066,6 +1114,34 @@ class TICAPruner:
             feasible=feasible,
             cache_hit=cache_hit,
         )
+
+    @staticmethod
+    def _risk_evidence(metrics: Mapping[str, Any], *, stage: str) -> Optional[tuple[float, str]]:
+        """Read a risk only when the producer declares its scale."""
+
+        if not isinstance(metrics, Mapping):
+            return None
+        value = metrics.get("risk_value")
+        metric = str(metrics.get("risk_metric", "")).strip()
+        scale = str(metrics.get("risk_scale", "")).strip()
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if not math.isfinite(float(value)) or float(value) < 0.0:
+            return None
+        expected = {
+            "fast": ("local_relative_output_error", "profile_relative_error"),
+            "full": ("normalized_mse", "normalized_mse"),
+        }.get(stage)
+        if expected is None:
+            raise ValueError("unsupported TICA risk stage: %s" % stage)
+        if (metric, scale) != expected:
+            return None
+        approximate = metrics.get("risk_is_approximate")
+        if stage == "fast" and approximate is not True:
+            return None
+        if stage == "full" and approximate is not False:
+            return None
+        return float(value), metric
 
     def search(
         self,
@@ -1091,6 +1167,8 @@ class TICAPruner:
         full_cache: dict[str, Mapping[str, Any]] = {}
         candidates: list[TICACandidate] = []
         states: list[Mapping[str, Any]] = []
+        level_stats: list[Mapping[str, Any]] = []
+        termination_reason = "frontier_empty"
         parent_id = self._parent_model_id(parent, profile)
         root_digest = stable_digest({"parent": parent_id, "state": "uncompressed"})
         root_state = TICASearchState(
@@ -1113,6 +1191,8 @@ class TICAPruner:
         seen_states: set[str] = set()
         seen_plans: set[str] = set()
         while frontier:
+            depth = max(int(item.depth) for item in frontier)
+            level_started = dict(budget.used)
             next_frontier: list[TICASearchState] = []
             generation: list[TICACandidate] = []
             for state in frontier:
@@ -1130,7 +1210,23 @@ class TICAPruner:
                     seen_plans.add(structure_digest)
                     if candidate.feasible and state.depth < int(recipe.max_search_depth):
                         next_frontier.extend(self._expand_state(state, profile, recipe))
-            if not next_frontier or budget.used["full_evals"] >= budget.limits["max_full_evals"]:
+            level_stats.append(
+                {
+                    "depth": depth,
+                    "frontier_count": len(frontier),
+                    "candidate_count": len(generation),
+                    "feasible_count": sum(1 for item in generation if item.feasible),
+                    "full_evals_before": level_started["full_evals"],
+                    "full_evals_after": budget.used["full_evals"],
+                    "fast_evals_before": level_started["fast_evals"],
+                    "fast_evals_after": budget.used["fast_evals"],
+                }
+            )
+            if not next_frontier:
+                termination_reason = "frontier_empty_or_max_depth"
+                break
+            if budget.used["full_evals"] >= budget.limits["max_full_evals"]:
+                termination_reason = "budget_exhausted:full"
                 break
             next_frontier = [item for item in next_frontier if item.state_id not in seen_states]
             if recipe.strategy == "greedy":
@@ -1141,7 +1237,22 @@ class TICAPruner:
                 keep = {item.state_id for item in ranked[: max(1, int(recipe.beam_width))] if item.feasible}
             frontier = [item for item in next_frontier if item.parent_state_id in keep or not keep]
             if not frontier:
+                termination_reason = "frontier_pruned"
                 break
+        observed_depth = max((int(item.get("depth", 0)) for item in states), default=0)
+        if observed_depth >= int(recipe.max_search_depth) and termination_reason == "frontier_empty_or_max_depth":
+            termination_reason = "max_depth_reached"
+        profiling_cost = profile.get("profiling_cost") if isinstance(profile.get("profiling_cost"), Mapping) else {}
+        if not profiling_cost and isinstance(profile.get("tica"), Mapping):
+            raw_cost = profile["tica"].get("profiling_cost")
+            profiling_cost = raw_cost if isinstance(raw_cost, Mapping) else {}
+        total_cost = {
+            "search_fast_evals": int(budget.used["fast_evals"]),
+            "search_full_evals": int(budget.used["full_evals"]),
+            "search_interaction_evals": int(budget.used["interaction_evals"]),
+            "profiling": dict(profiling_cost),
+            "scope": "search_plus_shared_profiling",
+        }
         pareto = _pareto_front(candidates)
         feasible = [item for item in candidates if item.feasible and item.full_metrics]
         pareto_ids = {str(item.get("candidate_id")) for item in pareto}
@@ -1160,21 +1271,31 @@ class TICAPruner:
             search_states=tuple(states),
             budget_audit=tuple(budget.audit),
             seed_plan=dict(seed_plan or {}),
+            observed_search_depth=observed_depth,
+            level_stats=tuple(level_stats),
+            termination_reason=termination_reason,
+            profiling_cost=dict(profiling_cost),
+            total_cost=total_cost,
         )
 
     def measure_interaction(self, independent: Sequence[Mapping[str, Any]], joint: Mapping[str, Any]) -> dict[str, Any]:
         """Calculate interaction from measured errors, never from a constant."""
 
-        values = [item.get("quality_error") for item in independent]
-        joint_error = joint.get("quality_error")
-        if not all(isinstance(value, (int, float)) for value in values) or not isinstance(joint_error, (int, float)):
-            return {"available": False, "interaction_delta": None, "reason": "missing_measured_quality_error"}
-        independent_sum = float(sum(float(value) for value in values))
+        values = [self._risk_evidence(item, stage="full") for item in independent]
+        joint_evidence = self._risk_evidence(joint, stage="full")
+        if (
+            not all(value is not None for value in values)
+            or joint_evidence is None
+            or not all(item.get("valid") is True for item in independent)
+            or joint.get("valid") is not True
+        ):
+            return {"available": False, "interaction_delta": None, "reason": "missing_or_invalid_measured_quality_error"}
+        independent_sum = float(sum(float(value[0]) for value in values if value is not None))
         return {
             "available": True,
-            "joint_error": float(joint_error),
+            "joint_error": float(joint_evidence[0]),
             "independent_error_sum": independent_sum,
-            "interaction_delta": float(joint_error) - independent_sum,
+            "interaction_delta": float(joint_evidence[0]) - independent_sum,
         }
 
 
