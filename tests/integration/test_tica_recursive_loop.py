@@ -39,6 +39,10 @@ def test_tica_loop_keeps_human_baseline_and_records_fair_recursive_comparison(tm
     assert interaction["interaction_metrics"]["available"] is True
     assert interaction["interaction_metrics"]["interaction_delta"] is not None
     assert interaction["full_metrics"]["structural_change"]["kind"] == "tica_prune"
+    first_evaluation = json.loads((first_dir / "evaluation.json").read_text())
+    assert first_evaluation["evaluation_split"] == "validation"
+    assert first_evaluation["measurement_manifest_digest"] == loop.tica_splits.validation.digest()
+    assert first_evaluation["measurement_manifest_digest"] != loop.tica_splits.calibration.digest()
 
     validation_path = second_dir / "algorithm-validation.json"
     assert validation_path.exists()
@@ -48,6 +52,11 @@ def test_tica_loop_keeps_human_baseline_and_records_fair_recursive_comparison(tm
     assert validation["calibration_digest"]
     assert validation["search_budget"]["max_full_evals"] == 4
     assert validation["evidence_level"] == "cpu_fake_quality_proxy"
+    assert all(item["parent_metrics"]["algorithm_search"]["complete"] for item in validation["scenario_results"])
+    assert all(item["candidate_metrics"]["algorithm_search"]["complete"] for item in validation["scenario_results"])
+    assert all(len(item["parent_metrics"]["algorithm_search"]["candidates"]) > 1 for item in validation["scenario_results"])
+    assert all(len(item["candidate_metrics"]["algorithm_search"]["candidates"]) > 1 for item in validation["scenario_results"])
+    assert all(item["parent_metrics"]["search_budget"] == item["candidate_metrics"]["search_budget"] for item in validation["scenario_results"])
     child_algorithm = json.loads((second_dir / "algorithm.json").read_text())
     assert child_algorithm["parent_algorithm_id"] == first_algorithm["algorithm_id"]
     assert child_algorithm["source_diff"]

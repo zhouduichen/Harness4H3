@@ -151,6 +151,24 @@ def test_interaction_full_measurements_share_the_full_budget_and_cache():
     assert result.budget["cache_hits"] >= 1
 
 
+def test_full_model_risk_gate_rejects_fast_screen_false_positive():
+    def measure(plan, full, stage):
+        if not full:
+            return {"valid": True, "quality_error": 0.01, "quality_score": 0.99, "parameter_reduction_ratio": 0.2}
+        return {"valid": True, "quality_error": 0.80, "quality_score": 0.20, "parameter_reduction_ratio": 0.2}
+
+    result = TICAPruner().search(
+        None,
+        None,
+        _manifest(),
+        _profile(),
+        TICARecipe(include_baseline_suite=False, risk_limit=0.25, max_full_evals=2, max_fast_evals=4),
+        evaluate_candidate=measure,
+    )
+    assert result.selected_candidate_id is None
+    assert any(item.status == "full_risk_rejected" for item in result.candidates)
+
+
 def test_search_refuses_test_split_and_missing_ffn_evidence():
     profile = _profile()
     profile["evaluation_split"] = "test"
