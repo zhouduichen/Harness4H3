@@ -113,18 +113,19 @@ class EvolutionLoop:
         # Real Wan runs only consume an extension after an explicit validation
         # artifact exists; no new operator is silently trusted on GPU.
         if bool(self.parent.metadata.get("offline_simulation", False)) and "prune_ffn_by_weight_threshold" not in self.search_space_version.operator_names():
-            spec = OperatorSpec(
-                name="prune_ffn_by_weight_threshold",
-                version="1",
-                argument_schema={"block_ids": "list[str]", "threshold": "float"},
-                granularity="channel",
-                constraints=("wan_ffn_width_aligned", "threshold_must_change_width"),
-                limitations=("weight_proxy_only", "not_real_wan_validated"),
-                trusted_factory_key="prune_ffn_by_weight_threshold",
+            suggestion = self.agent.propose_search_space_change(
+                search_space=self.search_space_version.to_dict(),
+                history=(),
+                failures=("channel_importance_plateau",),
             )
+            spec = OperatorSpec.from_dict(suggestion["spec"])
             existing = next((item for item in self.search_space_manager.store.read_proposals() if item.spec.name == spec.name), None)
             if existing is None:
-                existing = self.search_space_manager.propose(spec, "CPU Fake threshold proxy for a channel-importance plateau", ("offline-bootstrap",))
+                existing = self.search_space_manager.propose(
+                    spec,
+                    str(suggestion.get("rationale", "search-space extension")),
+                    tuple(str(item) for item in suggestion.get("evidence_ids", ())),
+                )
             if existing.status == "proposed":
                 existing = self.search_space_manager.validate(
                     existing,

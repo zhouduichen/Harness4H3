@@ -254,6 +254,59 @@ class AlgorithmAgent:
             },
         )
 
+    def propose_search_space_change(
+        self,
+        *,
+        search_space: Mapping[str, Any],
+        history: Sequence[Mapping[str, Any]],
+        failures: Sequence[str] = (),
+    ) -> Mapping[str, Any]:
+        """Propose a capability extension without granting execution trust."""
+
+        active_names = {
+            str(item.get("name"))
+            for item in search_space.get("operators", [])
+            if isinstance(item, Mapping) and item.get("name")
+        }
+        if self.provider is not None:
+            payload = {
+                "task": "propose_search_space_extension",
+                "search_space": dict(search_space),
+                "history": _compact_context_items(history),
+                "failure_reasons": [str(item) for item in failures if str(item).strip()][:16],
+            }
+            raw = self.provider(payload)
+            if not isinstance(raw, Mapping):
+                raise ValueError("search_space_proposal_invalid: provider response must be an object")
+            unknown = sorted(set(raw) - {"spec", "rationale", "evidence_ids"})
+            if unknown:
+                raise ValueError("search_space_proposal_invalid: unsupported field(s): %s" % ", ".join(unknown))
+            spec = raw.get("spec")
+            if not isinstance(spec, Mapping):
+                raise ValueError("search_space_proposal_invalid: spec must be an object")
+            if str(spec.get("name", "")) in active_names:
+                raise ValueError("search_space_proposal_invalid: operator already exists")
+            return {
+                "spec": dict(spec),
+                "rationale": str(raw.get("rationale", "provider identified a search-space limitation")),
+                "evidence_ids": tuple(str(item) for item in raw.get("evidence_ids", ())),
+            }
+        if "prune_ffn_by_weight_threshold" in active_names:
+            raise ValueError("search_space_no_unseen_deterministic_extension")
+        return {
+            "spec": {
+                "name": "prune_ffn_by_weight_threshold",
+                "version": "1",
+                "argument_schema": {"block_ids": "list[str]", "threshold": "float"},
+                "granularity": "channel",
+                "constraints": ["wan_ffn_width_aligned", "threshold_must_change_width"],
+                "limitations": ["weight_proxy_only", "not_real_wan_validated"],
+                "trusted_factory_key": "prune_ffn_by_weight_threshold",
+            },
+            "rationale": "repeated channel-importance plateaus motivate a threshold-based channel operator",
+            "evidence_ids": tuple(str(item) for item in failures if str(item).strip())[:16] or ("offline-bootstrap",),
+        }
+
     @staticmethod
     def _least_sensitive_block(profile: Mapping[str, Any], excluded: Optional[set[str]] = None) -> str:
         records = profile.get("block_sensitivity", [])

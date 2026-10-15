@@ -91,3 +91,13 @@ def test_algorithm_validator_compares_parent_and_child_under_same_conditions(tmp
     assert record.evidence_level == "cpu_fake"
     assert record.parent_source_sha256 == parent.source_sha256
     assert record.candidate_plan["operator"] == "prune_ffn_channels"
+
+
+def test_agent_can_propose_untrusted_search_space_extension():
+    proposal = AlgorithmAgent().propose_search_space_change(
+        search_space={"version_id": "S0001", "operators": [{"name": "prune_blocks"}]},
+        history=[{"round_id": "R0001", "status": "rejected"}],
+        failures=["channel_importance_plateau"],
+    )
+    assert proposal["spec"]["name"] == "prune_ffn_by_weight_threshold"
+    assert "not_real_wan_validated" in proposal["spec"]["limitations"]
