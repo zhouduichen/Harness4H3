@@ -66,7 +66,7 @@ SEARCH_SPACE_RESPONSE_SCHEMA = {
 }
 
 
-def _seed_source(
+def _seed_source_base(
     block_id: str,
     algorithm_id: str,
     search_choice: str,
@@ -101,6 +101,61 @@ def _seed_source(
         "    selected = %r\n"
         "    return {'operator': 'prune_blocks', 'args': {'block_ids': [selected]}}\n" % (algorithm_id, block_id)
     )
+
+
+def _search_program_suffix(algorithm_id: str, *, exploration: bool = False) -> str:
+    """Add source-controlled candidate generation to a legacy seed source."""
+
+    mode = "explore" if exploration else "exploit"
+    return (
+        "\n\ndef search(profile, history, state, search_space):\n"
+        "    # Algorithm %s controls scoring, candidate generation, order, and stop.\n"
+        "    # mode=%s; this code is executed once per search depth.\n"
+        "    records = []\n"
+        "    for item in profile.get('tica_block_sensitivity', profile.get('block_sensitivity', [])):\n"
+        "        if isinstance(item, dict) and item.get('block_id'):\n"
+        "            values = item.get('per_timestep', item.get('timesteps', {}))\n"
+        "            score = sum(float(value) for value in values.values()) if isinstance(values, dict) else float(item.get('importance_score', 0.0) or 0.0)\n"
+        "            records.append((score, str(item['block_id'])))\n"
+        "    if not records:\n"
+        "        records = [(0.0, str(item.get('block_id'))) for item in profile.get('layers', []) if isinstance(item, dict) and item.get('block_id')]\n"
+        "    ordered = [item[1] for item in sorted(records)]\n"
+        "    candidates = []\n"
+        "    if ordered:\n"
+        "        candidates.append({'operator': 'prune_blocks', 'args': {'block_ids': [ordered[0]]}})\n"
+        "    if len(ordered) > 1:\n"
+        "        candidates.append({'operator': 'prune_blocks', 'args': {'block_ids': [ordered[1]]}})\n"
+        "    names = [str(item.get('name')) for item in search_space.get('operators', []) if isinstance(item, dict)]\n"
+        "    if 'timestep_block_gate' in names and ordered:\n"
+        "        candidates.append({'operator': 'timestep_block_gate', 'args': {'rules': [{'block_id': ordered[0], 'min_timestep': 0.0, 'max_timestep': 0.3}], 'policy': 'skip_when_in_range'}})\n"
+        "    if not candidates:\n"
+        "        fallback = 'block.' + str(int(state.get('depth', 0)))\n"
+        "        return {'candidates': [{'operator': 'prune_blocks', 'args': {'block_ids': [fallback]}}], 'rank': [0], 'stop': True}\n"
+        "    return {'candidates': candidates, 'rank': list(range(len(candidates))), 'stop': True}\n"
+    ) % (algorithm_id, mode)
+
+
+def _seed_source(
+    block_id: str,
+    algorithm_id: str,
+    search_choice: str,
+    *,
+    retention_ratio: float = 0.25,
+    channel_block_id: Optional[str] = None,
+) -> str:
+    return _seed_source_base(
+        block_id,
+        algorithm_id,
+        search_choice,
+        retention_ratio=retention_ratio,
+        channel_block_id=channel_block_id,
+    ) + _search_program_suffix(algorithm_id, exploration=search_choice == "explore")
+
+
+def _ensure_search_program(source: str, algorithm_id: str, *, exploration: bool = False) -> str:
+    if "def search(" in source:
+        return source
+    return source + _search_program_suffix(algorithm_id, exploration=exploration)
 
 
 @dataclass(frozen=True)
@@ -233,6 +288,11 @@ class AlgorithmAgent:
         if self.provider is None:
             source, summary, rationale, hypothesis = _deterministic_improvement_source(
                 algorithm_id, parent, profile, feedback
+            )
+            source = _ensure_search_program(
+                source,
+                algorithm_id,
+                exploration=not any("quality" in item.lower() or "regression" in item.lower() for item in feedback),
             )
             return AlgorithmCandidate.from_source(
                 algorithm_id,

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import math
+import tempfile
 import time
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ..adapters.wan.contracts import stable_digest
+from ..sandbox.policy import SourcePolicyError, validate_source
+from ..sandbox.runner import AlgorithmSandbox, CompressionPlan as SandboxCompressionPlan
 
 
 BASELINE_NAMES = (
@@ -162,6 +166,26 @@ class TICACandidate:
 
 
 @dataclass(frozen=True)
+class AlgorithmSearchDecision:
+    """One source-controlled candidate generation decision."""
+
+    plans: tuple[Mapping[str, Any], ...]
+    rank: tuple[int, ...]
+    stop: bool
+    source_sha256: str
+    payload_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "plans": [_jsonable(item) for item in self.plans],
+            "rank": list(self.rank),
+            "stop": bool(self.stop),
+            "source_sha256": self.source_sha256,
+            "payload_sha256": self.payload_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class TICASearchResult:
     recipe: TICARecipe
     candidates: tuple[TICACandidate, ...]
@@ -180,6 +204,7 @@ class TICASearchResult:
     termination_reason: str = "unknown"
     profiling_cost: Mapping[str, Any] = field(default_factory=dict)
     total_cost: Mapping[str, Any] = field(default_factory=dict)
+    algorithm_trace: tuple[Mapping[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -202,6 +227,7 @@ class TICASearchResult:
             "termination_reason": self.termination_reason,
             "profiling_cost": _jsonable(self.profiling_cost),
             "total_cost": _jsonable(self.total_cost),
+            "algorithm_trace": [_jsonable(item) for item in self.algorithm_trace],
         }
 
 
@@ -800,6 +826,63 @@ def collect_tica_profile(adapter: Any, model: Any, manifest: Any, *, max_block_p
 EvaluateCandidate = Callable[[Mapping[str, Any], bool, str], Mapping[str, Any]]
 
 
+def _operator_specs_from_search_space(search_space: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    values: dict[str, Mapping[str, Any]] = {}
+    for item in search_space.get("operators", ()) if isinstance(search_space, Mapping) else ():
+        if not isinstance(item, Mapping) or not str(item.get("name", "")).strip():
+            continue
+        values[str(item["name"])] = dict(item)
+    return values
+
+
+def _run_algorithm_search_program(
+    source: str,
+    sandbox: AlgorithmSandbox,
+    profile: Mapping[str, Any],
+    history: Sequence[Mapping[str, Any]],
+    state: Mapping[str, Any],
+    search_space: Mapping[str, Any],
+) -> AlgorithmSearchDecision:
+    payload = {
+        "profile": dict(profile),
+        "history": [dict(item) for item in history if isinstance(item, Mapping)],
+        "state": dict(state),
+        "search_space": dict(search_space),
+    }
+    result = sandbox.run_program(source, entrypoint="search", payload=payload)
+    if result.status != "success" or not isinstance(result.value, Mapping):
+        raise ValueError(result.message or "algorithm_search_program_failed")
+    raw_candidates = result.value.get("candidates")
+    if not isinstance(raw_candidates, list) or not raw_candidates:
+        raise ValueError("algorithm_search_output_invalid: candidates must be a non-empty list")
+    operator_specs = _operator_specs_from_search_space(search_space)
+    plans: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    for raw in raw_candidates:
+        try:
+            plan = SandboxCompressionPlan.from_mapping(raw, operator_specs=operator_specs)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("algorithm_search_output_invalid: %s" % exc) from exc
+        digest = stable_digest(plan.to_dict())
+        if digest in seen:
+            raise ValueError("algorithm_search_output_invalid: duplicate candidate plan")
+        seen.add(digest)
+        plans.append(plan.to_dict())
+    raw_rank = result.value.get("rank", list(range(len(plans))))
+    if not isinstance(raw_rank, list) or any(isinstance(item, bool) or not isinstance(item, int) for item in raw_rank):
+        raise ValueError("algorithm_search_output_invalid: rank must be a list of indexes")
+    if len(set(raw_rank)) != len(raw_rank) or any(item < 0 or item >= len(plans) for item in raw_rank):
+        raise ValueError("algorithm_search_output_invalid: rank contains an invalid index")
+    rank = tuple([*raw_rank, *[index for index in range(len(plans)) if index not in set(raw_rank)]])
+    return AlgorithmSearchDecision(
+        plans=tuple(plans),
+        rank=rank,
+        stop=bool(result.value.get("stop", False)),
+        source_sha256=result.source_sha256,
+        payload_sha256=stable_digest(payload),
+    )
+
+
 class TICAPruner:
     """Generate candidates with a bounded, stateful Greedy/Beam search."""
 
@@ -1017,6 +1100,10 @@ class TICAPruner:
             cache_hit = True
             budget.consume("fast", plan_digest=digest, cache_hit=True)
         fast_risk = self._risk_evidence(fast_metrics, stage="fast")
+        if fast_risk is None and "risk_metric" not in fast_metrics:
+            legacy_error = fast_metrics.get("quality_error") if isinstance(fast_metrics, Mapping) else None
+            if isinstance(legacy_error, (int, float)) and math.isfinite(float(legacy_error)) and float(legacy_error) >= 0.0:
+                fast_risk = (float(legacy_error), "legacy_quality_error")
         # Fast local relative error is only a pre-filter.  It has its own
         # threshold and can never stand in for a full normalized-MSE result.
         profile_evidence_available = risk is not None
@@ -1052,7 +1139,15 @@ class TICAPruner:
                 status = "full_measurement_invalid"
             elif full_risk is None:
                 feasible = False
-                status = "full_risk_unavailable"
+                # Preserve the legacy diagnostic label when an older
+                # evaluator supplied only an out-of-budget quality_error.
+                # It remains infeasible; any explicitly declared but
+                # mismatched risk scale stays fail-closed as unavailable.
+                legacy_error = full_metrics.get("quality_error") if isinstance(full_metrics, Mapping) else None
+                if "risk_metric" not in full_metrics and isinstance(legacy_error, (int, float)) and float(legacy_error) > float(recipe.risk_limit):
+                    status = "full_risk_rejected"
+                else:
+                    status = "full_risk_unavailable"
             elif full_risk[0] > float(recipe.risk_limit):
                 feasible = False
                 status = "full_risk_rejected"
@@ -1143,6 +1238,207 @@ class TICAPruner:
             return None
         return float(value), metric
 
+    def _measure_program_plan(
+        self,
+        plan: Mapping[str, Any],
+        recipe: TICARecipe,
+        budget: TICABudgetManager,
+        evaluate_candidate: Optional[EvaluateCandidate],
+    ) -> TICACandidate:
+        operator = str(plan.get("operator", ""))
+        args = plan.get("args") if isinstance(plan.get("args"), Mapping) else {}
+        digest = stable_digest({"operator": operator, "args": dict(args)})
+        fast_metrics: Mapping[str, Any] = {}
+        full_metrics: Mapping[str, Any] = {}
+        if not budget.can_consume("fast"):
+            return TICACandidate(
+                "",
+                operator,
+                dict(plan),
+                status="budget_exhausted:fast",
+                plan_digest=digest,
+            )
+        budget.consume("fast", plan_digest=digest)
+        try:
+            fast_metrics = dict(evaluate_candidate(dict(plan), False, "algorithm_program_fast") if evaluate_candidate else {})
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            fast_metrics = {"valid": False, "failure_reason": "fast_measurement_failed:%s" % exc}
+        fast_risk = self._risk_evidence(fast_metrics, stage="fast")
+        feasible = bool(fast_metrics.get("valid") is True and fast_risk is not None and fast_risk[0] <= float(recipe.fast_risk_limit))
+        status = "screened" if feasible else "fast_risk_rejected"
+        if not feasible and fast_risk is None:
+            status = "fast_risk_unknown"
+        if feasible:
+            if not budget.can_consume("full"):
+                feasible = False
+                status = "budget_exhausted:full"
+            else:
+                budget.consume("full", plan_digest=digest)
+                try:
+                    full_metrics = dict(evaluate_candidate(dict(plan), True, "algorithm_program_full") if evaluate_candidate else {})
+                except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                    full_metrics = {"valid": False, "failure_reason": "full_measurement_failed:%s" % exc}
+                full_risk = self._risk_evidence(full_metrics, stage="full")
+                if full_metrics.get("valid") is not True:
+                    feasible = False
+                    status = "full_measurement_invalid"
+                elif full_risk is None:
+                    feasible = False
+                    status = "full_risk_unavailable"
+                elif full_risk[0] > float(recipe.risk_limit):
+                    feasible = False
+                    status = "full_risk_rejected"
+                else:
+                    status = "measured"
+        state_id = "PROGRAM-S-" + digest[:16]
+        return TICACandidate(
+            "",
+            operator,
+            dict(plan),
+            fast_metrics=dict(fast_metrics),
+            full_metrics=dict(full_metrics),
+            budget_cost=dict(budget.used),
+            status=status,
+            state_id=state_id,
+            plan_digest=digest,
+            feasible=feasible,
+        )
+
+    def _search_with_algorithm_program(
+        self,
+        parent: Any,
+        manifest: Any,
+        profile: Mapping[str, Any],
+        recipe: TICARecipe,
+        *,
+        algorithm_source: str,
+        algorithm_history: Sequence[Mapping[str, Any]],
+        search_space: Mapping[str, Any],
+        sandbox: AlgorithmSandbox,
+        evaluate_candidate: Optional[EvaluateCandidate],
+    ) -> TICASearchResult:
+        started = time.perf_counter()
+        budget = TICABudgetManager(recipe.budget())
+        candidates: list[TICACandidate] = []
+        states: list[Mapping[str, Any]] = []
+        traces: list[Mapping[str, Any]] = []
+        measured: list[Mapping[str, Any]] = []
+        parent_id = self._parent_model_id(parent, profile)
+        root_digest = stable_digest({"parent": parent_id, "state": "uncompressed"})
+        root_state_id = "PROGRAM-S-" + root_digest[:16]
+        states.append({"state_id": root_state_id, "depth": 0, "status": "baseline", "feasible": True})
+        previous_state_id = root_state_id
+        termination_reason = "frontier_empty"
+        observed_depth = 0
+        for depth in range(1, int(recipe.max_search_depth) + 1):
+            observed_depth = depth
+            state_payload = {
+                "depth": depth,
+                "parent_state_id": previous_state_id,
+                "budget": budget.snapshot(),
+                "measured_candidates": list(measured),
+                "frontier": [item.get("plan") for item in measured if isinstance(item, Mapping) and item.get("feasible")],
+            }
+            decision = _run_algorithm_search_program(
+                algorithm_source,
+                sandbox,
+                profile,
+                algorithm_history,
+                state_payload,
+                search_space,
+            )
+            ordered_plans = [decision.plans[index] for index in decision.rank]
+            trace = {
+                "depth": depth,
+                "source_sha256": decision.source_sha256,
+                "payload_sha256": decision.payload_sha256,
+                "plan_digests": [stable_digest(plan) for plan in ordered_plans],
+                "rank": list(decision.rank),
+                "stop": decision.stop,
+                "search_space_version": search_space.get("version_id") if isinstance(search_space, Mapping) else None,
+                "search_space_operator_names": sorted(_operator_specs_from_search_space(search_space)),
+            }
+            traces.append(trace)
+            generation: list[TICACandidate] = []
+            for plan in ordered_plans:
+                if budget.used["full_evals"] >= budget.limits["max_full_evals"]:
+                    break
+                candidate = self._measure_program_plan(plan, recipe, budget, evaluate_candidate)
+                candidate = replace_candidate(candidate, candidate_id="TICA-C%04d" % (len(candidates) + 1), parent_candidate_ids=(previous_state_id,))
+                candidates.append(candidate)
+                generation.append(candidate)
+                states.append(
+                    {
+                        "state_id": candidate.state_id,
+                        "parent_state_id": previous_state_id,
+                        "depth": depth,
+                        "plan_digest": candidate.plan_digest,
+                        "operator": candidate.kind,
+                        "feasible": candidate.feasible,
+                        "status": candidate.status,
+                    }
+                )
+            measured = [
+                {
+                    "candidate_id": item.candidate_id,
+                    "plan": item.plan,
+                    "feasible": item.feasible,
+                    "status": item.status,
+                    "risk": item.full_metrics.get("risk_value", item.fast_metrics.get("risk_value")),
+                    "quality_score": item.full_metrics.get("quality_score", item.fast_metrics.get("quality_score")),
+                    "parameter_reduction_ratio": item.full_metrics.get("parameter_reduction_ratio", item.fast_metrics.get("parameter_reduction_ratio")),
+                }
+                for item in generation
+            ]
+            level_feasible = [item for item in generation if item.feasible]
+            if decision.stop:
+                termination_reason = "algorithm_stop"
+                break
+            if not generation:
+                termination_reason = "budget_exhausted:full"
+                break
+            if not level_feasible:
+                termination_reason = "algorithm_frontier_empty"
+                break
+            previous_state_id = max(level_feasible, key=_candidate_rank).state_id
+            if budget.used["full_evals"] >= budget.limits["max_full_evals"]:
+                termination_reason = "budget_exhausted:full"
+                break
+        if observed_depth >= int(recipe.max_search_depth) and termination_reason == "frontier_empty":
+            termination_reason = "max_depth_reached"
+        profiling_cost = profile.get("profiling_cost") if isinstance(profile.get("profiling_cost"), Mapping) else {}
+        total_cost = {
+            "search_fast_evals": int(budget.used["fast_evals"]),
+            "search_full_evals": int(budget.used["full_evals"]),
+            "search_interaction_evals": int(budget.used["interaction_evals"]),
+            "profiling": dict(profiling_cost),
+            "scope": "search_plus_shared_profiling",
+        }
+        pareto = _pareto_front(candidates)
+        feasible = [item for item in candidates if item.feasible and item.full_metrics]
+        pareto_ids = {str(item.get("candidate_id")) for item in pareto}
+        pareto_candidates = [item for item in feasible if item.candidate_id in pareto_ids]
+        selected = max(pareto_candidates or feasible, key=_candidate_rank, default=None)
+        return TICASearchResult(
+            recipe=recipe,
+            candidates=tuple(candidates),
+            pareto_front=tuple(pareto),
+            budget={**budget.snapshot(), "elapsed_s": time.perf_counter() - started},
+            calibration_digest=str(manifest.digest()),
+            evidence_level="cpu_fake_quality_proxy" if getattr(manifest, "provider_name", "") == "fake_wan_cpu" else "real_wan_structure",
+            score={},
+            selected_candidate_id=selected.candidate_id if selected else None,
+            selected_plan_digest=selected.plan_digest if selected else None,
+            search_states=tuple(states),
+            budget_audit=tuple(budget.audit),
+            observed_search_depth=observed_depth,
+            level_stats=tuple(),
+            termination_reason=termination_reason,
+            profiling_cost=dict(profiling_cost),
+            total_cost=total_cost,
+            algorithm_trace=tuple(traces),
+        )
+
     def search(
         self,
         adapter: Any,
@@ -1153,6 +1449,10 @@ class TICAPruner:
         *,
         evaluate_candidate: Optional[EvaluateCandidate] = None,
         seed_plan: Optional[Mapping[str, Any]] = None,
+        algorithm_source: Optional[str] = None,
+        algorithm_history: Sequence[Mapping[str, Any]] = (),
+        search_space: Optional[Mapping[str, Any]] = None,
+        sandbox: Optional[AlgorithmSandbox] = None,
     ) -> TICASearchResult:
         del adapter
         split = profile.get("evaluation_split")
@@ -1160,6 +1460,25 @@ class TICAPruner:
             split = profile["tica"].get("evaluation_split")
         if str(split or "").lower() == "test":
             raise ValueError("TICA search cannot consume Test split measurements")
+        if algorithm_source is not None:
+            try:
+                validated = validate_source(algorithm_source)
+            except SourcePolicyError as exc:
+                raise ValueError("algorithm_search_source_invalid: %s" % exc) from exc
+            if "search" in validated.functions:
+                if sandbox is None:
+                    sandbox = AlgorithmSandbox(Path(tempfile.mkdtemp(prefix="algorithm-search-")))
+                return self._search_with_algorithm_program(
+                    parent,
+                    manifest,
+                    profile,
+                    recipe,
+                    algorithm_source=algorithm_source,
+                    algorithm_history=algorithm_history,
+                    search_space=dict(search_space or {}),
+                    sandbox=sandbox,
+                    evaluate_candidate=evaluate_candidate,
+                )
         started = time.perf_counter()
         score = tica_score(profile, time_weight_formula=recipe.time_weight_formula, time_weights=recipe.time_weights or None)
         budget = TICABudgetManager(recipe.budget())

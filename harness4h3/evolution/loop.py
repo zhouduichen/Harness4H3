@@ -399,6 +399,9 @@ class EvolutionLoop:
                     round_dir,
                     recipe=tica_recipe,
                     seed_plan=sandbox_result.plan.args,
+                    algorithm_source=algorithm.source,
+                    algorithm_history=agent_history,
+                    search_space=self.search_space_version.to_dict() if self.search_space_version is not None else {"operators": []},
                 )
                 tica_search_payload = {
                     **search.to_dict(),
@@ -427,7 +430,14 @@ class EvolutionLoop:
                     "TICA search produced no measured feasible compression plan",
                     {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "tica_search": str(tica_search_path)},
                 )
-            computed_digest = TICAPruner._plan_digest(selected_plan)
+            if isinstance(selected_plan.get("operator"), str) and isinstance(selected_plan.get("args"), Mapping):
+                selected_operator = str(selected_plan["operator"])
+                selected_args = dict(selected_plan["args"])
+                computed_digest = stable_digest(selected_plan)
+            else:
+                selected_operator = "tica_prune"
+                selected_args = dict(selected_plan)
+                computed_digest = TICAPruner._plan_digest(selected_args)
             if computed_digest != selected_digest:
                 return self._finish_failure(
                     round_id,
@@ -443,7 +453,7 @@ class EvolutionLoop:
             sandbox_result = SandboxResult(
                 "success",
                 sandbox_result.source_sha256,
-                SandboxCompressionPlan("tica_prune", dict(selected_plan)),
+                SandboxCompressionPlan(selected_operator, selected_args),
                 metadata={
                     **dict(sandbox_result.metadata),
                     "tica_selected_candidate_id": selected_id,
@@ -627,7 +637,7 @@ class EvolutionLoop:
             }
         plan_digest_mismatch = False
         if tica_search_payload is not None:
-            final_plan_digest = TICAPruner._plan_digest(sandbox_result.plan.args)
+            final_plan_digest = stable_digest(sandbox_result.plan.to_dict())
             measured_plan_digest = evaluation.get("plan_digest")
             if measured_plan_digest is not None and str(measured_plan_digest) != final_plan_digest:
                 plan_digest_mismatch = True
@@ -712,7 +722,7 @@ class EvolutionLoop:
         if tica_search_payload is not None:
             decision["selected_candidate_id"] = tica_search_payload.get("selected_candidate_id")
             decision["selected_plan_digest"] = tica_search_payload.get("selected_plan_digest")
-            decision["final_plan_digest"] = TICAPruner._plan_digest(sandbox_result.plan.args)
+            decision["final_plan_digest"] = stable_digest(sandbox_result.plan.to_dict())
             decision["tica_plan_digest_match"] = decision["selected_plan_digest"] == decision["final_plan_digest"]
             decision["tica_agent_rule_digest"] = tica_search_payload.get("agent_rule_digest")
             decision["tica_search_algorithm_id"] = tica_search_payload.get("algorithm_id")
@@ -1170,6 +1180,9 @@ class EvolutionLoop:
         recipe: Optional[TICARecipe] = None,
         seed_plan: Optional[Mapping[str, Any]] = None,
         manifest: Optional[TICACalibrationManifest] = None,
+        algorithm_source: Optional[str] = None,
+        algorithm_history: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]] = (),
+        search_space: Optional[Mapping[str, Any]] = None,
     ) -> Any:
         """Run stateful TICA search under one bounded, shared budget.
 
@@ -1196,9 +1209,19 @@ class EvolutionLoop:
         )
 
         def measure(plan: Mapping[str, Any], full: bool, stage: str) -> Mapping[str, Any]:
+            operator = str(plan.get("operator", "tica_prune"))
+            plan_args = plan.get("args") if isinstance(plan.get("args"), Mapping) else plan
             if not full:
-                selected = [str(item) for item in plan.get("block_ids", [])]
+                selected = [str(item) for item in plan_args.get("block_ids", [])]
+                if operator == "timestep_block_gate":
+                    selected = [
+                        str(item.get("block_id"))
+                        for item in plan_args.get("rules", [])
+                        if isinstance(item, Mapping) and item.get("block_id")
+                    ]
                 risks = [score.block_risk.get(item) for item in selected if item in score.block_risk]
+                if not risks and operator == "timestep_block_gate":
+                    risks = [float(value) for value in score.block_risk.values()]
                 return {
                     "valid": bool(risks),
                     "evidence_level": "cpu_fake_local_output" if manifest.provider_name == "fake_wan_cpu" else "real_wan_local_output",
@@ -1211,13 +1234,14 @@ class EvolutionLoop:
                     "selected_blocks": selected,
                     "time_weight_formula": recipe.time_weight_formula,
                     "stage": stage,
+                    "operator": operator,
                 }
             return evaluator.evaluate(
                 SandboxResult(
                     "success",
                     "0" * 64,
-                    SandboxCompressionPlan("tica_prune", dict(plan)),
-                    metadata={"stage": stage, "trusted_tica_baseline": True},
+                    SandboxCompressionPlan(operator, dict(plan_args)),
+                    metadata={"stage": stage, "trusted_tica_baseline": operator == "tica_prune"},
                 )
             )
 
@@ -1229,6 +1253,10 @@ class EvolutionLoop:
             recipe,
             evaluate_candidate=measure,
             seed_plan=seed_plan,
+            algorithm_source=algorithm_source,
+            algorithm_history=algorithm_history,
+            search_space=search_space,
+            sandbox=self.sandbox,
         )
 
     def _screening_context(
@@ -1404,6 +1432,13 @@ class EvolutionLoop:
                 "selected_candidate_id": search.selected_candidate_id,
                 "selected_plan_digest": search.selected_plan_digest,
                 "search_result_digest": stable_digest(search.to_dict()),
+                "algorithm_search": {
+                    "complete": selected is not None,
+                    "source_sha256": result.source_sha256,
+                    "candidate_count": len(search.candidates),
+                    "selected_candidate_id": search.selected_candidate_id,
+                    "candidates": [item.to_dict() for item in search.candidates],
+                },
             }
             if selected is None or not selected.feasible:
                 return {**base, "valid": False, "failure_reason": "no_feasible_calibration_candidate"}
