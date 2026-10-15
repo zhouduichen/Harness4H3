@@ -42,7 +42,7 @@ class CompressionPlan:
     MAX_COMPOSITE_STEPS = 3
 
     @classmethod
-    def from_mapping(cls, raw: Any) -> "CompressionPlan":
+    def from_mapping(cls, raw: Any, *, operator_specs: Optional[Mapping[str, Mapping[str, Any]]] = None) -> "CompressionPlan":
         if not isinstance(raw, Mapping):
             raise ValueError("algorithm_output_invalid: output must be an object")
         # Some structured providers use the repository's persisted decision
@@ -63,7 +63,8 @@ class CompressionPlan:
             raise ValueError("algorithm_output_invalid: output keys must be operator and args")
         operator = raw["operator"]
         args = raw["args"]
-        if not isinstance(operator, str) or operator not in cls.ALLOWED_OPERATORS:
+        extensions = dict(operator_specs or {})
+        if not isinstance(operator, str) or (operator not in cls.ALLOWED_OPERATORS and operator not in extensions):
             raise ValueError("algorithm_output_invalid: unsupported operator")
         if not isinstance(args, Mapping):
             raise ValueError("algorithm_output_invalid: args must be an object")
@@ -80,7 +81,9 @@ class CompressionPlan:
                     raise ValueError("algorithm_output_invalid: nested compose is not allowed")
                 normalized_steps.append(cls._from_base_mapping(step).to_dict())
             return cls("compose", {"steps": normalized_steps})
-        return cls._from_base_mapping({"operator": operator, "args": args})
+        if operator in cls.BASE_OPERATORS:
+            return cls._from_base_mapping({"operator": operator, "args": args})
+        return cls._from_extension_mapping(operator, args, extensions[operator])
 
     @classmethod
     def _from_base_mapping(cls, raw: Mapping[str, Any]) -> "CompressionPlan":
@@ -100,6 +103,21 @@ class CompressionPlan:
                 raise ValueError("algorithm_output_invalid: block_ids must contain strings")
             if not all(isinstance(item, int) and not isinstance(item, bool) for item in args["retained_indices"]):
                 raise ValueError("algorithm_output_invalid: retained_indices must contain integers")
+        return cls(str(operator), {str(key): value for key, value in args.items()})
+
+    @classmethod
+    def _from_extension_mapping(cls, operator: str, args: Mapping[str, Any], spec: Mapping[str, Any]) -> "CompressionPlan":
+        schema = spec.get("argument_schema") if isinstance(spec, Mapping) else None
+        if not isinstance(schema, Mapping) or set(args) != set(schema):
+            raise ValueError("algorithm_output_invalid: extension arguments do not match operator schema")
+        for key, type_name in schema.items():
+            value = args[key]
+            if type_name == "list[str]" and (not isinstance(value, list) or not all(isinstance(item, str) for item in value)):
+                raise ValueError("algorithm_output_invalid: %s must be a list of strings" % key)
+            if type_name == "list[int]" and (not isinstance(value, list) or not all(isinstance(item, int) and not isinstance(item, bool) for item in value)):
+                raise ValueError("algorithm_output_invalid: %s must be a list of integers" % key)
+            if type_name == "float" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
+                raise ValueError("algorithm_output_invalid: %s must be numeric" % key)
         return cls(str(operator), {str(key): value for key, value in args.items()})
 
     def to_dict(self) -> dict[str, Any]:
@@ -255,13 +273,17 @@ except Exception as exc:
 
 
 class AlgorithmSandbox:
-    def __init__(self, root: Path, *, timeout_s: float = 10.0, max_output_bytes: int = 64 * 1024) -> None:
+    def __init__(self, root: Path, *, timeout_s: float = 10.0, max_output_bytes: int = 64 * 1024, operator_specs: Sequence[Any] = ()) -> None:
         if timeout_s <= 0 or max_output_bytes <= 0:
             raise ValueError("sandbox limits must be positive")
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.timeout_s = float(timeout_s)
         self.max_output_bytes = int(max_output_bytes)
+        self.operator_specs = {
+            str(item.name): item.to_dict() if callable(getattr(item, "to_dict", None)) else dict(item)
+            for item in operator_specs
+        }
         self.executor = LocalProcessExecutor(timeout_s=self.timeout_s)
 
     def run(self, source: str, profile: Mapping[str, Any], history: Sequence[Mapping[str, Any]]) -> SandboxResult:
@@ -286,7 +308,7 @@ class AlgorithmSandbox:
             return SandboxResult("failed", validated.sha256, failure_type="algorithm_output_invalid", message="output is missing or exceeds size limit", stdout_path=result.stdout_path, stderr_path=result.stderr_path)
         try:
             raw = json.loads(output_path.read_text(encoding="utf-8"))
-            plan = CompressionPlan.from_mapping(raw)
+            plan = CompressionPlan.from_mapping(raw, operator_specs=self.operator_specs)
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             return SandboxResult("failed", validated.sha256, failure_type="algorithm_output_invalid", message=str(exc), stdout_path=result.stdout_path, stderr_path=result.stderr_path)
         return SandboxResult(
@@ -301,5 +323,6 @@ class AlgorithmSandbox:
                 "runtime_audit": "deny-file-network-process-dynamic-code",
                 "resource_limits": {"timeout_s": self.timeout_s, "cpu_s": max(1, int(self.timeout_s)), "address_space_bytes": 512 * 1024 * 1024, "file_size_bytes": 1024 * 1024, "open_files": 32},
                 "network_policy": "runtime-audit-deny; host network namespace not assumed",
+                "search_space_operator_names": sorted(self.operator_specs),
             },
         )

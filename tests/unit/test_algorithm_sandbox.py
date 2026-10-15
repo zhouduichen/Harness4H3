@@ -4,6 +4,7 @@ import harness4h3.sandbox.runner as sandbox_runner
 
 from harness4h3.evolution.candidate import AlgorithmCandidate
 from harness4h3.evolution.store import AlgorithmStore
+from harness4h3.operators.wan import OperatorSpec
 from harness4h3.sandbox import AlgorithmSandbox
 
 
@@ -60,6 +61,24 @@ def test_sandbox_accepts_bounded_composite_plan(tmp_path):
     assert result.plan is not None
     assert result.plan.operator == "compose"
     assert result.plan.to_dict()["args"]["steps"][1]["operator"] == "prune_ffn_channels"
+
+
+def test_sandbox_accepts_only_registered_search_space_extension(tmp_path):
+    source = "def propose(profile, history):\n    return {'operator': 'prune_ffn_by_weight_threshold', 'args': {'block_ids': ['block.0'], 'threshold': 0.3}}\n"
+    spec = OperatorSpec(
+        "prune_ffn_by_weight_threshold",
+        "1",
+        {"block_ids": "list[str]", "threshold": "float"},
+        "channel",
+        trusted_factory_key="prune_ffn_by_weight_threshold",
+    )
+    denied = AlgorithmSandbox(tmp_path / "denied").run(source, {}, [])
+    assert denied.status == "failed"
+    assert denied.failure_type == "algorithm_output_invalid"
+    allowed = AlgorithmSandbox(tmp_path / "allowed", operator_specs=(spec,)).run(source, {}, [])
+    assert allowed.status == "success"
+    assert allowed.plan is not None
+    assert allowed.plan.operator == "prune_ffn_by_weight_threshold"
 
 
 def test_sandbox_rejects_nested_composite_plan(tmp_path):

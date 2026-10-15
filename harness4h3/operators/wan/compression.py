@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, ChannelPruningConfig, CompressionResult, WanModelAdapter
 
@@ -153,6 +153,23 @@ class WanCompressionRegistry:
 
     def execute(self, name: str, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
         return self.get(name).execute(adapter, parent, plan, output_dir)
+
+    def for_search_space(self, version: Any, factories: Mapping[str, Callable[[], CompressionOperator]]) -> "WanCompressionRegistry":
+        """Return a registry view populated only from trusted factories."""
+
+        view = WanCompressionRegistry(tuple(self._operators.values()))
+        for spec in getattr(version, "operators", ()):
+            factory_key = str(getattr(spec, "trusted_factory_key", ""))
+            if not factory_key or str(getattr(spec, "name", "")) in view._operators:
+                continue
+            factory = factories.get(factory_key)
+            if factory is None:
+                raise ValueError("unavailable_trusted_operator_factory: %s" % factory_key)
+            operator = factory()
+            if operator.name != spec.name:
+                raise ValueError("trusted_operator_factory_name_mismatch")
+            view._operators[operator.name] = operator
+        return view
 
 
 def build_wan_compression_registry() -> WanCompressionRegistry:
