@@ -726,17 +726,27 @@ class WanVideoEvaluator:
     def _cuda_device(self, torch: Any) -> Any:
         return torch.device(self.config.device)
 
+    @staticmethod
+    def _device_type(device: Any) -> str:
+        """Read torch.device.type while keeping lightweight test doubles valid."""
+
+        value = getattr(device, "type", None)
+        if value is None:
+            value = str(device).split(":", 1)[0]
+        return str(value).strip().lower()
+
     def _reset_peak_memory(self, torch: Any) -> None:
         try:
-            if torch.cuda.is_available() and self._cuda_device(torch).type == "cuda":
-                torch.cuda.reset_peak_memory_stats(self._cuda_device(torch))
+            device = self._cuda_device(torch)
+            if torch.cuda.is_available() and self._device_type(device) == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
         except (AttributeError, RuntimeError):
             pass
 
     def _peak_memory_gb(self, torch: Any) -> Optional[float]:
         try:
             device = self._cuda_device(torch)
-            if device.type == "cuda" and torch.cuda.is_available():
+            if self._device_type(device) == "cuda" and torch.cuda.is_available():
                 value = float(torch.cuda.max_memory_allocated(device)) / float(1024**3)
                 if math.isfinite(value) and value > 0.0:
                     return value

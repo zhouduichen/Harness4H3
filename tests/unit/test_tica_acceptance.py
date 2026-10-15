@@ -6,12 +6,14 @@ from types import SimpleNamespace
 import pytest
 
 from harness4h3.adapters.wan.contracts import CheckpointArtifact, ModelStructure
+from harness4h3 import cli as harness_cli
 from harness4h3.evolution.agent import build_algorithm_provider
 from harness4h3.evolution.candidate import AlgorithmCandidate
 from harness4h3.evolution.config import CompressionConfig, CompressionConfigError
 from harness4h3.evolution.final_evaluation import FinalEvaluationRequest, FinalEvaluationRunner
 from harness4h3.evolution.improvement import AlgorithmValidator
 from harness4h3.evolution.tica_prune import TICAPruner, TICARecipe, tica_operator_spec
+from harness4h3.evolution.tica_calibration import TICACalibrationManifest
 from harness4h3.sandbox import AlgorithmSandbox
 from tools.preflight_wan_tica import preflight
 
@@ -145,6 +147,44 @@ def test_tica_validation_profiles_do_not_collect_validation_search_evidence(monk
     assert all(item["evaluation_split"] == "validation" for item in profiles)
     assert all("tica_block_sensitivity" not in item for item in profiles)
     assert all(item["provenance"]["search_profile_source"] == "calibration_only" for item in profiles)
+
+
+def test_evolution_cli_defers_test_manifest_until_final_evaluation(monkeypatch, tmp_path):
+    config_path = tmp_path / "evolution.yaml"
+    config_path.write_text(
+        "backend: fake\n"
+        "checkpoint: fake://baseline\n"
+        "output_root: %s\n"
+        "tica_prune: true\n"
+        "tica_calibration_manifest: calibration.json\n"
+        "tica_validation_manifest: validation.json\n"
+        "tica_test_manifest: test.json\n" % (tmp_path / "out"),
+        encoding="utf-8",
+    )
+    loaded = []
+    captured = {}
+
+    def load_manifest(path):
+        loaded.append(path.name)
+        if path.name == "test.json":
+            raise AssertionError("Evolution must not open the Test manifest")
+        return TICACalibrationManifest.from_fake(hidden_size=8, sample_prefix=path.stem)
+
+    class FakeLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run_round(self):
+            return SimpleNamespace(to_dict=lambda: {"status": "completed"})
+
+    monkeypatch.setattr(harness_cli, "_load_tica_manifest", load_manifest)
+    monkeypatch.setattr(harness_cli, "_compression_context", lambda config: (object(), object()))
+    monkeypatch.setattr(harness_cli, "EvolutionLoop", FakeLoop)
+    args = SimpleNamespace(compression_config=str(config_path), rounds=1, json=True)
+
+    assert harness_cli.cmd_evolve_compression(args) == 0
+    assert loaded == ["calibration.json", "validation.json"]
+    assert captured["tica_splits"].test is None
 
 
 def test_final_evaluation_does_not_change_frozen_ids_or_adaptive_state(tmp_path):

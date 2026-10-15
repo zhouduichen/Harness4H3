@@ -38,9 +38,10 @@ controller:
   timeout_s: 180
 evaluator:
   backend: wan_video
-  # This is the held-out video evaluation manifest, not a TICA calibration set.
+  # Evolution's independent Validation video manifest.  A separate final-
+  # evaluation config must point this field at the frozen held-out Test set.
   wan_config: /path/to/wan-student-1.3b.yaml
-  evaluation_manifest: /path/to/wan-test-evaluation-manifest.json
+  evaluation_manifest: /path/to/wan-validation-evaluation-manifest.json
   clip_model_path: /path/to/clip-vit-large-patch14-336
   device: cuda:0
   quality_device: cuda:0

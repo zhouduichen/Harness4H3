@@ -104,13 +104,12 @@ class EvolutionLoop:
             self.tica_splits = TICAEvaluationSplits(
                 calibration=self.tica_manifest or TICACalibrationManifest.from_fake(hidden_size=int(parent.structure.hidden_size), sample_prefix="calibration"),
                 validation=TICACalibrationManifest.from_fake(hidden_size=int(parent.structure.hidden_size), seed=1007, sample_prefix="validation"),
-                test=TICACalibrationManifest.from_fake(hidden_size=int(parent.structure.hidden_size), seed=2007, sample_prefix="test"),
             )
             self.tica_manifest = self.tica_splits.calibration
         if self.tica_prune and self.tica_manifest is None:
             raise ValueError("TICA requires explicit Calibration/Validation/Test manifests")
         if self.tica_prune and self.tica_splits is None:
-            raise ValueError("TICA requires Calibration/Validation/Test split manifests")
+            raise ValueError("TICA Evolution requires Calibration and Validation split manifests")
         if self.tica_prune:
             # Evolution may inspect Calibration and Validation sources only.
             # The Test manifest remains reserved for FinalEvaluation and is

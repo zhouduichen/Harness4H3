@@ -39,5 +39,9 @@ def test_tica_evaluator_measures_each_fixed_timestep_and_keeps_hardware_unavaila
     assert result["valid"] is True
     assert result["calibration_digest"] == manifest.digest()
     assert len(result["output_metrics"]["timestep_records"]) == 6
+    assert result["risk_metric"] == "normalized_mse"
+    assert result["risk_scale"] == "normalized_mse"
+    assert result["risk_is_approximate"] is False
+    assert result["risk_value"] == result["output_metrics"]["risk_value"]
     assert result["hardware_metrics"]["available"] is False
     assert result["search_budget"]["max_full_evals"] == 4

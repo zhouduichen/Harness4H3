@@ -215,6 +215,14 @@ class AlgorithmModelEvaluator:
                 "estimated_flops": child_flops,
                 "output_metrics": output,
                 "quality_error": float(output.get("quality_error", output.get("normalized_mse", 0.0))),
+                # TICAPruner consumes the declared risk contract at the
+                # measurement boundary.  Keep the same evidence at the
+                # top-level as well as inside output_metrics so a complete
+                # model execution cannot be mistaken for missing risk.
+                "risk_metric": output.get("risk_metric", "normalized_mse"),
+                "risk_value": output.get("risk_value", output.get("normalized_mse")),
+                "risk_scale": output.get("risk_scale", "normalized_mse"),
+                "risk_is_approximate": output.get("risk_is_approximate") is True,
                 "quality_score": quality,
                 "search_score": quality + 0.10 * reduction_score,
                 "checkpoint_size_bytes": checkpoint_bytes,

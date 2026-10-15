@@ -7,7 +7,7 @@ import io
 import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from ..adapters.wan.contracts import stable_digest
 
@@ -235,11 +235,16 @@ class TICACalibrationManifest:
 
 @dataclass(frozen=True)
 class TICAEvaluationSplits:
-    """Fixed Calibration/Validation/Test manifests with leakage checks."""
+    """Fixed manifests with leakage checks and an optional deferred Test split.
+
+    Evolution constructs this object with only Calibration and Validation so
+    that starting an adaptive run cannot even read the held-out Test manifest.
+    FinalEvaluation and offline preflight may provide ``test`` explicitly.
+    """
 
     calibration: TICACalibrationManifest
     validation: TICACalibrationManifest
-    test: TICACalibrationManifest
+    test: Optional[TICACalibrationManifest] = None
 
     def __post_init__(self) -> None:
         manifests = {
@@ -250,6 +255,8 @@ class TICAEvaluationSplits:
         seen: dict[str, str] = {}
         seen_sources: dict[tuple[str, str], str] = {}
         for role, manifest in manifests.items():
+            if manifest is None:
+                continue
             if not isinstance(manifest, TICACalibrationManifest):
                 raise TypeError("TICA %s split must be a TICACalibrationManifest" % role)
             for spec in manifest.specs:
@@ -284,7 +291,7 @@ class TICAEvaluationSplits:
             {
                 "calibration": self.calibration.digest(),
                 "validation": self.validation.digest(),
-                "test": self.test.digest(),
+                "test": self.test.digest() if self.test is not None else None,
             }
         )
 
@@ -292,14 +299,17 @@ class TICAEvaluationSplits:
         return {
             "calibration": self.calibration.to_dict(),
             "validation": self.validation.to_dict(),
-            "test": self.test.to_dict(),
+            "test": self.test.to_dict() if self.test is not None else None,
             "digest": self.digest(),
         }
 
     def manifest(self, role: str) -> TICACalibrationManifest:
         if role not in {"calibration", "validation", "test"}:
             raise ValueError("unsupported TICA evaluation split: %s" % role)
-        return getattr(self, role)
+        manifest = getattr(self, role)
+        if manifest is None:
+            raise ValueError("TICA %s manifest is deferred to FinalEvaluation" % role)
+        return manifest
 
 
 __all__ = ["TICACalibrationInput", "TICACalibrationManifest", "TICACalibrationSpec", "TICAEvaluationSplits"]

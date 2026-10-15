@@ -193,8 +193,9 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
                 raise ValueError("TICA requires calibration, validation, and test manifests together")
             calibration = _load_tica_manifest(config.tica_calibration_manifest)
             validation = _load_tica_manifest(config.tica_validation_manifest)
-            test = _load_tica_manifest(config.tica_test_manifest)
-            tica_splits = TICAEvaluationSplits(calibration=calibration, validation=validation, test=test)
+            # The Test path is configuration for the later frozen command;
+            # Evolution must not open or parse it.
+            tica_splits = TICAEvaluationSplits(calibration=calibration, validation=validation)
             tica_manifest = tica_splits.calibration
             if config.backend == "diffusers":
                 # Test is frozen input for FinalEvaluation; Evolution must not

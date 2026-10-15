@@ -11,7 +11,8 @@
 ## 实际修改
 
 - TICA 快速筛选现在使用独立的 `local_relative_output_error / profile_relative_error` 近似风险；完整评测必须返回 `normalized_mse / normalized_mse`、有限数值、`valid=true` 且标记为非近似。完整风险超标、尺度不匹配、缺失、计算失败或交互测量无效都会拒绝候选，不能进入 Pareto Front。
-- Evolution 只使用 Calibration 和 Validation。Evolution 不打开或写入 Test 结果，`tica-splits.json` 也不再把 Test 作为循环输入；Test 由独立的 `final-evaluate` 冻结流程读取，只输出报告，不更新 ModelStore、AlgorithmStore、Memory、SearchPolicy 或 Agent 上下文。
+- 完整 TICA 模型评测现在把风险契约同时写在结果顶层和 `output_metrics` 内，确保搜索器能读到真实模型输出的完整 normalized MSE，而不是把已有测量误判成风险缺失。
+- Evolution 只使用 Calibration 和 Validation。Evolution 不读取 Test manifest 或 Test tensor，也不把 Test 写入循环的 `tica-splits.json`；Test 由独立的 `final-evaluate` 冻结流程读取，只输出报告，不更新 ModelStore、AlgorithmStore、Memory、SearchPolicy 或 Agent 上下文。
 - TICA 的算法验证不再只比较 Sandbox 产生的第一个 CompressionPlan。父算法和子算法现在分别调用完整的 `TICAPruner.search()`，使用同一个父 checkpoint、Calibration profile、搜索空间、种子、预算和独立缓存命名空间，再用 Validation 评估选中的候选。
 - Controller 的 TICA 请求明确返回受限的 `tica_prune` 搜索规则；返回规则经过 Sandbox 后实际传入搜索器。普通模式仍保持原有三类基础算子协议。
 - 搜索结果新增真实深度、逐层候选/可行数量、终止原因、快速/完整/交互评测次数、共享 profiling 成本和总成本。默认四个 baseline 作为候选种子共享搜索预算，不再和四次独立算法实验混淆。
@@ -19,14 +20,16 @@
 
 ## 验收结果
 
-本机没有安装 `torch` 和 `diffusers`，所以没有加载大型 Wan，也没有启动 GPU。实际执行结果如下：
+本轮使用仓库虚拟环境 `/Users/huangjiahao/MinMax-H3/Harness4H3/.venv`，其中有 `torch 2.14.0` 和 `diffusers 0.39.0`；`torch.cuda.is_available()` 为 `False`，因此没有加载大型 Wan，也没有启动 GPU。实际执行结果如下：
 
-- 重点回归套件：`88 passed, 1 skipped, 3 deselected in 1.89s`。
-- TICA、风险、Controller、完整算法验证重点套件：`35 passed, 3 deselected in 1.57s`。
+- CPU Fake Wan 端到端（TICA recursive loop、真实 Fake 模型压缩/重载、Calibration 误差和交互评测）：`22 passed`。
+- 重点回归套件：`89 passed, 1 skipped, 3 deselected in 1.97s`。
+- TICA、风险、Controller、数据隔离重点套件：`36 passed, 3 deselected in 1.64s`。
+- CPU 全量测试：`985 passed, 4 skipped in 131.27s`。
 - `python3 -m compileall -q harness4h3 h3_training research tools`：通过。
 - `git diff --check`：通过。
 - CLI 帮助检查通过，已出现 `final-evaluate` 命令。
-- 全仓收集：`692 tests collected, 37 errors`。错误来自当前环境缺少 `torch`/`diffusers` 的可选测试依赖，不是本轮断言失败；仓库 CI 会安装 `.[test,training,wan]` 后运行全套测试。依赖缺失导致的 Fake Wan 集成测试未在本机冒充通过。
+- 系统 Python 3.9 的一次独立收集曾因没有可选依赖得到 `692 collected, 37 errors`；该解释器没有被用于最终验收，最终验收使用了上面的仓库虚拟环境。
 
 默认 TICA 示例配置的离线搜索轨迹为：4 个 baseline 根节点、`max_full_evals=4`，实际深度 1，完整评测 4 次，因 `budget_exhausted:full` 终止。配置中的 `max_search_depth=3` 只是上限，不代表实际一定能到第三层。
 
