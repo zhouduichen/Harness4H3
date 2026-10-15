@@ -62,6 +62,62 @@ class FFNChannelPruningOperator:
             return _failed(parent, _failure_type(exc, "channel_pruning_failed"), str(exc), started)
 
 
+class TICAPruningOperator:
+    """Execute a TICA recipe through existing trusted structural mutations."""
+
+    name = "tica_prune"
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        started = time.monotonic()
+        try:
+            mode = str(plan.get("mode", "block_plus_ffn"))
+            if mode not in {"block", "ffn", "block_plus_ffn"}:
+                return _failed(parent, "invalid_tica_mode", "unsupported TICA execution mode", started)
+            if "per_layer_retained_indices" in plan:
+                return _failed(parent, "global_ffn_alignment_required", "TICA requires one global FFN retained-index set", started)
+            raw_block_ids = plan.get("block_ids", [])
+            if not isinstance(raw_block_ids, (list, tuple)) or not all(isinstance(item, str) for item in raw_block_ids):
+                return _failed(parent, "invalid_tica_plan", "TICA block_ids must be a list of strings", started)
+            retained = plan.get("retained_indices")
+            if mode in {"ffn", "block_plus_ffn"} and (not isinstance(retained, (list, tuple)) or not all(isinstance(item, int) and not isinstance(item, bool) for item in retained)):
+                return _failed(parent, "invalid_tica_plan", "TICA retained_indices must be a list of integers", started)
+            model = adapter.reload_model(parent)
+            changes: list[Mapping[str, Any]] = []
+            if mode in {"block", "block_plus_ffn"}:
+                if not raw_block_ids:
+                    return _failed(parent, "invalid_block_selection", "TICA block mode requires block_ids", started)
+                change = adapter.remove_blocks(model, tuple(raw_block_ids))
+                changes.append({"kind": change.kind, **dict(change.details)})
+            if mode in {"ffn", "block_plus_ffn"}:
+                remaining = tuple(item.block_id for item in adapter.get_blocks(model))
+                if not remaining:
+                    return _failed(parent, "invalid_channel_selection", "TICA cannot prune FFN after removing all blocks", started)
+                if getattr(adapter, "channel_pruning_requires_all_blocks", False) and set(remaining) != {item.block_id for item in adapter.get_blocks(model)}:
+                    return _failed(parent, "global_ffn_alignment_required", "TICA FFN mutation does not cover all remaining blocks", started)
+                config = ChannelPruningConfig(remaining, tuple(retained), "ffn")
+                change = adapter.prune_channels(model, config)
+                changes.append({"kind": change.kind, **dict(change.details)})
+            child = adapter.save_model(model, Path(output_dir))
+            if child.sha256 == parent.sha256:
+                return _failed(parent, "checkpoint_not_changed", "TICA recipe did not change checkpoint", started)
+            return CompressionResult(
+                "success",
+                parent.sha256,
+                child,
+                {
+                    "kind": "tica_prune",
+                    "mode": mode,
+                    "block_ids": list(raw_block_ids),
+                    "retained_indices": list(retained or []),
+                    "steps": changes,
+                    "recipe": {key: plan[key] for key in ("time_weight_formula", "risk_limit", "activation_weight", "interaction_weight", "beam_width", "max_fast_evals", "max_full_evals", "max_interaction_evals") if key in plan},
+                },
+                wall_time_s=time.monotonic() - started,
+            )
+        except (OSError, TypeError, ValueError, RuntimeError) as exc:
+            return _failed(parent, _failure_type(exc, "tica_pruning_failed"), str(exc), started)
+
+
 class CompositeCompressionOperator:
     """Execute a short, ordered program of registered base operators."""
 
@@ -178,5 +234,8 @@ class WanCompressionRegistry:
         return view
 
 
-def build_wan_compression_registry() -> WanCompressionRegistry:
-    return WanCompressionRegistry((BlockPruningOperator(), FFNChannelPruningOperator(), CompositeCompressionOperator()))
+def build_wan_compression_registry(*, include_tica: bool = False) -> WanCompressionRegistry:
+    operators: list[CompressionOperator] = [BlockPruningOperator(), FFNChannelPruningOperator(), CompositeCompressionOperator()]
+    if include_tica:
+        operators.append(TICAPruningOperator())
+    return WanCompressionRegistry(tuple(operators))

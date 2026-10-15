@@ -6,13 +6,14 @@ import hashlib
 import io
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from ..adapters.wan.contracts import CheckpointArtifact, WanModelAdapter, stable_digest
 from ..operators.wan import WanCompressionRegistry
 from ..sandbox.runner import SandboxResult
+from .tica_prune import normalized_time_weights
 
 
 def _first_tensor(value: Any) -> Any:
@@ -93,6 +94,8 @@ class AlgorithmModelEvaluator:
     profile: Mapping[str, Any]
     output_root: Path
     seed: int = 7
+    calibration_manifest: Any = None
+    search_budget: Mapping[str, int] = field(default_factory=lambda: {"max_fast_evals": 8, "max_full_evals": 4, "max_interaction_evals": 2})
 
     def __post_init__(self) -> None:
         self.output_root = Path(self.output_root)
@@ -103,6 +106,18 @@ class AlgorithmModelEvaluator:
         self._parent_flops = self._estimate_flops(self._parent_model)
         self._parent_bytes = _checkpoint_bytes(self.parent.path)
         self._invocations = 0
+        self._tica_samples: tuple[Any, ...] = ()
+        self._parent_tica_outputs: dict[tuple[str, float], Any] = {}
+        if self.calibration_manifest is not None:
+            self._tica_samples = tuple(self.calibration_manifest.samples(self._parent_model, self.adapter))
+            forward_denoising = getattr(self.adapter, "forward_denoising", None)
+            if not callable(forward_denoising):
+                raise ValueError("TICA calibration requires adapter.forward_denoising")
+            for sample in self._tica_samples:
+                for timestep in sample.spec.timesteps:
+                    self._parent_tica_outputs[(str(sample.spec.sample_id), float(timestep))] = forward_denoising(
+                        self._parent_model, sample, float(timestep)
+                    )
 
     @property
     def input_digest(self) -> str:
@@ -130,7 +145,10 @@ class AlgorithmModelEvaluator:
             parent_structure = self.adapter.inspect(self._parent_model)
             self._assert_finite(child_model)
             child_output = self.adapter.forward_profile(child_model, self._sample)
-            output = _output_metrics(self._parent_output, child_output)
+            if self.calibration_manifest is not None:
+                output = self._measure_tica_outputs(child_model, result.plan)
+            else:
+                output = _output_metrics(self._parent_output, child_output)
             if output is None:
                 return self._invalid("probe_output_unavailable_or_shape_mismatch", started, result, compression=compression)
             parent_parameters = int(parent_structure.parameter_count)
@@ -144,7 +162,7 @@ class AlgorithmModelEvaluator:
                 "child_estimated_flops": child_flops,
                 "reduction_ratio": (1.0 - child_flops / max(self._parent_flops, 1)) if self._parent_flops and child_flops is not None else None,
             }
-            quality = max(-1.0, min(1.0, float(output["cosine_similarity"]) - float(output["normalized_mse"])))
+            quality = max(-1.0, min(1.0, float(output["quality_score"]))) if "quality_score" in output else max(-1.0, min(1.0, float(output["cosine_similarity"]) - float(output["normalized_mse"])))
             checkpoint_bytes = _checkpoint_bytes(compression.child_checkpoint.path)
             reduction_score = max(0.0, min(1.0, float(parameter_reduction)))
             return {
@@ -184,6 +202,10 @@ class AlgorithmModelEvaluator:
                     "input_seed": int(self.seed),
                     "input_digest": self.input_digest,
                 },
+                "calibration_digest": self.calibration_manifest.digest() if self.calibration_manifest is not None else None,
+                "calibration_input_digests": [sample.digest() for sample in self._tica_samples],
+                "search_budget": dict(self.search_budget),
+                "plan_time_weight_formula": result.plan.args.get("time_weight_formula") if self.calibration_manifest is not None else None,
             }
         except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
             return self._invalid("algorithm_measurement_failed:%s" % exc, started, result)
@@ -216,6 +238,58 @@ class AlgorithmModelEvaluator:
             return None
         value = estimator(model)
         return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else None
+
+    def _measure_tica_outputs(self, child_model: Any, plan: Any) -> Optional[dict[str, Any]]:
+        forward_denoising = getattr(self.adapter, "forward_denoising", None)
+        if not callable(forward_denoising) or not self._tica_samples:
+            return None
+        records: list[dict[str, Any]] = []
+        errors: list[float] = []
+        output_pairs: list[tuple[Any, Any]] = []
+        timesteps: list[str] = []
+        for sample in self._tica_samples:
+            for timestep in sample.spec.timesteps:
+                parent_output = self._parent_tica_outputs.get((str(sample.spec.sample_id), float(timestep)))
+                child_output = forward_denoising(child_model, sample, float(timestep))
+                metrics = _output_metrics(parent_output, child_output)
+                if metrics is None:
+                    return None
+                relative_error = float(metrics["normalized_mse"])
+                errors.append(relative_error)
+                output_pairs.append((parent_output, child_output))
+                timesteps.append(str(timestep))
+                records.append(
+                    {
+                        "sample_id": str(sample.spec.sample_id),
+                        "timestep": float(timestep),
+                        "relative_error": relative_error,
+                        "mse": metrics["mse"],
+                        "normalized_mse": metrics["normalized_mse"],
+                        "cosine_similarity": metrics["cosine_similarity"],
+                        "parent_output_digest": metrics["parent_output_digest"],
+                        "child_output_digest": metrics["child_output_digest"],
+                    }
+                )
+        if not errors:
+            return None
+        unique_timesteps = tuple(dict.fromkeys(timesteps))
+        weights = normalized_time_weights(unique_timesteps, "uniform")
+        sample_count = max(len(self._tica_samples), 1)
+        weighted_error = sum((weights[name] / sample_count) * error for name, error in zip(timesteps, errors))
+        mse = sum(float(item["mse"]) for item in records) / len(records)
+        normalized_mse = sum(float(item["normalized_mse"]) for item in records) / len(records)
+        cosine = sum(float(item["cosine_similarity"]) for item in records) / len(records)
+        return {
+            "mse": mse,
+            "normalized_mse": normalized_mse,
+            "cosine_similarity": cosine,
+            "quality_error": weighted_error,
+            "quality_score": max(-1.0, min(1.0, 1.0 - weighted_error)),
+            "timestep_records": records,
+            "timestep_weights": weights,
+            "evaluation_condition": "fixed_cached_tica_inputs_uniform_quality_aggregation",
+            "output_digest": stable_digest([(str(item[0]), str(item[1])) for item in output_pairs]),
+        }
 
 
 __all__ = ["AlgorithmModelEvaluator"]

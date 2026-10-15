@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -324,6 +325,164 @@ def propose(profile, history):
         'max_interaction_evals': 2,
     }}
 """ % str(algorithm_id)
+
+
+def _first_tensor(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        for item in value.values():
+            found = _first_tensor(item)
+            if found is not None:
+                return found
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            found = _first_tensor(item)
+            if found is not None:
+                return found
+    if hasattr(value, "detach") and hasattr(value, "shape"):
+        return value
+    return None
+
+
+def _relative_error(reference: Any, candidate: Any) -> float | None:
+    left = _first_tensor(reference)
+    right = _first_tensor(candidate)
+    if left is None or right is None or tuple(left.shape) != tuple(right.shape):
+        return None
+    try:
+        delta = (right.detach().float() - left.detach().float()).abs().mean()
+        scale = left.detach().float().abs().mean().clamp_min(1.0e-12)
+        value = float((delta / scale).item())
+        return value if math.isfinite(value) else None
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _probe_block(adapter: Any, model: Any, block_id: str, sample: Any, timestep: float, forward: Any) -> Any:
+    probe = getattr(adapter, "probe_block_removal", None)
+    callback = lambda current_model, current_sample: forward(current_model, current_sample, timestep)
+    if callable(probe):
+        return probe(model, block_id, sample, callback)
+    candidate = deepcopy(model)
+    adapter.remove_blocks(candidate, (block_id,))
+    try:
+        return callback(candidate, sample)
+    finally:
+        del candidate
+
+
+def _module_at(root: Any, path: str) -> Any:
+    value = root
+    for part in str(path).split("."):
+        value = value[int(part)] if part.isdigit() else getattr(value, part)
+    return value
+
+
+def _activation_contribution(adapter: Any, model: Any, samples: Sequence[Any], forward: Any) -> tuple[Mapping[str, Any], ...]:
+    """Measure activation magnitude times paired down-projection weight."""
+
+    try:
+        import torch
+    except ImportError:
+        return tuple(
+            {"block_id": block.block_id, "channels": [], "available": False, "method": "activation_contribution", "reason": "torch_unavailable"}
+            for block in adapter.get_blocks(model)
+        )
+    blocks = adapter.get_blocks(model)
+    totals: dict[str, Any] = {}
+    counts: dict[str, int] = {}
+    handles = []
+    for block in blocks:
+        try:
+            module = _module_at(model, block.module_path)
+            activation = next((getattr(module, name) for name in ("activation", "act") if hasattr(module, name)), None)
+            down = getattr(module, "down_proj", None)
+            if activation is None or down is None or not hasattr(down, "weight"):
+                continue
+            width = int(down.weight.shape[1])
+            totals[block.block_id] = torch.zeros(width, device=down.weight.device, dtype=torch.float32)
+            counts[block.block_id] = 0
+
+            def hook(_module: Any, _inputs: Any, output: Any, block_id: str = block.block_id) -> None:
+                tensor = _first_tensor(output)
+                if tensor is None:
+                    return
+                values = tensor.detach().float().abs()
+                while values.ndim > 1:
+                    values = values.mean(dim=0)
+                if values.numel() == totals[block_id].numel():
+                    totals[block_id] += values.to(totals[block_id].device)
+                    counts[block_id] += 1
+
+            handles.append(activation.register_forward_hook(hook))
+        except (AttributeError, IndexError, RuntimeError, TypeError):
+            continue
+    try:
+        for sample in samples:
+            for timestep in sample.spec.timesteps:
+                forward(model, sample, float(timestep))
+    finally:
+        for handle in handles:
+            handle.remove()
+    rows: list[Mapping[str, Any]] = []
+    for block in blocks:
+        if block.block_id not in totals or not counts.get(block.block_id):
+            rows.append({"block_id": block.block_id, "channels": [], "available": False, "method": "activation_contribution", "reason": "activation_hook_unavailable"})
+            continue
+        module = _module_at(model, block.module_path)
+        down = getattr(module, "down_proj", None)
+        weight = down.weight.detach().float().abs().mean(dim=0).cpu()
+        activation_mean = (totals[block.block_id] / float(counts[block.block_id])).detach().cpu()
+        channels = [
+            {"channel": index, "contribution": float((activation_mean[index] * weight[index]).item()), "available": True}
+            for index in range(int(activation_mean.numel()))
+        ]
+        rows.append({"block_id": block.block_id, "channels": channels, "available": True, "method": "activation_times_down_weight", "sample_count": len(samples)})
+    return tuple(rows)
+
+
+def collect_tica_profile(adapter: Any, model: Any, manifest: Any, *, max_block_probes: int | None = None) -> Mapping[str, Any]:
+    """Collect multi-timestep local block risk and activation contributions."""
+
+    samples = tuple(manifest.samples(model, adapter))
+    forward = getattr(adapter, "forward_denoising", None)
+    if not callable(forward):
+        raise ValueError("TICA profile requires adapter.forward_denoising")
+    block_refs = adapter.get_blocks(model)
+    if max_block_probes is not None:
+        block_refs = block_refs[: int(max_block_probes)]
+    reference: dict[tuple[str, float], Any] = {}
+    for sample in samples:
+        for timestep in sample.spec.timesteps:
+            reference[(str(sample.spec.sample_id), float(timestep))] = forward(model, sample, float(timestep))
+    block_rows: list[Mapping[str, Any]] = []
+    for block in block_refs:
+        per_timestep: dict[str, list[float]] = {}
+        for sample in samples:
+            for timestep in sample.spec.timesteps:
+                modified = _probe_block(adapter, model, block.block_id, sample, float(timestep), forward)
+                error = _relative_error(reference[(str(sample.spec.sample_id), float(timestep))], modified)
+                per_timestep.setdefault(str(timestep), []).append(error if error is not None else float("nan"))
+        averaged = {
+            name: sum(value for value in values if math.isfinite(value)) / max(len([value for value in values if math.isfinite(value)]), 1)
+            for name, values in per_timestep.items()
+        }
+        block_rows.append({"block_id": block.block_id, "per_timestep": averaged, "available": bool(averaged), "method": "local_denoising_relative_error", "sample_count": len(samples)})
+    channel_rows = _activation_contribution(adapter, model, samples, forward)
+    return {
+        "tica": {
+            "calibration_digest": manifest.digest(),
+            "timesteps": [str(value) for value in manifest.timesteps()],
+            "sample_ids": [str(sample.spec.sample_id) for sample in samples],
+            "offline_simulation": manifest.provider_name == "fake_wan_cpu",
+        },
+        "tica_block_sensitivity": block_rows,
+        "tica_channel_sensitivity": channel_rows,
+        "evidence": {
+            "status": "cpu_fake_quality_proxy" if manifest.provider_name == "fake_wan_cpu" else "real_wan_structure",
+            "local_output_measurements": len(block_rows) * sum(len(item.spec.timesteps) for item in samples),
+            "activation_measurements": sum(len(item.get("channels", ())) for item in channel_rows),
+        },
+    }
 
 
 EvaluateCandidate = Callable[[Mapping[str, Any], bool, str], Mapping[str, Any]]

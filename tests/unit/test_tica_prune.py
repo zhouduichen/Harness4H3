@@ -6,6 +6,7 @@ from harness4h3.evolution.tica_prune import (
     TICAPruner,
     TICARecipe,
     build_human_tica_source,
+    collect_tica_profile,
     tica_score,
 )
 from harness4h3.sandbox import AlgorithmSandbox
@@ -125,3 +126,17 @@ def test_search_obeys_full_and_interaction_budgets():
     assert result.budget["full_evals"] == 4
     assert result.budget["interaction_evals"] == 1
     assert len(result.candidates) == 4
+
+
+def test_collect_tica_profile_uses_real_fake_execution_for_all_timesteps():
+    from harness4h3.adapters.wan import FakeWanDiTAdapter
+    from harness4h3.evolution.tica_calibration import TICACalibrationManifest
+
+    adapter = FakeWanDiTAdapter(block_count=3, hidden_size=8, ffn_width=8)
+    model = adapter.load_model("fake://baseline")
+    manifest = TICACalibrationManifest.from_fake(hidden_size=8, sample_count=2, timesteps=(0.9, 0.5, 0.1))
+    profile = collect_tica_profile(adapter, model, manifest)
+    assert profile["tica"]["calibration_digest"] == manifest.digest()
+    assert len(profile["tica_block_sensitivity"]) == 3
+    assert set(profile["tica_block_sensitivity"][0]["per_timestep"]) == {"0.9", "0.5", "0.1"}
+    assert all(item["available"] is True for item in profile["tica_channel_sensitivity"])

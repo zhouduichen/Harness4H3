@@ -59,6 +59,9 @@ class AlgorithmValidationRecord:
     scenario_results: tuple[Mapping[str, Any], ...] = ()
     reasons: tuple[str, ...] = ()
     created_at: str = ""
+    calibration_digest: Optional[str] = None
+    search_budget: Mapping[str, Any] = field(default_factory=dict)
+    interaction_evidence: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.algorithm_id.startswith("A") or not self.parent_algorithm_id.startswith("A"):
@@ -142,6 +145,10 @@ class AlgorithmValidator:
             if parent_metrics.get("valid") is not True or child_metrics.get("valid") is not True:
                 scenario["valid"] = False
                 scenario["reasons"] = ["comparison_evidence_invalid"]
+            fairness_reason = _fairness_mismatch(parent_metrics, child_metrics)
+            if fairness_reason:
+                scenario["valid"] = False
+                scenario.setdefault("reasons", []).append(fairness_reason)
             scenario_results.append(scenario)
 
         parent_metrics = _aggregate_metrics([item.get("parent_metrics", {}) for item in scenario_results if item.get("valid") is True])
@@ -161,6 +168,9 @@ class AlgorithmValidator:
         if _quality_regressed(child_metrics, parent_metrics):
             reasons.append("candidate_quality_regressed")
         evidence_level = _evidence_level(parent_metrics, child_metrics)
+        calibration_digest = _shared_value(scenario_results, "calibration_digest")
+        search_budget = _shared_mapping(scenario_results, "search_budget")
+        interaction_evidence = _shared_mapping(scenario_results, "interaction_metrics")
         return AlgorithmValidationRecord(
             algorithm_id=child.algorithm_id,
             parent_algorithm_id=parent.algorithm_id,
@@ -175,6 +185,9 @@ class AlgorithmValidator:
             candidate_metrics=child_metrics,
             scenario_results=tuple(scenario_results),
             reasons=tuple(reasons),
+            calibration_digest=calibration_digest,
+            search_budget=search_budget,
+            interaction_evidence=interaction_evidence,
         )
 
     @staticmethod
@@ -265,6 +278,10 @@ def _aggregate_metrics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "latency_s": None if not all(bool(item.get("available", False)) for item in hardware_records) else _mean_numeric(hardware_records, "latency_s"),
             "peak_memory_gb": None if not all(bool(item.get("available", False)) for item in hardware_records) else _mean_numeric(hardware_records, "peak_memory_gb"),
         }
+    for key in ("calibration_digest", "search_budget", "interaction_metrics"):
+        values = [item.get(key) for item in records if item.get(key) is not None]
+        if values and all(value == values[0] for value in values):
+            result[key] = values[0]
     result["evidence_level"] = _evidence_level(*records)
     return result
 
@@ -272,6 +289,44 @@ def _aggregate_metrics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 def _mean_numeric(records: Sequence[Mapping[str, Any]], key: str) -> Optional[float]:
     values = [float(item[key]) for item in records if isinstance(item.get(key), (int, float)) and not isinstance(item.get(key), bool)]
     return sum(values) / len(values) if values else None
+
+
+def _shared_value(scenarios: Sequence[Mapping[str, Any]], key: str) -> Optional[str]:
+    values = [
+        item.get("candidate_metrics", {}).get(key)
+        for item in scenarios
+        if isinstance(item.get("candidate_metrics"), Mapping)
+        and item.get("candidate_metrics", {}).get(key)
+    ]
+    if values and all(value == values[0] for value in values):
+        return str(values[0])
+    return None
+
+
+def _shared_mapping(scenarios: Sequence[Mapping[str, Any]], key: str) -> dict[str, Any]:
+    values = [
+        item.get("candidate_metrics", {}).get(key)
+        for item in scenarios
+        if isinstance(item.get("candidate_metrics"), Mapping)
+        and isinstance(item.get("candidate_metrics", {}).get(key), Mapping)
+    ]
+    if values and all(value == values[0] for value in values):
+        return dict(values[0])
+    return {}
+
+
+def _fairness_mismatch(parent: Mapping[str, Any], child: Mapping[str, Any]) -> Optional[str]:
+    for key, reason in (
+        ("parent_checkpoint_sha256", "comparison_parent_checkpoint_mismatch"),
+        ("calibration_digest", "comparison_calibration_mismatch"),
+        ("search_budget", "comparison_search_budget_mismatch"),
+    ):
+        left = parent.get(key)
+        right = child.get(key)
+        if left is not None or right is not None:
+            if left != right:
+                return reason
+    return None
 
 
 def _lower_cost(candidate: Mapping[str, Any], parent: Mapping[str, Any]) -> bool:
