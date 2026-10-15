@@ -232,6 +232,7 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         advanced_profiling=config.advanced_profiling,
         algorithm_improvement=config.algorithm_improvement,
         search_space_evolution=config.search_space_evolution,
+        frozen_expanded_search_space=config.frozen_expanded_search_space,
         candidate_screening=config.candidate_screening,
         phase=config.phase,
         tica_prune=config.tica_prune,

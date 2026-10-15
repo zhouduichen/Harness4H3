@@ -160,6 +160,50 @@ def test_kv_selection_and_sparse_runtime_compose_into_one_reduced_kv_path(tmp_pa
     assert child.blocks[0].attn1._harness4h3_sparse_stats["selected_tokens"] < 8
 
 
+def test_head_pruning_and_sparse_runtime_compose_after_reload(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "compose",
+        adapter,
+        parent,
+        {
+            "steps": [
+                {"operator": "prune_attention_heads", "args": {"head_indices": [0], "attention_names": ["attn1", "attn2"]}},
+                {"operator": "sparse_runtime", "args": {"keep_ratio": 0.5, "attention": "attn1"}},
+            ]
+        },
+        tmp_path / "head-sparse",
+    )
+    assert result.status == "success", result.message
+    child = adapter.reload_model(result.child_checkpoint)
+    assert child.blocks[0].attn1.heads == 3
+    with torch.no_grad():
+        output = child.blocks[0].attn1(torch.randn(1, 8, 8))
+    assert tuple(output.shape) == (1, 8, 8)
+    assert child.blocks[0].attn1._harness4h3_sparse_stats["selected_tokens"] < 8
+
+
+def test_layer_pruning_and_sampling_schedule_compose_in_order(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "compose",
+        adapter,
+        parent,
+        {
+            "steps": [
+                {"operator": "prune_layers", "args": {"block_ids": ["block.0"]}},
+                {"operator": "sampling_step_skip", "args": {"target_steps": 4, "strategy": "uniform"}},
+            ]
+        },
+        tmp_path / "layer-sampling",
+    )
+    assert result.status == "success", result.message
+    child = adapter.reload_model(result.child_checkpoint)
+    assert len(child.blocks) == 3
+    assert len(adapter.sampling_steps(child, tuple(range(16, 0, -1)))) == 4
+    assert [item["operator"] for item in child._harness4h3_runtime_operations] == ["sampling_step_skip"]
+
+
 def test_attention_window_rejects_cross_attention_and_sparse_composition(tmp_path):
     adapter, parent = _parent(tmp_path)
     model = adapter.load_model("fake://baseline")

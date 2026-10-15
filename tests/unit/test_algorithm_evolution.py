@@ -291,6 +291,64 @@ def test_provider_agent_receives_compact_pareto_front():
     ]
 
 
+def test_provider_agent_receives_active_search_space_schemas():
+    payloads = []
+
+    def provider(payload):
+        payloads.append(payload)
+        return {
+            "source": "def propose(profile, history):\n    return {'operator': 'kv_token_select', 'args': {'keep_ratio': 0.75, 'score': 'l2_norm'}}\n",
+            "hypothesis": "reduce K/V while preserving Q",
+            "parent_id": "M0000",
+        }
+
+    AlgorithmAgent(provider=provider).generate(
+        "A0001",
+        parent_id="M0000",
+        profile={},
+        history=[],
+        search_space={
+            "version_id": "S0001",
+            "operators": [{"name": "kv_token_select", "argument_schema": {"keep_ratio": "float", "score": "str"}, "execution_domain": "runtime"}],
+        },
+    )
+    assert payloads[0]["search_space"]["version_id"] == "S0001"
+    assert payloads[0]["search_space"]["operators"][0]["name"] == "kv_token_select"
+    assert "implementation_source" not in json.dumps(payloads[0]["search_space"])
+
+
+def test_provider_prompt_exposes_active_multigranular_search_space(monkeypatch):
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps({
+                "source": "def propose(profile, history):\n    return {'operator': 'kv_token_select', 'args': {'keep_ratio': 0.75, 'score': 'l2_norm'}}\n",
+                "hypothesis": "retain full queries and reduce K/V",
+                "parent_id": "M0000",
+            })}}]}).encode()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: (requests.append(json.loads(request.data.decode())) or Response()))
+    provider = build_algorithm_provider("vllm", "test-model", endpoint="http://127.0.0.1:8000/v1/chat/completions")
+    provider({
+        "parent_id": "M0000",
+        "profile": {},
+        "history": [],
+        "skills": [],
+        "search_space": {"operators": [{"name": "kv_token_select", "argument_schema": {"keep_ratio": "float", "score": "str"}}]},
+    })
+    prompt = requests[0]["messages"][1]["content"]
+    assert "search_space['operators']" in prompt
+    assert "KV-token" in prompt
+    assert "do not reduce the choice to only Block/FFN pruning" in prompt
+
+
 def test_provider_agent_compacts_full_memory_artifacts():
     payloads = []
 

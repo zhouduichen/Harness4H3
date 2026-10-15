@@ -75,6 +75,7 @@ class EvolutionLoop:
         advanced_profiling: bool = False,
         algorithm_improvement: bool = False,
         search_space_evolution: bool = False,
+        frozen_expanded_search_space: bool = False,
         candidate_screening: bool = False,
         phase: str = "evolution",
         search_space_manager: Optional[SearchSpaceManager] = None,
@@ -132,6 +133,7 @@ class EvolutionLoop:
         self.advanced_profiling = bool(advanced_profiling)
         self.algorithm_improvement = bool(algorithm_improvement)
         self.search_space_evolution = bool(search_space_evolution)
+        self.frozen_expanded_search_space = bool(frozen_expanded_search_space)
         self.candidate_screening = bool(candidate_screening)
         self.phase = str(phase).strip().lower() or "evolution"
         if self.phase != "evolution":
@@ -150,7 +152,7 @@ class EvolutionLoop:
     def _initialize_evolution_features(self) -> None:
         """Initialize additive features without changing legacy defaults."""
 
-        if not self.search_space_evolution:
+        if not (self.search_space_evolution or self.frozen_expanded_search_space):
             return
         self.search_space_manager = self.search_space_manager or SearchSpaceManager(self.output_root / "search-space")
         self.search_space_version = self.search_space_manager.active
@@ -332,6 +334,7 @@ class EvolutionLoop:
                         history=agent_history,
                         skills=skills,
                         pareto_front=pareto_front,
+                        search_space=self.search_space_version.to_dict() if self.search_space_version is not None else default_search_space().to_dict(),
                         search_choice=search_choice,
                         protocol_mode="tica" if self.tica_prune else "standard",
                     )

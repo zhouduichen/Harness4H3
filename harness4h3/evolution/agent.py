@@ -238,6 +238,7 @@ class AlgorithmAgent:
         history: Sequence[Mapping[str, Any]],
         skills: Sequence[Mapping[str, Any]] = (),
         pareto_front: Sequence[Mapping[str, Any]] = (),
+        search_space: Optional[Mapping[str, Any]] = None,
         search_choice: str = "exploit",
         protocol_mode: str = "standard",
     ) -> AlgorithmCandidate:
@@ -298,6 +299,7 @@ class AlgorithmAgent:
             "history": compact_history,
             "skills": compact_skills,
             "pareto_front": _compact_pareto_front(pareto_front),
+            "search_space": _compact_search_space(search_space or {}),
             "parent_id": parent_id,
             "search_policy": {"choice": search_choice},
             "protocol_mode": str(protocol_mode).strip().lower() or "standard",
@@ -801,6 +803,34 @@ def _compact_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _compact_search_space(search_space: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose active operator schemas without leaking implementation source."""
+
+    compact: dict[str, Any] = {
+        key: search_space[key]
+        for key in ("version_id", "parent_version_id", "constraints")
+        if key in search_space
+    }
+    compact["operators"] = [
+        {
+            field: item[field]
+            for field in (
+                "name",
+                "version",
+                "argument_schema",
+                "granularity",
+                "execution_domain",
+                "constraints",
+                "limitations",
+            )
+            if field in item
+        }
+        for item in search_space.get("operators", [])
+        if isinstance(item, Mapping)
+    ]
+    return compact
+
+
 def _compact_pareto_front(front: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Expose measured front evidence without allowing an unbounded prompt."""
 
@@ -981,11 +1011,14 @@ def build_algorithm_provider(
             "a complete Python function `def propose(profile, history): ...` and return only "
             "a bounded operator/args plan; keep the source body under 500 tokens, never return "
             "a function name or pseudocode. "
-            "Allowed plans are exactly `prune_blocks` with args `{"
-            "block_ids: list[str]}`, `prune_ffn_channels` with args "
-            "`{block_ids: list[str], retained_indices: list[int]}`, or "
-            "`compose` with args `{"
-            "steps: list[2..3] of the two base plans}`. Compose cannot be nested. "
+            "Allowed plans are exactly those whose operator name appears in the supplied "
+            "`search_space['operators']`; read each operator's `argument_schema`, "
+            "`execution_domain`, constraints, and limitations before constructing args. "
+            "The active space includes structural, runtime, sampler, and composite operators, "
+            "so Head, KV-token, Sparse Runtime, Attention Window, Timestep, and Sampling "
+            "plans are legal when their specs are present; do not reduce the choice to only "
+            "Block/FFN pruning. `compose` may contain 2..6 non-nested steps from the active "
+            "space and must preserve their execution order. "
             "The value returned by `propose` must always have exactly the top-level keys "
             "`operator` and `args`, for example `{'operator': 'compose', 'args': "
             "{'steps': [...]}}`. A top-level `{'steps': [...]}` object is invalid; "

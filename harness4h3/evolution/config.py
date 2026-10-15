@@ -30,6 +30,7 @@ class CompressionConfig:
     advanced_profiling: bool = False
     algorithm_improvement: bool = False
     search_space_evolution: bool = False
+    frozen_expanded_search_space: bool = False
     candidate_screening: bool = False
     phase: str = "evolution"
     tica_prune: bool = False
@@ -49,6 +50,8 @@ class CompressionConfig:
             raise CompressionConfigError("sandbox_timeout_s must be positive")
         if not 0.0 <= self.exploit_ratio <= 1.0:
             raise CompressionConfigError("exploit_ratio must be in [0, 1]")
+        if self.search_space_evolution and self.frozen_expanded_search_space:
+            raise CompressionConfigError("search_space_evolution and frozen_expanded_search_space are mutually exclusive")
         if self.phase not in {"evolution", "final_evaluation"}:
             raise CompressionConfigError("phase must be evolution or final_evaluation")
 
@@ -61,7 +64,7 @@ class CompressionConfig:
             raise CompressionConfigError("unable to read compression config: %s" % exc) from exc
         if not isinstance(raw, Mapping):
             raise CompressionConfigError("compression config must be a mapping")
-        allowed = {"backend", "checkpoint", "output_root", "device", "dtype", "local_files_only", "fake", "controller", "evaluator", "memory_enabled", "adapt_search_policy", "sandbox_timeout_s", "exploit_ratio", "seed", "advanced_profiling", "algorithm_improvement", "search_space_evolution", "candidate_screening", "phase", "tica_prune", "tica_calibration_manifest", "tica_validation_manifest", "tica_test_manifest", "tica_recipe"}
+        allowed = {"backend", "checkpoint", "output_root", "device", "dtype", "local_files_only", "fake", "controller", "evaluator", "memory_enabled", "adapt_search_policy", "sandbox_timeout_s", "exploit_ratio", "seed", "advanced_profiling", "algorithm_improvement", "search_space_evolution", "frozen_expanded_search_space", "candidate_screening", "phase", "tica_prune", "tica_calibration_manifest", "tica_validation_manifest", "tica_test_manifest", "tica_recipe"}
         unknown = sorted(set(raw) - allowed)
         if unknown:
             raise CompressionConfigError("unsupported compression config field(s): %s" % ", ".join(unknown))
@@ -108,6 +111,7 @@ class CompressionConfig:
             advanced_profiling=bool(raw.get("advanced_profiling", False)),
             algorithm_improvement=bool(raw.get("algorithm_improvement", False)),
             search_space_evolution=bool(raw.get("search_space_evolution", False)),
+            frozen_expanded_search_space=bool(raw.get("frozen_expanded_search_space", False)),
             candidate_screening=bool(raw.get("candidate_screening", False)),
             phase=str(raw.get("phase", "evolution")).strip().lower() or "evolution",
             tica_prune=bool(raw.get("tica_prune", False)),

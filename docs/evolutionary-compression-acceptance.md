@@ -11,6 +11,8 @@
 - `ModelVariant`：通过 sidecar manifest 区分结构 checkpoint、runtime policy、sampler policy、算法版本和 SearchSpace 版本；runtime-only 变体不填写 structural checkpoint，参数减少固定为 0。
 - Algorithm Discovery：Sandbox 中执行 Agent 的 `search()`，轨迹记录候选集合、排序和选中计划；搜索源码纳入逻辑摘要，递归子代保留父子源码差异。
 - Search-Space Evolution：提案经过 Sandbox、真实 adapter 执行、保存/重载、finite 检查后注册；下一代 Program 读取新版本并能生成新算子计划。执行器通过受限的 `implementation_ref` loader 恢复，不要求为每个新类修改管理器分支。
+- 对照实验：新增 `RSI Fixed Space` 与 `Frozen Expanded Space`；后者固定版本 `S0001`，但下一代实际读取并生成扩展算子候选，用于区分“算子更多”和“空间动态演化”的收益。
+- Provider Agent：初始算法生成请求现在携带当前 SearchSpace 的 operator/schema/约束摘要，提示词不再把候选限制为 Block/FFN；因此真实 Provider 路径也能提出 Head、KV、Sparse、Window、Timestep 和 Sampling 计划。
 
 ## 部分完成 / 有条件完成
 
@@ -24,13 +26,13 @@
 ## 测试证据
 
 ```text
-focused algorithm/runtime tests: 33 passed
-full regression: 1023 passed, 4 skipped
+focused algorithm/runtime tests: 36 passed
+full regression: 1029 passed, 4 skipped
 ```
 
 4 个 skip 分别是未设置真实 Wan checkpoint、CUDA 不可用或 CUDA RNG parity 条件，不是实现失败。
 
-2026-10-16 的四组 CPU Fake RSI 结果和证据路径见
+2026-10-16 的六组 CPU Fake RSI 结果和证据路径见
 [`docs/evolutionary-compression-rsi-20261016.md`](evolutionary-compression-rsi-20261016.md)；2026-10-15 报告保留为历史记录。
 
 ## 真实 Wan 最小命令

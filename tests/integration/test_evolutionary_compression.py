@@ -438,3 +438,36 @@ def test_search_space_extension_requires_recorded_feedback_evidence(tmp_path):
     assert proposals[0].trigger_evidence["ready"] is True
     assert proposals[0].trigger_evidence["evidence_ids"] == ["R0001", "R0002"]
     assert loop.search_space_version.version_id == "S0002"
+
+
+def test_frozen_expanded_search_space_is_consumed_without_evolution(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=5, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    loop = EvolutionLoop(
+        adapter=adapter,
+        parent=parent,
+        output_root=tmp_path / "run",
+        advanced_profiling=True,
+        algorithm_improvement=True,
+        frozen_expanded_search_space=True,
+        memory_enabled=False,
+        adapt_search_policy=False,
+    )
+
+    outcomes = [loop.run_round() for _ in range(3)]
+    assert all(item.status in {"promoted", "rejected"} for item in outcomes)
+    assert loop.search_space_version is not None
+    assert loop.search_space_version.version_id == "S0001"
+    assert "kv_token_select" in {item.name for item in loop.search_space_version.operators}
+    assert not (tmp_path / "run" / "search-space" / "versions" / "S0002.json").exists()
+    for outcome in outcomes:
+        round_dir = tmp_path / "run" / "rounds" / outcome.round_id
+        search_space = json.loads((round_dir / "search-space.json").read_text())
+        assert search_space["version_id"] == "S0001"
+    first_trace = json.loads((tmp_path / "run" / "rounds" / "R0001" / "algorithm-program-trace.json").read_text())
+    candidate_operators = {
+        plan["operator"]
+        for plan in first_trace["decision"]["plans"]
+        if isinstance(plan, dict) and "operator" in plan
+    }
+    assert "kv_token_select" in candidate_operators
