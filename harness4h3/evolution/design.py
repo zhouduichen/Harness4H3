@@ -105,6 +105,7 @@ def build_design_record(
     change_rationale: str = "",
     source_sha256: str | None = None,
     parent_source_sha256: str | None = None,
+    change_taxonomy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the immutable evidence context for one executable algorithm."""
 
@@ -130,6 +131,7 @@ def build_design_record(
         "change_rationale": str(change_rationale),
         "source_sha256": source_sha256,
         "parent_source_sha256": parent_source_sha256,
+        "change_taxonomy": dict(change_taxonomy or {}),
         "plan": dict(plan),
     }
     return {**body, "fingerprint": design_fingerprint(body)}

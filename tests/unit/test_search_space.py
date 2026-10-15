@@ -6,6 +6,7 @@ torch = pytest.importorskip("torch")
 
 from harness4h3.adapters.wan import FakeWanDiTAdapter
 from harness4h3.evolution.agent import AlgorithmAgent
+from harness4h3.evolution.taxonomy import classify_search_space_proposal
 from harness4h3.operators.wan import (
     OperatorSpec,
     SearchSpaceManager,
@@ -159,3 +160,22 @@ def test_agent_generated_rule_is_sandboxed_validated_registered_and_reused(tmp_p
     assert result.structural_change["generated_rule_source_sha256"]
     restored = SearchSpaceManager(tmp_path / "space")
     assert spec.name in restored.registry_for(restored.active, build_wan_compression_registry()).names()
+
+
+def test_generated_rule_is_classified_as_rule_evolution_until_structural_counterexample_exists():
+    active = {
+        "operators": [
+            {"name": "prune_ffn_channels"},
+            {"name": "compose"},
+        ]
+    }
+    result = classify_search_space_proposal(
+        {
+            "name": "agent_rule_low_noise_channel_rank",
+            "trusted_factory_key": "generated_channel_rule",
+        },
+        active,
+    )
+    assert result["change_class"] == "algorithm_rule_evolution"
+    assert result["reachable_by_existing_closure"] is True
+    assert result["evidence_status"] == "delegates_to_existing_structural_operator"

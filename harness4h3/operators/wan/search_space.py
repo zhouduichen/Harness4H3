@@ -106,6 +106,7 @@ class SearchSpaceProposal:
     spec: OperatorSpec
     rationale: str
     evidence_ids: tuple[str, ...] = ()
+    trigger_evidence: Mapping[str, Any] = field(default_factory=dict)
     status: str = "proposed"
     rejection_reason: Optional[str] = None
     validation: Mapping[str, Any] = field(default_factory=dict)
@@ -129,6 +130,7 @@ class SearchSpaceProposal:
             spec=OperatorSpec.from_dict(raw["spec"]),
             rationale=str(raw.get("rationale", "")),
             evidence_ids=tuple(str(item) for item in raw.get("evidence_ids", [])),
+            trigger_evidence=dict(raw.get("trigger_evidence") or {}),
             status=str(raw.get("status", "proposed")),
             rejection_reason=str(raw["rejection_reason"]) if raw.get("rejection_reason") else None,
             validation=dict(raw.get("validation") or {}),
@@ -249,7 +251,14 @@ class SearchSpaceManager:
             return selected
         return self.store.latest() or default_search_space()
 
-    def propose(self, spec: OperatorSpec, rationale: str, evidence_ids: Sequence[str] = ()) -> SearchSpaceProposal:
+    def propose(
+        self,
+        spec: OperatorSpec,
+        rationale: str,
+        evidence_ids: Sequence[str] = (),
+        *,
+        trigger_evidence: Optional[Mapping[str, Any]] = None,
+    ) -> SearchSpaceProposal:
         if spec.name in self.active.operator_names():
             raise ValueError("duplicate_search_space_operator")
         proposal = SearchSpaceProposal(
@@ -258,6 +267,7 @@ class SearchSpaceManager:
             spec=spec,
             rationale=str(rationale),
             evidence_ids=tuple(str(item) for item in evidence_ids),
+            trigger_evidence=dict(trigger_evidence or {}),
         )
         return self.store.write_proposal(proposal)
 
@@ -313,6 +323,7 @@ class SearchSpaceManager:
                 "block_count": int(structure.block_count),
                 "ffn_width": int(structure.ffn_width),
                 "metrics": metrics,
+                "trigger_evidence": dict(proposal.trigger_evidence),
             }
             if threshold is not None:
                 validation["threshold"] = float(threshold)

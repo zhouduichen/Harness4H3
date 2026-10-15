@@ -1,0 +1,221 @@
+"""Reproducible model-level measurements for algorithm comparison."""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import math
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping, Optional
+
+from ..adapters.wan.contracts import CheckpointArtifact, WanModelAdapter, stable_digest
+from ..operators.wan import WanCompressionRegistry
+from ..sandbox.runner import SandboxResult
+
+
+def _first_tensor(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        for item in value.values():
+            found = _first_tensor(item)
+            if found is not None:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            found = _first_tensor(item)
+            if found is not None:
+                return found
+    elif hasattr(value, "detach") and hasattr(value, "shape"):
+        return value
+    return None
+
+
+def _tensor_digest(value: Any) -> str:
+    tensor = _first_tensor(value)
+    if tensor is None:
+        return stable_digest({"type": type(value).__name__, "value": repr(value)})
+    try:
+        import torch
+
+        buffer = io.BytesIO()
+        torch.save(tensor.detach().cpu().contiguous(), buffer)
+        return hashlib.sha256(buffer.getvalue()).hexdigest()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return stable_digest({"shape": list(getattr(tensor, "shape", ())), "dtype": str(getattr(tensor, "dtype", ""))})
+
+
+def _output_metrics(parent_output: Any, child_output: Any) -> Optional[dict[str, Any]]:
+    parent_tensor = _first_tensor(parent_output)
+    child_tensor = _first_tensor(child_output)
+    if parent_tensor is None or child_tensor is None:
+        return None
+    if tuple(parent_tensor.shape) != tuple(child_tensor.shape):
+        return None
+    try:
+        import torch
+
+        parent_flat = parent_tensor.detach().float().reshape(-1)
+        child_flat = child_tensor.detach().float().reshape(-1)
+        delta = child_flat - parent_flat
+        mse = float(torch.mean(delta.square()).item())
+        scale = float(torch.mean(parent_flat.square()).item())
+        normalized_mse = mse / max(scale, 1.0e-12)
+        cosine = float(torch.nn.functional.cosine_similarity(parent_flat.unsqueeze(0), child_flat.unsqueeze(0)).item())
+        if not all(math.isfinite(value) for value in (mse, normalized_mse, cosine)):
+            return None
+        return {
+            "mse": mse,
+            "normalized_mse": normalized_mse,
+            "cosine_similarity": cosine,
+            "parent_output_digest": _tensor_digest(parent_output),
+            "child_output_digest": _tensor_digest(child_output),
+            "shape": list(parent_tensor.shape),
+        }
+    except (RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _checkpoint_bytes(path: str) -> int:
+    root = Path(path)
+    if root.is_file():
+        return int(root.stat().st_size)
+    return int(sum(item.stat().st_size for item in root.rglob("*") if item.is_file()))
+
+
+@dataclass
+class AlgorithmModelEvaluator:
+    """Execute one Sandbox plan against one fixed parent/probe condition."""
+
+    adapter: WanModelAdapter
+    registry: WanCompressionRegistry
+    parent: CheckpointArtifact
+    profile: Mapping[str, Any]
+    output_root: Path
+    seed: int = 7
+
+    def __post_init__(self) -> None:
+        self.output_root = Path(self.output_root)
+        self.output_root.mkdir(parents=True, exist_ok=True)
+        self._parent_model = self.adapter.reload_model(self.parent)
+        self._sample = self.adapter.profile_sample(self._parent_model, int(self.seed))
+        self._parent_output = self.adapter.forward_profile(self._parent_model, self._sample)
+        self._parent_flops = self._estimate_flops(self._parent_model)
+        self._parent_bytes = _checkpoint_bytes(self.parent.path)
+        self._invocations = 0
+
+    @property
+    def input_digest(self) -> str:
+        return _tensor_digest(self._sample)
+
+    def evaluate(self, result: SandboxResult) -> Mapping[str, Any]:
+        started = time.perf_counter()
+        self._invocations += 1
+        if result.plan is None:
+            return self._invalid("algorithm_plan_missing", started, result)
+        plan_digest = stable_digest(result.plan.to_dict())
+        output_dir = self.output_root / ("plan-" + plan_digest)
+        try:
+            compression = self.registry.execute(
+                result.plan.operator,
+                self.adapter,
+                self.parent,
+                result.plan.args,
+                output_dir,
+            )
+            if compression.status != "success" or compression.child_checkpoint is None:
+                return self._invalid(compression.failure_type or "compression_failed", started, result, compression=compression)
+            child_model = self.adapter.reload_model(compression.child_checkpoint)
+            child_structure = self.adapter.inspect(child_model)
+            parent_structure = self.adapter.inspect(self._parent_model)
+            self._assert_finite(child_model)
+            child_output = self.adapter.forward_profile(child_model, self._sample)
+            output = _output_metrics(self._parent_output, child_output)
+            if output is None:
+                return self._invalid("probe_output_unavailable_or_shape_mismatch", started, result, compression=compression)
+            parent_parameters = int(parent_structure.parameter_count)
+            child_parameters = int(child_structure.parameter_count)
+            parameter_reduction = 1.0 - (child_parameters / max(parent_parameters, 1))
+            child_flops = self._estimate_flops(child_model)
+            compute = {
+                "available": self._parent_flops is not None and child_flops is not None,
+                "method": "adapter_structural_estimate" if child_flops is not None else "unavailable",
+                "parent_estimated_flops": self._parent_flops,
+                "child_estimated_flops": child_flops,
+                "reduction_ratio": (1.0 - child_flops / max(self._parent_flops, 1)) if self._parent_flops and child_flops is not None else None,
+            }
+            quality = max(-1.0, min(1.0, float(output["cosine_similarity"]) - float(output["normalized_mse"])))
+            checkpoint_bytes = _checkpoint_bytes(compression.child_checkpoint.path)
+            reduction_score = max(0.0, min(1.0, float(parameter_reduction)))
+            return {
+                "valid": True,
+                "offline_simulation": bool(self.parent.metadata.get("offline_simulation", False)),
+                "evidence_level": "cpu_fake_quality_proxy" if bool(self.parent.metadata.get("offline_simulation", False)) else "real_wan_structure",
+                "evaluation_status": "cpu_fake_algorithm_measurement" if bool(self.parent.metadata.get("offline_simulation", False)) else "real_wan_structure_measurement",
+                "parent_checkpoint_sha256": self.parent.sha256,
+                "child_checkpoint_sha256": compression.child_checkpoint.sha256,
+                "plan_digest": plan_digest,
+                "operator": result.plan.operator,
+                "structural_change": dict(compression.structural_change),
+                "parent_structure": parent_structure.to_dict(),
+                "child_structure": child_structure.to_dict(),
+                "parameter_count": child_parameters,
+                "parent_parameter_count": parent_parameters,
+                "parameter_reduction_ratio": parameter_reduction,
+                "compute_metrics": compute,
+                "estimated_flops": child_flops,
+                "output_metrics": output,
+                "quality_score": quality,
+                "search_score": quality + 0.10 * reduction_score,
+                "checkpoint_size_bytes": checkpoint_bytes,
+                "parent_checkpoint_size_bytes": self._parent_bytes,
+                "checkpoint_size_reduction_ratio": 1.0 - checkpoint_bytes / max(self._parent_bytes, 1),
+                "hardware_metrics": {
+                    "latency_s": None,
+                    "peak_memory_gb": None,
+                    "available": False,
+                    "unavailable_reason": "CPU Fake algorithm evaluator does not measure GPU hardware",
+                },
+                "invocations": {"compression": 1, "forward": 2, "total": 3},
+                "evaluation_cost": {
+                    "elapsed_s": time.perf_counter() - started,
+                    "compression_wall_time_s": float(compression.wall_time_s),
+                    "measurement_invocations": self._invocations,
+                    "input_seed": int(self.seed),
+                    "input_digest": self.input_digest,
+                },
+            }
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            return self._invalid("algorithm_measurement_failed:%s" % exc, started, result)
+
+    def _invalid(self, reason: str, started: float, result: SandboxResult, *, compression: Any = None) -> dict[str, Any]:
+        return {
+            "valid": False,
+            "offline_simulation": bool(self.parent.metadata.get("offline_simulation", False)),
+            "evidence_level": "cpu_fake_structure" if bool(self.parent.metadata.get("offline_simulation", False)) else "real_wan_structure",
+            "evaluation_status": "cpu_fake_algorithm_measurement_failed" if bool(self.parent.metadata.get("offline_simulation", False)) else "real_wan_structure_measurement_failed",
+            "parent_checkpoint_sha256": self.parent.sha256,
+            "plan_digest": stable_digest(result.plan.to_dict()) if result.plan is not None else None,
+            "operator": result.plan.operator if result.plan is not None else None,
+            "failure_reason": str(reason),
+            "structural_change": dict(getattr(compression, "structural_change", {}) or {}),
+            "hardware_metrics": {"latency_s": None, "peak_memory_gb": None, "available": False},
+            "invocations": {"compression": 1 if compression is not None else 0, "forward": 0, "total": self._invocations},
+            "evaluation_cost": {"elapsed_s": time.perf_counter() - started, "input_seed": int(self.seed), "input_digest": self.input_digest},
+        }
+
+    @staticmethod
+    def _assert_finite(model: Any) -> None:
+        for parameter in model.parameters():
+            if not bool(parameter.detach().isfinite().all()):
+                raise ValueError("model_integrity_failed: non-finite parameter")
+
+    def _estimate_flops(self, model: Any) -> Optional[int]:
+        estimator = getattr(self.adapter, "estimate_flops", None)
+        if not callable(estimator):
+            return None
+        value = estimator(model)
+        return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else None
+
+
+__all__ = ["AlgorithmModelEvaluator"]

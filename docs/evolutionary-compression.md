@@ -52,6 +52,21 @@ EvaluationRecord / archive / ExperienceStore
 输出中的 `offline_simulation=true` 只能证明 RSI 机制可执行，不能替代真实 Wan
 的视频质量、延迟或显存证据。
 
+算法级验证不再按 operator 名称使用固定分数。父子算法会在同一参考父
+Checkpoint、固定输入和 seed 下真实执行压缩、重载和 forward，记录参数量、参数压缩比、
+结构/估算 FLOPs、输出 MSE/cosine、Checkpoint 完整性、执行调用次数和成本。Fake 的
+输出误差证据等级为 `cpu_fake_quality_proxy`；GPU latency、peak memory 和视频质量会写成
+`available=false`，不会伪造数值。
+
+搜索空间初始化只加载 `S0001`，不会自动注册新算子。只有在持久化实验记录中出现至少
+两个观察轮次并满足 Pareto 停滞、重复方案或重复失败等信号后，才会生成
+`search-space-feedback.json` 并允许 Agent 提案。提案保存触发证据、验证状态和回退信息。
+
+设计记录中的 `change_taxonomy` 区分 `parameter_search`、
+`algorithm_rule_evolution` 和 `compression_space_extension`。阈值算子和
+`GeneratedChannelRuleOperator` 委托既有 FFN 结构变换，默认只能算算法规则演化；只有
+通过结构反例验证，才可声称实际压缩搜索空间扩展。
+
 搜索空间提案中的 Agent 规则源码不会直接进入模型执行进程：它先经过独立
 Sandbox 生成已有可信算子的计划，再经过 Fake 模型 forward、保存/重载、哈希和
 有限值检查；未通过的提案保持 `rejected`，已注册版本可通过

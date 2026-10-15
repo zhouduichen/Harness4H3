@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 
 from harness4h3.adapters.wan import FakeWanDiTAdapter
 from harness4h3.evolution import EvolutionLoop
+from harness4h3.memory.experience import ExperienceRecord
 from harness4h3.evolution.policy import SearchPolicy
 
 
@@ -292,18 +294,29 @@ def test_evo_compress_features_form_restartable_cpu_fake_pipeline(tmp_path):
     assert first_profile["calibration"]["provider"] == "FakeWanCalibrationProvider"
     assert first_profile["evidence"]["advanced"] is True
     search_space = json.loads((first_dir / "search-space.json").read_text())
-    assert search_space["version_id"] == "S0002"
-    assert "prune_ffn_by_weight_threshold" in {item["name"] for item in search_space["operators"]}
+    assert search_space["version_id"] == "S0001"
+    assert "prune_ffn_by_weight_threshold" not in {item["name"] for item in search_space["operators"]}
+    feedback = json.loads((tmp_path / "run" / "search-space-feedback.json").read_text())
+    assert feedback["ready"] is False
+    assert feedback["observed_rounds"] >= 2
+    assert feedback["evidence_ids"]
+    third_dir = tmp_path / "run" / "rounds" / third.round_id
+    third_search_space = json.loads((third_dir / "search-space.json").read_text())
+    assert third_search_space["version_id"] == "S0001"
+    assert "prune_ffn_by_weight_threshold" not in {item["name"] for item in third_search_space["operators"]}
     screening = json.loads((second_dir / "screening" / "screening.json").read_text())
     assert [item["stage"] for item in screening["results"]] == ["static", "diagnostic", "full"]
     validation = json.loads((second_dir / "algorithm-validation.json").read_text())
     assert validation["parent_algorithm_id"] == "A0001"
-    assert validation["evidence_level"] == "cpu_fake"
+    assert validation["evidence_level"] == "cpu_fake_quality_proxy"
+    assert validation["parent_metrics"]["output_metrics"]["cosine_similarity"] <= 1.0
+    assert validation["candidate_metrics"]["parameter_reduction_ratio"] > 0.0
+    assert validation["candidate_metrics"]["hardware_metrics"]["available"] is False
+    assert validation["scenario_results"][0]["candidate_metrics"]["parent_checkpoint_sha256"] == validation["scenario_results"][0]["parent_metrics"]["parent_checkpoint_sha256"]
     algorithm = json.loads((second_dir / "algorithm.json").read_text())
     assert algorithm["parent_algorithm_id"] == "A0001"
     assert algorithm["parent_source_sha256"] == validation["parent_source_sha256"]
     assert algorithm["validation_status"] in {"validated", "rejected"}
-    third_dir = tmp_path / "run" / "rounds" / third.round_id
     algorithms = [
         json.loads((tmp_path / "run" / "algorithms" / "candidates" / ("A%04d.json" % index)).read_text())
         for index in (1, 2, 3)
@@ -318,6 +331,47 @@ def test_evo_compress_features_form_restartable_cpu_fake_pipeline(tmp_path):
     skills = loop.skill_hub.search(architecture="WanFakeDiT", limit=16)
     assert any(item.get("memory_kind") == "algorithm_skill" for item in skills)
     genes = [json.loads(line) for line in (tmp_path / "run" / "design-genes.jsonl").read_text().splitlines()]
-    assert any(item["gene_id"].startswith("G-SS-") for item in genes)
     assert any(item["gene_id"] == "G-" + first.round_id for item in genes)
     assert any(item["gene_id"] == "G-" + second.round_id for item in genes)
+    assert json.loads((second_dir / "design.json").read_text())["change_taxonomy"]["change_class"] in {"parameter_search", "algorithm_rule_evolution"}
+
+
+def test_search_space_extension_requires_recorded_feedback_evidence(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    loop = EvolutionLoop(adapter=adapter, parent=parent, output_root=tmp_path / "run", search_space_evolution=True)
+    assert loop.search_space_version.version_id == "S0001"
+    assert loop.search_space_manager.store.read_proposals() == ()
+
+    for index in (1, 2):
+        round_id = "R%04d" % index
+        decision = {"status": "failed", "failure_type": "unsupported_compression_capability"}
+        source_uri = str((tmp_path / (round_id + ".json")).resolve())
+        loop.experience_store.append(
+            ExperienceRecord(
+                experience_id=round_id,
+                source_uri=source_uri,
+                source_sha256=hashlib.sha256(source_uri.encode()).hexdigest(),
+                source_kind="compression_round",
+                experiment_id=round_id,
+                parent_model_id="M0000",
+                child_model_id=None,
+                operator="unsupported_operator",
+                operator_args={},
+                training={"algorithm_id": "A%04d" % index},
+                evaluation=None,
+                decision=decision,
+                reward=None,
+                status="failed",
+                provenance={"offline_simulation": True},
+                created_at="",
+            )
+        )
+
+    loop._maybe_evolve_search_space()
+    proposals = loop.search_space_manager.store.read_proposals()
+    assert len(proposals) == 1
+    assert proposals[0].status == "validated"
+    assert proposals[0].trigger_evidence["ready"] is True
+    assert proposals[0].trigger_evidence["evidence_ids"] == ["R0001", "R0002"]
+    assert loop.search_space_version.version_id == "S0002"

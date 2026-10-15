@@ -186,3 +186,16 @@ class WanModelAdapter(Protocol):
 
     def reload_model(self, artifact: CheckpointArtifact) -> Any:
         ...
+
+    # Optional-but-standardized deterministic probe boundary used by the
+    # algorithm-level evaluator.  Real Wan adapters already expose these
+    # methods for profiling; FakeWanDiT implements the same boundary so CPU
+    # evidence follows the production adapter shape.
+    def profile_sample(self, model: Any, seed: int = 7) -> Any:
+        ...
+
+    def forward_profile(self, model: Any, sample: Any) -> Any:
+        ...
+
+    def estimate_flops(self, model: Any) -> Optional[int]:
+        ...

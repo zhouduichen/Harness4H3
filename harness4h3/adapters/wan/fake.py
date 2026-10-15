@@ -282,3 +282,23 @@ class FakeWanDiTAdapter:
                 raise ValueError("checkpoint_reload_failed: digest mismatch")
             model._artifact_sha256 = actual
         return model
+
+    def profile_sample(self, model: FakeWanDiT, seed: int = 7) -> Any:
+        """Create the fixed CPU probe shared by profiling and RSI evaluation."""
+
+        torch, _ = _torch()
+        generator = torch.Generator(device="cpu").manual_seed(int(seed))
+        return torch.randn(2, int(model.hidden_size), generator=generator)
+
+    def forward_profile(self, model: FakeWanDiT, sample: Any) -> Any:
+        torch, _ = _torch()
+        with torch.no_grad():
+            return model(sample)
+
+    def estimate_flops(self, model: FakeWanDiT) -> int:
+        """Return a deterministic structural multiply-add estimate, not hardware latency."""
+
+        hidden = int(model.hidden_size)
+        output = 2 * hidden * hidden
+        blocks = sum(4 * hidden * int(width) for width in model.ffn_widths)
+        return int(output + blocks)
