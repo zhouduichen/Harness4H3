@@ -10,7 +10,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange
 from .attention import prune_attention_module_heads
-from ...operators.wan.runtime_gating import rule_matches, rules_to_dict, validate_timestep_gate_plan
+from ...operators.wan.runtime_gating import normalized_timesteps, rule_matches, rules_to_dict, validate_timestep_gate_plan
 from ...operators.wan.runtime_policy import AttentionWindowPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy, select_sampling_steps
 
 
@@ -555,6 +555,8 @@ class DiffusersWanAdapter:
         torch, _ = _torch_modules()
         parsed = SparseRuntimePolicy.from_mapping(policy)
         transformer = self._transformer(model)
+        if getattr(transformer, "_harness4h3_attention_window_policy", None):
+            raise ValueError("incompatible_runtime_attention_composition: attention_window and sparse_runtime")
         _register_config(transformer, "harness4h3_sparse_runtime", parsed.to_dict())
         transformer._harness4h3_sparse_runtime_policy = parsed.to_dict()
         transformer._harness4h3_sparse_runtime_stats = {"full_tokens": 0, "selected_tokens": 0}
@@ -591,6 +593,8 @@ class DiffusersWanAdapter:
         torch, _ = _torch_modules()
         parsed = AttentionWindowPolicy.from_mapping(policy)
         transformer = self._transformer(model)
+        if getattr(transformer, "_harness4h3_sparse_runtime_policy", None):
+            raise ValueError("incompatible_runtime_attention_composition: sparse_runtime and attention_window")
         _register_config(transformer, "harness4h3_attention_window", parsed.to_dict())
         transformer._harness4h3_attention_window_policy = parsed.to_dict()
         transformer._harness4h3_attention_window_stats = {"query_tokens": 0, "selected_kv_tokens": 0, "windows": 0}
@@ -644,6 +648,25 @@ class DiffusersWanAdapter:
         _register_config(transformer, "harness4h3_sampling_step", parsed.to_dict())
         transformer._harness4h3_sampling_step_policy = parsed.to_dict()
         setattr(model, "_harness4h3_sampling_step_policy", parsed.to_dict())
+        scheduler = getattr(model, "scheduler", None)
+        if scheduler is not None and callable(getattr(scheduler, "set_timesteps", None)) and not hasattr(scheduler, "_harness4h3_sampling_base_set_timesteps"):
+            base_set_timesteps = scheduler.set_timesteps
+
+            def controlled_set_timesteps(scheduler_self: Any, num_inference_steps: Any = None, *args: Any, _base: Any = base_set_timesteps, **kwargs: Any) -> Any:
+                active = getattr(transformer, "_harness4h3_sampling_step_policy", parsed.to_dict())
+                requested = None if num_inference_steps is None else int(num_inference_steps)
+                effective = requested
+                if requested is not None:
+                    effective = min(requested, int(active["target_steps"]))
+                transformer._harness4h3_sampling_step_stats = {
+                    "requested_steps": requested,
+                    "effective_steps": effective,
+                    "strategy": str(active.get("strategy", "uniform")),
+                }
+                return _base(effective, *args, **kwargs)
+
+            scheduler._harness4h3_sampling_base_set_timesteps = base_set_timesteps
+            scheduler.set_timesteps = MethodType(controlled_set_timesteps, scheduler)
         _record_runtime_operation(transformer, "sampling_step_skip", parsed.to_dict())
         return StructuralChange("runtime_sampling_step_skip", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
 
@@ -797,6 +820,7 @@ class DiffusersWanAdapter:
         )
 
     def apply_timestep_block_gating(self, model: Any, rules: Sequence[Mapping[str, Any]]) -> StructuralChange:
+        torch, _ = _torch_modules()
         transformer = self._transformer(model)
         _path, blocks = self._blocks(model)
         block_ids = ["block.%d" % index for index in range(len(blocks))]
@@ -837,11 +861,39 @@ class DiffusersWanAdapter:
             def gated_block_forward(block_self: Any, hidden_states: Any, *args: Any, _block_id: str = block_id, _base: Any = base_block_forward, **kwargs: Any) -> Any:
                 current_timestep = getattr(transformer, "_harness4h3_current_timestep", None)
                 rule = getattr(transformer, "_harness4h3_gate_rules", {}).get(_block_id)
-                if current_timestep is not None and rule is not None and rule_matches(rule, current_timestep):
+                batch_size = int(hidden_states.shape[0]) if getattr(hidden_states, "ndim", 0) >= 1 else 1
+                timesteps = normalized_timesteps(current_timestep, batch_size) if current_timestep is not None else (0.5,) * batch_size
+                skip = tuple(rule is not None and rule_matches(rule, value) for value in timesteps)
+                if rule is not None and all(skip):
+                    # Preserve the public block-call counters while the
+                    # mixed-batch path below executes only active samples.
                     transformer._harness4h3_gate_stats[_block_id]["skipped"] += 1
                     return hidden_states
+                active = tuple(index for index, should_skip in enumerate(skip) if not should_skip)
+                if len(active) == batch_size:
+                    transformer._harness4h3_gate_stats[_block_id]["executed"] += 1
+                    return _base(hidden_states, *args, **kwargs)
+                active_indices = torch.tensor(active, device=hidden_states.device, dtype=torch.long)
+
+                def select_batch(value: Any) -> Any:
+                    if hasattr(value, "shape") and getattr(value, "ndim", 0) > 0 and int(value.shape[0]) == batch_size:
+                        return value.index_select(0, active_indices.to(value.device))
+                    if isinstance(value, tuple):
+                        return tuple(select_batch(item) for item in value)
+                    if isinstance(value, list):
+                        return [select_batch(item) for item in value]
+                    if isinstance(value, Mapping):
+                        return {key: select_batch(item) for key, item in value.items()}
+                    return value
+
+                active_args = tuple(select_batch(item) for item in args)
+                active_kwargs = {key: select_batch(item) for key, item in kwargs.items()}
+                output = _base(hidden_states.index_select(0, active_indices), *active_args, **active_kwargs)
+                restored = hidden_states.clone()
+                restored.index_copy_(0, active_indices, output)
                 transformer._harness4h3_gate_stats[_block_id]["executed"] += 1
-                return _base(hidden_states, *args, **kwargs)
+                transformer._harness4h3_gate_stats[_block_id]["skipped"] += 1
+                return restored
 
             block._harness4h3_gate_base_forward = base_block_forward
             block.forward = MethodType(gated_block_forward, block)

@@ -81,6 +81,28 @@ def test_attention_window_reduces_fake_attention_context(tmp_path):
     assert stats["windows"] == 4
 
 
+def test_attention_window_rejects_cross_attention_and_sparse_composition(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    model = adapter.load_model("fake://baseline")
+    with pytest.raises(ValueError, match="self-attention only"):
+        adapter.apply_attention_window(model, {"window_size": 2, "attention": "all"})
+
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "compose",
+        adapter,
+        parent,
+        {
+            "steps": [
+                {"operator": "sparse_runtime", "args": {"keep_ratio": 0.5, "attention": "attn1"}},
+                {"operator": "attention_window", "args": {"window_size": 2, "attention": "attn1"}},
+            ]
+        },
+        tmp_path / "incompatible",
+    )
+    assert result.status == "failed"
+    assert "incompatible_runtime_attention_composition" in result.message
+
+
 def test_runtime_operation_order_survives_fake_checkpoint_reload(tmp_path):
     adapter = FakeWanDiTAdapter(block_count=3, hidden_size=8, ffn_width=12)
     model = adapter.load_model("fake://baseline")
@@ -121,6 +143,9 @@ def test_diffusers_wan_attention_contract_is_structurally_executable():
 
     model = TinyWan()
     adapter = DiffusersWanAdapter()
+    for block in model.blocks:
+        block.attn1.fuse_projections()
+        block.attn2.fuse_projections()
     before = sum(int(item.numel()) for item in model.parameters())
     change = adapter.prune_attention_heads(model, [0], ("attn1", "attn2"))
     assert change.details["parameter_reduction_ratio"] > 0.0
@@ -132,11 +157,30 @@ def test_diffusers_wan_attention_contract_is_structurally_executable():
         sparse_output = model.blocks[0].attn1(torch.randn(1, 5, 8), None, None, rotary)
     assert tuple(sparse_output.shape) == (1, 5, 8)
     assert model._harness4h3_sparse_runtime_stats["selected_tokens"] < model._harness4h3_sparse_runtime_stats["full_tokens"]
-    adapter.apply_attention_window(model, {"window_size": 2, "attention": "attn1"})
     assert [item["operator"] for item in model.config.harness4h3_runtime_operations] == [
         "prune_tokens",
         "sparse_runtime",
-        "attention_window",
     ]
     output = model(torch.randn(1, 5, 8), torch.tensor([500]), torch.randn(1, 4, 8))
     assert tuple(output.shape) == (1, 5, 8)
+
+    window_model = TinyWan()
+    adapter.apply_attention_window(window_model, {"window_size": 2, "attention": "attn1"})
+    with torch.no_grad():
+        window_output = window_model.blocks[0].attn1(torch.randn(1, 5, 8), None, None, rotary)
+    assert tuple(window_output.shape) == (1, 5, 8)
+    assert window_model._harness4h3_attention_window_stats["selected_kv_tokens"] == 5
+    adapter.apply_timestep_block_gating(
+        model,
+        [{"block_id": "block.0", "min_timestep": 0.0, "max_timestep": 0.3}],
+    )
+    mixed = model(torch.randn(2, 5, 8), torch.tensor([100, 900]), torch.randn(2, 4, 8))
+    assert tuple(mixed.shape) == (2, 5, 8)
+    assert model._harness4h3_gate_stats["block.0"] == {"executed": 1, "skipped": 1}
+    from diffusers import FlowMatchEulerDiscreteScheduler
+
+    model.scheduler = FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=3.0)
+    adapter.apply_sampling_step_policy(model, {"target_steps": 4, "strategy": "uniform"})
+    model.scheduler.set_timesteps(16, device="cpu")
+    assert len(model.scheduler.timesteps) == 4
+    assert model._harness4h3_sampling_step_stats["effective_steps"] == 4

@@ -68,8 +68,8 @@ class AttentionWindowPolicy:
         if not isinstance(value, int) or isinstance(value, bool) or not 1 <= int(value) <= 4096:
             raise ValueError("attention_window.window_size must be an integer in [1, 4096]")
         attention = str(raw.get("attention", "attn1"))
-        if attention not in {"attn1", "self", "all"}:
-            raise ValueError("unsupported attention window target")
+        if attention not in {"attn1", "self"}:
+            raise ValueError("attention window supports self-attention only")
         return cls(int(value), attention)
 
     def to_dict(self) -> dict[str, Any]:

@@ -16,7 +16,7 @@ from .contracts import (
     StructuralChange,
     checkpoint_content_sha256,
 )
-from ...operators.wan.runtime_gating import TimestepGateRule, normalized_timestep, rule_matches, validate_timestep_gate_plan
+from ...operators.wan.runtime_gating import TimestepGateRule, normalized_timesteps, rule_matches, validate_timestep_gate_plan
 from ...operators.wan.runtime_policy import AttentionWindowPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy, select_sampling_steps
 from .attention import prune_attention_module_heads
 
@@ -90,15 +90,12 @@ def _fake_attention_module(hidden_size: int, heads: int, head_dim: int | None = 
             window = getattr(self, "_harness4h3_attention_window_policy", None)
             if window and encoder_hidden_states is None and hidden.ndim >= 3 and hidden.shape[1] > 1:
                 width = int(window["window_size"])
-                radius = max(0, (width - 1) // 2)
                 pieces = []
                 selected = 0
                 for start in range(0, int(hidden.shape[1]), width):
                     stop = min(int(hidden.shape[1]), start + width)
-                    key_start = max(0, start - radius)
-                    key_stop = min(int(hidden.shape[1]), stop + radius)
-                    pieces.append(self._attend(hidden[:, start:stop], hidden[:, key_start:key_stop]))
-                    selected += key_stop - key_start
+                    pieces.append(self._attend(hidden[:, start:stop], hidden[:, start:stop]))
+                    selected += stop - start
                 result = torch.cat(pieces, dim=1)
                 self._harness4h3_window_stats = {"query_tokens": int(hidden.shape[1]), "selected_kv_tokens": int(selected), "windows": len(pieces)}
             else:
@@ -190,27 +187,46 @@ class FakeWanDiT:
         return self.forward(value, timestep=timestep)
 
     def forward(self, value: Any, timestep: Any = None) -> Any:
-        current_timestep = 0.5 if timestep is None else normalized_timestep(timestep)
+        batch_size = int(value.shape[0]) if getattr(value, "ndim", 0) >= 1 else 1
+        current_timesteps = (0.5,) * batch_size if timestep is None else normalized_timesteps(timestep, batch_size)
         rules = {str(item["block_id"]): TimestepGateRule.from_mapping(item) for item in self.runtime_gate_rules}
         token_policy = TokenSparsityPolicy.from_mapping(self._harness4h3_token_sparsity_policy) if self._harness4h3_token_sparsity_policy else None
+
+        def run_block(inputs: Any, block: Any) -> Any:
+            if token_policy is not None and (not token_policy.block_ids or block_id in token_policy.block_ids) and inputs.ndim >= 3 and inputs.shape[1] > 1:
+                count = max(1, min(int(inputs.shape[1]), int(round(float(inputs.shape[1]) * token_policy.keep_ratio))))
+                scores = inputs.detach().float().pow(2).mean(dim=-1)
+                indices = scores.topk(count, dim=1).indices
+                selected = inputs.gather(1, indices.unsqueeze(-1).expand(-1, -1, inputs.shape[-1]))
+                updated = selected + block(selected)
+                result = inputs.clone()
+                result.scatter_(1, indices.unsqueeze(-1).expand_as(updated), updated)
+                self.runtime_token_stats[str(block_id)]["selected"] += int(count * inputs.shape[0])
+                self.runtime_token_stats[str(block_id)]["skipped"] += int((inputs.shape[1] - count) * inputs.shape[0])
+                return result
+            return inputs + block(inputs)
+
         for block_id, block in zip(self.block_ids, self.blocks):
             rule = rules.get(str(block_id))
-            if rule is not None and rule_matches(rule, current_timestep):
+            skip = tuple(rule is not None and rule_matches(rule, current) for current in current_timesteps)
+            if rule is not None and all(skip):
+                # Keep the historical counters as block-call counts; a mixed
+                # batch still exposes the active subset execution below.
                 self.runtime_gate_stats[str(block_id)]["skipped"] += 1
                 continue
-            self.runtime_gate_stats[str(block_id)]["executed"] += 1
-            if token_policy is not None and (not token_policy.block_ids or block_id in token_policy.block_ids) and value.ndim >= 3 and value.shape[1] > 1:
-                count = max(1, min(int(value.shape[1]), int(round(float(value.shape[1]) * token_policy.keep_ratio))))
-                scores = value.detach().float().pow(2).mean(dim=-1)
-                indices = scores.topk(count, dim=1).indices
-                selected = value.gather(1, indices.unsqueeze(-1).expand(-1, -1, value.shape[-1]))
-                updated = selected + block(selected)
-                value = value.clone()
-                value.scatter_(1, indices.unsqueeze(-1).expand_as(updated), updated)
-                self.runtime_token_stats[str(block_id)]["selected"] += int(count)
-                self.runtime_token_stats[str(block_id)]["skipped"] += int(value.shape[1] - count)
+            active = tuple(index for index, should_skip in enumerate(skip) if not should_skip)
+            if len(active) == batch_size:
+                self.runtime_gate_stats[str(block_id)]["executed"] += 1
+                value = run_block(value, block)
             else:
-                value = value + block(value)
+                torch, _ = _torch()
+                active_indices = torch.tensor(active, device=value.device, dtype=torch.long)
+                active_value = value.index_select(0, active_indices)
+                active_value = run_block(active_value, block)
+                value = value.clone()
+                value.index_copy_(0, active_indices, active_value)
+                self.runtime_gate_stats[str(block_id)]["executed"] += 1
+                self.runtime_gate_stats[str(block_id)]["skipped"] += 1
         return self.output(value)
 
     def parameters(self) -> Iterable[Any]:
@@ -427,6 +443,8 @@ class FakeWanDiTAdapter:
 
     def apply_sparse_runtime(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
         parsed = SparseRuntimePolicy.from_mapping(policy)
+        if model._harness4h3_attention_window_policy:
+            raise ValueError("incompatible_runtime_attention_composition: attention_window and sparse_runtime")
         for block in model.blocks:
             if parsed.attention in {"attn1", "self", "all"}:
                 block.attn1._harness4h3_sparse_policy = parsed.to_dict()
@@ -436,8 +454,10 @@ class FakeWanDiTAdapter:
 
     def apply_attention_window(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
         parsed = AttentionWindowPolicy.from_mapping(policy)
+        if model._harness4h3_sparse_runtime_policy:
+            raise ValueError("incompatible_runtime_attention_composition: sparse_runtime and attention_window")
         for block in model.blocks:
-            if parsed.attention in {"attn1", "self", "all"}:
+            if parsed.attention in {"attn1", "self"}:
                 block.attn1._harness4h3_attention_window_policy = parsed.to_dict()
         model._harness4h3_attention_window_policy = parsed.to_dict()
         model._harness4h3_runtime_operations.append({"operator": "attention_window", "args": parsed.to_dict()})

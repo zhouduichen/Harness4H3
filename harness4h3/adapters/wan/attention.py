@@ -99,6 +99,17 @@ def prune_attention_module_heads(attention: Any, removed_heads: Sequence[int]) -
     structural search claim parameter reduction without changing execution.
     """
 
+    # WanAttention can be switched to a fused QKV projection for inference.
+    # Structural head surgery must operate on the projections used by forward;
+    # unfuse first instead of mutating dormant to_q/to_k/to_v modules while
+    # leaving to_qkv untouched.
+    if bool(getattr(attention, "fused_projections", False)):
+        unfuse = getattr(attention, "unfuse_projections", None)
+        if not callable(unfuse):
+            raise ValueError("unsupported_attention_layout: fused projections cannot be unfused")
+        unfuse()
+        if bool(getattr(attention, "fused_projections", False)):
+            raise ValueError("unsupported_attention_layout: fused projections remained active")
     heads = int(getattr(attention, "heads", 0))
     inner_dim = int(getattr(attention, "inner_dim", 0))
     if heads <= 0 or inner_dim <= 0 or inner_dim % heads:

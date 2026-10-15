@@ -62,3 +62,9 @@ normalization, RoPE positions, and output projection. These paths do not claim
 an SVOO/SparseVideo CUDA implementation or GPU speedup without independent
 measurements. Real Wan use requires an explicit cached-input manifest; a
 missing manifest is rejected rather than replaced by random probes.
+
+Sampling-step policies are also installed at the Diffusers scheduler boundary:
+`set_timesteps(n)` uses the persisted target count, so direct pipeline calls
+and evaluator calls execute the reduced denoising loop. Unsupported Attention
+Window + Sparse Runtime composition is rejected until a combined backend is
+implemented.

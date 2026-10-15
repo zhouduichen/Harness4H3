@@ -57,6 +57,18 @@ def test_timestep_gate_does_not_change_parameter_count(tmp_path):
     assert adapter.inspect(child).parameter_count == adapter.inspect(adapter.reload_model(parent)).parameter_count
 
 
+def test_timestep_gate_handles_distinct_timesteps_per_batch_item():
+    adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
+    model = adapter.load_model("fake://baseline")
+    adapter.apply_timestep_block_gating(
+        model,
+        [{"block_id": "block.0", "min_timestep": 0.0, "max_timestep": 0.3}],
+    )
+    output = model(torch.randn(2, 8), timestep=torch.tensor([100, 900]))
+    assert tuple(output.shape) == (2, 8)
+    assert model.runtime_gate_stats["block.0"] == {"executed": 1, "skipped": 1}
+
+
 def test_timestep_gate_rejects_unknown_block_and_invalid_interval(tmp_path):
     adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
     parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
@@ -74,4 +86,3 @@ def test_timestep_gate_rejects_unknown_block_and_invalid_interval(tmp_path):
     )
     assert unknown.status == "failed"
     assert invalid.status == "failed"
-
