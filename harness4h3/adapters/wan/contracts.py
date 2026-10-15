@@ -199,3 +199,9 @@ class WanModelAdapter(Protocol):
 
     def estimate_flops(self, model: Any) -> Optional[int]:
         ...
+
+    def tica_calibration_inputs(self, model: Any, manifest: Any) -> tuple[Any, ...]:
+        ...
+
+    def forward_denoising(self, model: Any, calibration_input: Any, timestep: float) -> Any:
+        ...

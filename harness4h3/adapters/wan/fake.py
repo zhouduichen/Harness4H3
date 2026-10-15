@@ -302,3 +302,45 @@ class FakeWanDiTAdapter:
         output = 2 * hidden * hidden
         blocks = sum(4 * hidden * int(width) for width in model.ffn_widths)
         return int(output + blocks)
+
+    def tica_calibration_inputs(self, model: FakeWanDiT, manifest: Any) -> tuple[Any, ...]:
+        """Create deterministic CPU transformer inputs for TICA replay."""
+
+        from ...evolution.tica_calibration import TICACalibrationInput
+
+        torch, _ = _torch()
+        samples = []
+        for spec in manifest.specs:
+            shape = tuple(int(value) for value in spec.latent_shape)
+            if not shape or shape[-1] != int(model.hidden_size):
+                raise ValueError("unsupported_tica_calibration_input: Fake hidden dimension mismatch")
+            generator = torch.Generator(device="cpu").manual_seed(int(spec.seed))
+            hidden_states = torch.randn(shape, generator=generator, device="cpu")
+            encoder_hidden_states = torch.randn(
+                (shape[0], int(model.hidden_size)), generator=generator, device="cpu"
+            )
+            samples.append(
+                TICACalibrationInput(
+                    spec=spec,
+                    hidden_states=hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    metadata={
+                        "device": "cpu",
+                        "provider": "fake_wan_cpu",
+                        "offline_simulation": True,
+                    },
+                )
+            )
+        return tuple(samples)
+
+    def forward_denoising(self, model: FakeWanDiT, calibration_input: Any, timestep: float) -> Any:
+        """Approximate one denoising transformer prediction at a normalized timestep."""
+
+        torch, _ = _torch()
+        hidden = calibration_input.hidden_states
+        conditioning = calibration_input.encoder_hidden_states
+        if tuple(hidden.shape) != tuple(conditioning.shape):
+            raise ValueError("unsupported_tica_calibration_input: Fake tensor shapes differ")
+        scale = 1.0 + 0.25 * float(timestep)
+        with torch.no_grad():
+            return model(hidden * scale + 0.05 * conditioning)

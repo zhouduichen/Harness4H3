@@ -294,6 +294,70 @@ class DiffusersWanAdapter:
         probe["timestep"] = probe["timestep"].new_full(probe["timestep"].shape, values[bucket])
         return self.forward_profile(model, probe)
 
+    def tica_calibration_inputs(self, model: Any, manifest: Any) -> tuple[Any, ...]:
+        """Load only explicitly cached real Wan transformer inputs.
+
+        TICA deliberately refuses to synthesize a random real-Wan probe. The
+        full pipeline may be used once by an external preparation command to
+        create the cached tensors referenced by the manifest.
+        """
+
+        from ...evolution.tica_calibration import TICACalibrationInput
+
+        torch, _ = _torch_modules()
+        transformer = self._transformer(model)
+        parameter = next(transformer.parameters())
+
+        def load_tensor(path: str | None, label: str) -> Any:
+            if not path or not Path(path).is_file():
+                raise ValueError("unsupported_tica_calibration_input: cached calibration tensor missing: %s" % label)
+            try:
+                value = torch.load(path, map_location=parameter.device, weights_only=True)
+            except TypeError:
+                value = torch.load(path, map_location=parameter.device)
+            if not hasattr(value, "shape"):
+                raise ValueError("unsupported_tica_calibration_input: cached %s is not a tensor" % label)
+            return value.to(device=parameter.device, dtype=parameter.dtype)
+
+        samples = []
+        for spec in manifest.specs:
+            hidden_states = load_tensor(spec.latent_path, "latent")
+            encoder_hidden_states = load_tensor(spec.encoder_hidden_states_path, "encoder_hidden_states")
+            if len(tuple(hidden_states.shape)) != 5 or len(tuple(encoder_hidden_states.shape)) != 3:
+                raise ValueError("unsupported_tica_calibration_input: invalid Wan tensor rank")
+            samples.append(
+                TICACalibrationInput(
+                    spec=spec,
+                    hidden_states=hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    metadata={
+                        "device": str(parameter.device),
+                        "dtype": str(parameter.dtype),
+                        "provider": "cached_real_wan",
+                        "offline_simulation": False,
+                    },
+                )
+            )
+        return tuple(samples)
+
+    def forward_denoising(self, model: Any, calibration_input: Any, timestep: float) -> Any:
+        torch, _ = _torch_modules()
+        hidden_states = calibration_input.hidden_states
+        timestep_tensor = torch.full(
+            (int(hidden_states.shape[0]),),
+            int(round(float(timestep) * 1000.0)),
+            device=hidden_states.device,
+            dtype=torch.long,
+        )
+        return self.forward_profile(
+            model,
+            {
+                "hidden_states": hidden_states,
+                "timestep": timestep_tensor,
+                "encoder_hidden_states": calibration_input.encoder_hidden_states,
+            },
+        )
+
     def probe_block_removal(self, model: Any, block_id: str, sample: Any, forward_fn: Any) -> Any:
         """Probe one block in-place to avoid 30 full 1.3B deep copies."""
 
