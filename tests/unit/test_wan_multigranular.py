@@ -23,6 +23,7 @@ def _parent(tmp_path):
         ("prune_heads", {"head_indices": [0]}),
         ("prune_tokens", {"keep_ratio": 0.5}),
         ("sparse_runtime", {"keep_ratio": 0.5, "attention": "attn1"}),
+        ("attention_window", {"window_size": 3, "attention": "attn1"}),
         ("sampling_step_skip", {"target_steps": 4}),
     ),
 )
@@ -62,6 +63,22 @@ def test_sampling_schedule_is_executed_by_adapter(tmp_path):
     assert len(selected) == 4
     assert selected[0] == 16
     assert selected[-1] == 1
+
+
+def test_attention_window_reduces_fake_attention_context(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "attention_window", adapter, parent, {"window_size": 2, "attention": "attn1"}, tmp_path / "window"
+    )
+    assert result.status == "success", result.message
+    child = adapter.reload_model(result.child_checkpoint)
+    hidden = torch.randn(1, 7, 8)
+    with torch.no_grad():
+        child.blocks[0].attn1(hidden)
+    stats = child.blocks[0].attn1._harness4h3_window_stats
+    assert stats["query_tokens"] == 7
+    assert stats["selected_kv_tokens"] < 7 * 7
+    assert stats["windows"] == 4
 
 
 def test_runtime_operation_order_survives_fake_checkpoint_reload(tmp_path):
@@ -110,9 +127,16 @@ def test_diffusers_wan_attention_contract_is_structurally_executable():
     assert sum(int(item.numel()) for item in model.parameters()) < before
     adapter.apply_token_sparsity(model, {"keep_ratio": 0.5})
     adapter.apply_sparse_runtime(model, {"keep_ratio": 0.5, "attention": "attn1"})
+    rotary = (torch.ones(1, 5, 1, 2), torch.zeros(1, 5, 1, 2))
+    with torch.no_grad():
+        sparse_output = model.blocks[0].attn1(torch.randn(1, 5, 8), None, None, rotary)
+    assert tuple(sparse_output.shape) == (1, 5, 8)
+    assert model._harness4h3_sparse_runtime_stats["selected_tokens"] < model._harness4h3_sparse_runtime_stats["full_tokens"]
+    adapter.apply_attention_window(model, {"window_size": 2, "attention": "attn1"})
     assert [item["operator"] for item in model.config.harness4h3_runtime_operations] == [
         "prune_tokens",
         "sparse_runtime",
+        "attention_window",
     ]
     output = model(torch.randn(1, 5, 8), torch.tensor([500]), torch.randn(1, 4, 8))
     assert tuple(output.shape) == (1, 5, 8)

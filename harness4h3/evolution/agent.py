@@ -143,6 +143,8 @@ def _search_program_suffix(algorithm_id: str, *, exploration: bool = False) -> s
         "        add({'operator': 'prune_tokens', 'args': {'keep_ratio': 0.75}})\n"
         "    if 'sparse_runtime' in names:\n"
         "        add({'operator': 'sparse_runtime', 'args': {'keep_ratio': 0.75, 'attention': 'attn1'}})\n"
+        "    if 'attention_window' in names:\n"
+        "        add({'operator': 'attention_window', 'args': {'window_size': 32, 'attention': 'attn1'}})\n"
         "    if 'sampling_step_skip' in names:\n"
         "        add({'operator': 'sampling_step_skip', 'args': {'target_steps': 8}})\n"
         "    if ordered and 'prune_attention_heads' in names and 'prune_tokens' in names and 'sparse_runtime' in names:\n"
@@ -179,6 +181,32 @@ def _ensure_search_program(source: str, algorithm_id: str, *, exploration: bool 
     if "def search(" in source:
         return source
     return source + _search_program_suffix(algorithm_id, exploration=exploration)
+
+
+def _revise_search_program(source: str, algorithm_id: str) -> str:
+    """Make deterministic improvements change executable search behavior too."""
+
+    if "def search(" not in source:
+        return source
+    try:
+        revision = int(str(algorithm_id).lstrip("A"))
+    except (TypeError, ValueError):
+        revision = 1
+    parent_name = "_search_parent_%d" % revision
+    revision_name = "_search_revision_%d" % revision
+    marker = "# algorithm-search-revision-%d" % revision
+    if marker in source:
+        return source
+    return source + (
+        "\n\n%s\n"
+        "%s = search\n"
+        "%s = %d\n"
+        "def search(profile, history, state, search_space):\n"
+        "    decision = %s(profile, history, state, search_space)\n"
+        "    if %s %% 2 == 0 and isinstance(decision, dict) and isinstance(decision.get('rank'), list):\n"
+        "        decision['rank'] = decision['rank'][::-1]\n"
+        "    return decision\n"
+    ) % (marker, parent_name, revision_name, revision, parent_name, revision_name)
 
 
 @dataclass(frozen=True)
@@ -317,6 +345,7 @@ class AlgorithmAgent:
                 algorithm_id,
                 exploration=not any("quality" in item.lower() or "regression" in item.lower() for item in feedback),
             )
+            source = _revise_search_program(source, algorithm_id)
             return AlgorithmCandidate.from_source(
                 algorithm_id,
                 source,

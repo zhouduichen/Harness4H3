@@ -151,8 +151,10 @@ class AlgorithmValidator:
                 continue
             scenario["valid"] = True
             scenario["evaluation_mode"] = "complete_search" if complete_search is not None else "single_plan"
-            scenario["parent_plan"] = parent_result.plan.to_dict()
-            scenario["candidate_plan"] = child_result.plan.to_dict()
+            parent_selected_plan = parent_metrics.get("selected_plan") if isinstance(parent_metrics.get("selected_plan"), Mapping) else None
+            candidate_selected_plan = child_metrics.get("selected_plan") if isinstance(child_metrics.get("selected_plan"), Mapping) else None
+            scenario["parent_plan"] = dict(parent_selected_plan or parent_result.plan.to_dict())
+            scenario["candidate_plan"] = dict(candidate_selected_plan or child_result.plan.to_dict())
             scenario["parent_metrics"] = parent_metrics
             scenario["candidate_metrics"] = child_metrics
             if parent_metrics.get("valid") is not True or child_metrics.get("valid") is not True:
@@ -300,11 +302,17 @@ def _aggregate_metrics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             result[key] = values[0]
     search_records = [item.get("algorithm_search") for item in records if isinstance(item.get("algorithm_search"), Mapping)]
     if search_records:
+        candidate_counts = [
+            int(item.get("candidate_count", len(item.get("candidates", ()))))
+            for item in search_records
+            if isinstance(item.get("candidate_count", len(item.get("candidates", ()))), (int, float))
+        ]
         result["algorithm_search"] = {
-            "protocol": "tica_pruner_full_bounded_search",
+            "protocol": str(search_records[0].get("protocol", "tica_pruner_full_bounded_search")),
             "complete": all(bool(item.get("complete")) for item in search_records),
             "scenario_count": len(search_records),
-            "candidate_counts": [len(item.get("candidates", ())) for item in search_records],
+            "candidate_counts": candidate_counts,
+            "evaluated_candidate_counts": [int(item.get("evaluated_candidate_count", 0)) for item in search_records],
             "selected_plan_digests": [item.get("selected_plan_digest") for item in search_records],
             "budgets": [dict(item.get("budget") or {}) for item in search_records],
         }

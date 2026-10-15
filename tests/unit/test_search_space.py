@@ -264,3 +264,6 @@ def test_agent_timestep_gate_extension_is_validated_and_enters_active_registry(t
     gate_plan = next(item for item in program.value["candidates"] if item["operator"] == "timestep_block_gate")
     normalized = CompressionPlan.from_mapping(gate_plan, operator_specs={item.name: item.to_dict() for item in version.operators})
     assert normalized.operator == "timestep_block_gate"
+    window_plan = next(item for item in program.value["candidates"] if item["operator"] == "attention_window")
+    window = CompressionPlan.from_mapping(window_plan, operator_specs={item.name: item.to_dict() for item in version.operators})
+    assert window.operator == "attention_window"

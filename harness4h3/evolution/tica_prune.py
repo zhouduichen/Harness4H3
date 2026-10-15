@@ -855,6 +855,16 @@ def _run_algorithm_search_program(
     raw_candidates = result.value.get("candidates")
     if not isinstance(raw_candidates, list) or not raw_candidates:
         raise ValueError("algorithm_search_output_invalid: candidates must be a non-empty list")
+    raw_budget = state.get("budget") if isinstance(state, Mapping) else None
+    # Legacy TICA states carry only fast/full/interaction limits.  Keep the
+    # source-controlled candidate budget bounded while leaving room for the
+    # active multi-granular registry (which can expose more than eight valid
+    # families) before full-evaluation limits do the expensive pruning.
+    max_candidates = raw_budget.get("max_candidates", 16) if isinstance(raw_budget, Mapping) else 16
+    if isinstance(max_candidates, bool) or not isinstance(max_candidates, int) or not 1 <= int(max_candidates) <= 64:
+        raise ValueError("algorithm_search_output_invalid: max_candidates budget is invalid")
+    if len(raw_candidates) > int(max_candidates):
+        raise ValueError("algorithm_search_budget_exceeded: candidates exceed max_candidates")
     operator_specs = _operator_specs_from_search_space(search_space)
     plans: list[Mapping[str, Any]] = []
     seen: set[str] = set()

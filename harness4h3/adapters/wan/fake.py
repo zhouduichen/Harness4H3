@@ -17,7 +17,7 @@ from .contracts import (
     checkpoint_content_sha256,
 )
 from ...operators.wan.runtime_gating import TimestepGateRule, normalized_timestep, rule_matches, validate_timestep_gate_plan
-from ...operators.wan.runtime_policy import SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy, select_sampling_steps
+from ...operators.wan.runtime_policy import AttentionWindowPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy, select_sampling_steps
 from .attention import prune_attention_module_heads
 
 
@@ -64,6 +64,18 @@ def _fake_attention_module(hidden_size: int, heads: int, head_dim: int | None = 
             self.to_v = nn.Linear(hidden_size, self.inner_dim)
             self.to_out = nn.ModuleList([nn.Linear(self.inner_dim, hidden_size), nn.Dropout(0.0)])
 
+        def _attend(self, query: Any, context: Any) -> Any:
+            heads_now = int(self.heads)
+            dim = int(self.inner_dim) // heads_now
+            query_tokens = int(query.shape[1])
+            query = self.to_q(query).reshape(query.shape[0], query.shape[1], heads_now, dim).transpose(1, 2)
+            key = self.to_k(context).reshape(context.shape[0], context.shape[1], heads_now, dim).transpose(1, 2)
+            val = self.to_v(context).reshape(context.shape[0], context.shape[1], heads_now, dim).transpose(1, 2)
+            scores = torch.matmul(query, key.transpose(-2, -1)) / max(dim, 1) ** 0.5
+            weights = torch.softmax(scores, dim=-1)
+            result = torch.matmul(weights, val).transpose(1, 2).reshape(query.shape[0], query_tokens, heads_now * dim)
+            return self.to_out[0](result)
+
         def forward(self, value: Any, encoder_hidden_states: Any = None, **kwargs: Any) -> Any:
             squeeze = value.ndim == 2
             hidden = value.unsqueeze(1) if squeeze else value
@@ -75,15 +87,22 @@ def _fake_attention_module(hidden_size: int, heads: int, head_dim: int | None = 
                 indices = scores.topk(keep, dim=1).indices
                 context = context.gather(1, indices.unsqueeze(-1).expand(-1, -1, context.shape[-1]))
                 self._harness4h3_sparse_stats = {"full_tokens": int(hidden.shape[1]), "selected_tokens": int(keep)}
-            heads_now = int(self.heads)
-            dim = int(self.inner_dim) // heads_now
-            query = self.to_q(hidden).reshape(hidden.shape[0], hidden.shape[1], heads_now, dim).transpose(1, 2)
-            key = self.to_k(context).reshape(context.shape[0], context.shape[1], heads_now, dim).transpose(1, 2)
-            val = self.to_v(context).reshape(context.shape[0], context.shape[1], heads_now, dim).transpose(1, 2)
-            scores = torch.matmul(query, key.transpose(-2, -1)) / max(dim, 1) ** 0.5
-            weights = torch.softmax(scores, dim=-1)
-            result = torch.matmul(weights, val).transpose(1, 2).reshape(hidden.shape[0], hidden.shape[1], heads_now * dim)
-            result = self.to_out[0](result)
+            window = getattr(self, "_harness4h3_attention_window_policy", None)
+            if window and encoder_hidden_states is None and hidden.ndim >= 3 and hidden.shape[1] > 1:
+                width = int(window["window_size"])
+                radius = max(0, (width - 1) // 2)
+                pieces = []
+                selected = 0
+                for start in range(0, int(hidden.shape[1]), width):
+                    stop = min(int(hidden.shape[1]), start + width)
+                    key_start = max(0, start - radius)
+                    key_stop = min(int(hidden.shape[1]), stop + radius)
+                    pieces.append(self._attend(hidden[:, start:stop], hidden[:, key_start:key_stop]))
+                    selected += key_stop - key_start
+                result = torch.cat(pieces, dim=1)
+                self._harness4h3_window_stats = {"query_tokens": int(hidden.shape[1]), "selected_kv_tokens": int(selected), "windows": len(pieces)}
+            else:
+                result = self._attend(hidden, context)
             return result.squeeze(1) if squeeze else result
 
     return Attention()
@@ -130,7 +149,7 @@ def _copy_module(module: Any) -> Any:
 class FakeWanDiT:
     """Small Torch module kept separate so the adapter owns structure policy."""
 
-    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None, num_heads: int = 4, attention_head_dim: int | None = None, runtime_gate_rules: Sequence[Mapping[str, Any]] | None = None, token_sparsity_policy: Mapping[str, Any] | None = None, sparse_runtime_policy: Mapping[str, Any] | None = None, sampling_step_policy: Mapping[str, Any] | None = None, runtime_operations: Sequence[Mapping[str, Any]] | None = None) -> None:
+    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None, num_heads: int = 4, attention_head_dim: int | None = None, runtime_gate_rules: Sequence[Mapping[str, Any]] | None = None, token_sparsity_policy: Mapping[str, Any] | None = None, sparse_runtime_policy: Mapping[str, Any] | None = None, attention_window_policy: Mapping[str, Any] | None = None, sampling_step_policy: Mapping[str, Any] | None = None, runtime_operations: Sequence[Mapping[str, Any]] | None = None) -> None:
         _, nn = _torch()
         widths = list(ffn_widths or [ffn_width] * block_count)
         if len(widths) != block_count:
@@ -152,11 +171,15 @@ class FakeWanDiT:
         self.runtime_gate_rules = [dict(item) for item in (runtime_gate_rules or [])]
         self._harness4h3_token_sparsity_policy = dict(token_sparsity_policy or {})
         self._harness4h3_sparse_runtime_policy = dict(sparse_runtime_policy or {})
+        self._harness4h3_attention_window_policy = dict(attention_window_policy or {})
         self._harness4h3_sampling_step_policy = dict(sampling_step_policy or {})
         self._harness4h3_runtime_operations = [dict(item) for item in (runtime_operations or [])]
         if self._harness4h3_sparse_runtime_policy:
             for block in self.blocks:
                 block.attn1._harness4h3_sparse_policy = dict(self._harness4h3_sparse_runtime_policy)
+        if self._harness4h3_attention_window_policy:
+            for block in self.blocks:
+                block.attn1._harness4h3_attention_window_policy = dict(self._harness4h3_attention_window_policy)
         self.runtime_gate_stats = {
             str(block_id): {"executed": 0, "skipped": 0}
             for block_id in self.block_ids
@@ -258,6 +281,7 @@ class FakeWanDiTAdapter:
                 runtime_gate_rules=config.get("runtime_gate_rules", []),
                 token_sparsity_policy=config.get("token_sparsity_policy", {}),
                 sparse_runtime_policy=config.get("sparse_runtime_policy", {}),
+                attention_window_policy=config.get("attention_window_policy", {}),
                 sampling_step_policy=config.get("sampling_step_policy", {}),
                 runtime_operations=config.get("runtime_operations", []),
             )
@@ -291,6 +315,7 @@ class FakeWanDiTAdapter:
                 "attention_head_dim": int(model.blocks[0].attn1.inner_dim // model.blocks[0].attn1.heads),
                 "token_sparsity_policy": dict(model._harness4h3_token_sparsity_policy),
                 "sparse_runtime_policy": dict(model._harness4h3_sparse_runtime_policy),
+                "attention_window_policy": dict(model._harness4h3_attention_window_policy),
                 "sampling_step_policy": dict(model._harness4h3_sampling_step_policy),
                 "runtime_operations": [dict(item) for item in model._harness4h3_runtime_operations],
             },
@@ -409,6 +434,15 @@ class FakeWanDiTAdapter:
         model._harness4h3_runtime_operations.append({"operator": "sparse_runtime", "args": parsed.to_dict()})
         return StructuralChange("runtime_sparse_attention", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
 
+    def apply_attention_window(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
+        parsed = AttentionWindowPolicy.from_mapping(policy)
+        for block in model.blocks:
+            if parsed.attention in {"attn1", "self", "all"}:
+                block.attn1._harness4h3_attention_window_policy = parsed.to_dict()
+        model._harness4h3_attention_window_policy = parsed.to_dict()
+        model._harness4h3_runtime_operations.append({"operator": "attention_window", "args": parsed.to_dict()})
+        return StructuralChange("runtime_attention_window", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
+
     def apply_sampling_step_policy(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
         parsed = SamplingStepPolicy.from_mapping(policy)
         model._harness4h3_sampling_step_policy = parsed.to_dict()
@@ -440,6 +474,7 @@ class FakeWanDiTAdapter:
             "runtime_gate_rules": list(model.runtime_gate_rules),
             "token_sparsity_policy": dict(model._harness4h3_token_sparsity_policy),
             "sparse_runtime_policy": dict(model._harness4h3_sparse_runtime_policy),
+            "attention_window_policy": dict(model._harness4h3_attention_window_policy),
             "sampling_step_policy": dict(model._harness4h3_sampling_step_policy),
             "runtime_operations": [dict(item) for item in model._harness4h3_runtime_operations],
         }
@@ -489,11 +524,14 @@ class FakeWanDiTAdapter:
         estimate = float(output + blocks + attention)
         token_policy = getattr(model, "_harness4h3_token_sparsity_policy", {})
         sparse_policy = getattr(model, "_harness4h3_sparse_runtime_policy", {})
+        window_policy = getattr(model, "_harness4h3_attention_window_policy", {})
         sampling_policy = getattr(model, "_harness4h3_sampling_step_policy", {})
         if token_policy:
             estimate *= float(token_policy.get("keep_ratio", 1.0))
         if sparse_policy:
             estimate *= float(sparse_policy.get("keep_ratio", 1.0))
+        if window_policy:
+            estimate *= min(1.0, float(window_policy.get("window_size", 64)) / 64.0)
         if sampling_policy:
             estimate *= float(sampling_policy.get("target_steps", 16)) / 16.0
         return int(round(estimate))

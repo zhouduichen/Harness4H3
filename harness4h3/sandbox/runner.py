@@ -45,6 +45,7 @@ class CompressionPlan:
         "prune_heads",
         "prune_tokens",
         "sparse_runtime",
+        "attention_window",
         "sampling_step_skip",
         "timestep_block_gate",
         "compose",
@@ -57,6 +58,7 @@ class CompressionPlan:
         "prune_heads",
         "prune_tokens",
         "sparse_runtime",
+        "attention_window",
         "sampling_step_skip",
         "timestep_block_gate",
     })
@@ -138,6 +140,13 @@ class CompressionPlan:
                 raise ValueError("algorithm_output_invalid: keep_ratio must be in (0, 1]")
             if "block_ids" in args and (not isinstance(args["block_ids"], list) or not all(isinstance(item, str) for item in args["block_ids"])):
                 raise ValueError("algorithm_output_invalid: block_ids must contain strings")
+            if "attention" in args and not isinstance(args["attention"], str):
+                raise ValueError("algorithm_output_invalid: attention must be a string")
+        if operator == "attention_window":
+            if set(args) not in ({"window_size"}, {"window_size", "attention"}):
+                raise ValueError("algorithm_output_invalid: attention_window has unsupported arguments")
+            if not isinstance(args["window_size"], int) or isinstance(args["window_size"], bool) or not 1 <= int(args["window_size"]) <= 4096:
+                raise ValueError("algorithm_output_invalid: window_size must be in [1, 4096]")
             if "attention" in args and not isinstance(args["attention"], str):
                 raise ValueError("algorithm_output_invalid: attention must be a string")
         if operator == "sampling_step_skip":

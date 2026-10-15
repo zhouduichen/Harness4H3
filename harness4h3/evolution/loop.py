@@ -426,17 +426,37 @@ class EvolutionLoop:
                                 "depth": 1,
                                 "parent_state_id": "uncompressed",
                                 "proposed_plan": sandbox_result.plan.to_dict(),
-                                "budget": {"max_candidates": 8},
+                                "budget": {"max_candidates": 16},
                                 "measured_candidates": [],
                                 "frontier": [],
                             },
                             search_space_payload,
                         )
-                        selected_raw = decision.plans[decision.rank[0]]
-                        selected_plan = SandboxCompressionPlan.from_mapping(
-                            selected_raw,
-                            operator_specs=self.sandbox.operator_specs,
-                        )
+                        measured_search: Mapping[str, Any] | None = None
+                        if self.algorithm_improvement:
+                            seed_value = profile_payload.get("provenance", {}).get("seed", 7) if isinstance(profile_payload.get("provenance"), Mapping) else 7
+                            measured_search = self._complete_standard_algorithm_search(
+                                source=algorithm.source,
+                                proposed_result=sandbox_result,
+                                profile=profile_payload,
+                                history=agent_history,
+                                parent=parent_artifact,
+                                output_root=round_dir / "algorithm-search",
+                                seed=int(seed_value or 7),
+                                search_budget={
+                                    "max_candidates": 16,
+                                    "max_full_evals": 8,
+                                    "max_interaction_evals": 0,
+                                    "max_search_depth": 2,
+                                },
+                                search_space_payload=search_space_payload,
+                            )
+                            selected_raw = measured_search.get("selected_plan")
+                            if not isinstance(selected_raw, Mapping):
+                                raise ValueError("standard_algorithm_search_selected_plan_missing")
+                        else:
+                            selected_raw = decision.plans[decision.rank[0]]
+                        selected_plan = SandboxCompressionPlan.from_mapping(selected_raw, operator_specs=self.sandbox.operator_specs)
                         trace_payload = {
                             "algorithm_id": algorithm.algorithm_id,
                             "algorithm_source_sha256": algorithm.source_sha256,
@@ -455,6 +475,12 @@ class EvolutionLoop:
                             "selected_rank_index": int(decision.rank[0]),
                             "search_space_version": search_space_payload.get("version_id"),
                         }
+                        if measured_search is not None:
+                            trace_payload = {
+                                **trace_payload,
+                                "measured_search": dict(measured_search.get("algorithm_search") or {}),
+                                "measured_selected_plan": dict(measured_search.get("selected_plan") or {}),
+                            }
                         _write_json(algorithm_trace_path, trace_payload)
                     except (RuntimeError, TypeError, ValueError) as exc:
                         return self._finish_failure(
@@ -477,6 +503,7 @@ class EvolutionLoop:
                         "algorithm_program_search": True,
                         "algorithm_program_trace": str(algorithm_trace_path),
                         "algorithm_program_selected_plan_digest": stable_digest(selected_plan.to_dict()),
+                        "algorithm_program_measured_search": dict((trace_payload or {}).get("measured_search") or {}),
                     },
                 )
                 _write_json(sandbox_path, _sandbox_dict(sandbox_result))
@@ -1467,9 +1494,8 @@ class EvolutionLoop:
                 algorithm_history=algorithm_history,
             )
 
-        evaluators: dict[str, AlgorithmModelEvaluator] = {}
         evaluator_recipe = recipe or self.tica_recipe
-        algorithm_search_cache: dict[str, tuple[SandboxResult, Mapping[str, Any]]] = {}
+        algorithm_search_cache: dict[str, Mapping[str, Any]] = {}
 
         def evaluate(result: SandboxResult, scenario_profile: Mapping[str, Any]) -> Mapping[str, Any]:
             split = str(scenario_profile.get("evaluation_split", "validation")).lower()
@@ -1489,8 +1515,6 @@ class EvolutionLoop:
                     output_root / ("algorithm-" + result.source_sha256[:16]) / digest,
                     evaluator_recipe=evaluator_recipe,
                 )
-            effective_result = result
-            algorithm_search: Mapping[str, Any] | None = None
             source = (algorithm_sources or {}).get(result.source_sha256)
             if source is not None:
                 validated = validate_source(source)
@@ -1507,66 +1531,204 @@ class EvolutionLoop:
                     })
                     cached = algorithm_search_cache.get(search_key)
                     if cached is None:
-                        decision = _run_algorithm_search_program(
-                            source,
-                            self.sandbox,
-                            scenario_profile,
-                            algorithm_history,
-                            {
-                                "depth": 1,
-                                "parent_state_id": "uncompressed",
-                                "proposed_plan": result.plan.to_dict() if result.plan is not None else None,
-                                "budget": {"max_candidates": 8},
-                                "measured_candidates": [],
-                                "frontier": [],
+                        seed_value = scenario_profile.get("provenance", {}).get("seed", 7) if isinstance(scenario_profile.get("provenance"), Mapping) else 7
+                        cached = self._complete_standard_algorithm_search(
+                            source=source,
+                            proposed_result=result,
+                            profile=scenario_profile,
+                            history=algorithm_history,
+                            parent=parent,
+                            output_root=output_root / ("standard-" + result.source_sha256[:16]) / digest,
+                            seed=int(seed_value or 7),
+                            search_budget={
+                                "max_candidates": 16,
+                                "max_full_evals": 8,
+                                "max_interaction_evals": 0,
+                                "max_search_depth": 2,
                             },
-                            search_space_payload,
+                            search_space_payload=search_space_payload,
                         )
-                        selected = SandboxCompressionPlan.from_mapping(
-                            decision.plans[decision.rank[0]],
-                            operator_specs=self.sandbox.operator_specs,
-                        )
-                        effective_result = SandboxResult(
-                            "success",
-                            result.source_sha256,
-                            selected,
-                            metadata={**dict(result.metadata), "algorithm_program_search": True},
-                        )
-                        algorithm_search = {
-                            "complete": True,
-                            "source_sha256": decision.source_sha256,
-                            "payload_sha256": decision.payload_sha256,
-                            "candidate_count": len(decision.plans),
-                            "candidate_plans": list(decision.plans),
-                            "rank": list(decision.rank),
-                            "selected_plan_digest": stable_digest(selected.to_dict()),
-                            "stop": decision.stop,
+                        cached = {
+                            **dict(cached),
                             "search_space_version": search_space_payload.get("version_id"),
                         }
-                        algorithm_search_cache[search_key] = (effective_result, algorithm_search)
-                    else:
-                        effective_result, algorithm_search = cached
-            evaluator_key = (digest, result.source_sha256)
-            evaluator = evaluators.get(evaluator_key)
-            if evaluator is None:
-                seed_value = scenario_profile.get("provenance", {}).get("seed", 7) if isinstance(scenario_profile.get("provenance"), Mapping) else 7
-                evaluator = AlgorithmModelEvaluator(
-                    self.adapter,
-                    self.registry,
-                    parent,
-                    scenario_profile,
-                    output_root / digest,
-                    seed=int(seed_value or 7),
-                    calibration_manifest=scenario_manifest if self.tica_prune else None,
-                    search_budget=evaluator_recipe.budget() if self.tica_prune else {"max_fast_evals": 8, "max_full_evals": 4, "max_interaction_evals": 2},
-                )
-                evaluators[evaluator_key] = evaluator
-            measured = dict(evaluator.evaluate(effective_result))
-            if algorithm_search is not None:
-                measured["algorithm_search"] = dict(algorithm_search)
-            return measured
+                        algorithm_search_cache[search_key] = cached
+                    return dict(cached)
+
+            seed_value = scenario_profile.get("provenance", {}).get("seed", 7) if isinstance(scenario_profile.get("provenance"), Mapping) else 7
+            evaluator = AlgorithmModelEvaluator(
+                self.adapter,
+                self.registry,
+                parent,
+                scenario_profile,
+                output_root / digest,
+                seed=int(seed_value or 7),
+                calibration_manifest=scenario_manifest if self.tica_prune else None,
+                search_budget=evaluator_recipe.budget() if self.tica_prune else {"max_fast_evals": 8, "max_full_evals": 4, "max_interaction_evals": 2},
+            )
+            return dict(evaluator.evaluate(result))
 
         return evaluate
+
+    def _complete_standard_algorithm_search(
+        self,
+        *,
+        source: str,
+        proposed_result: SandboxResult,
+        profile: Mapping[str, Any],
+        history: Sequence[Mapping[str, Any]],
+        parent: CheckpointArtifact,
+        output_root: Path,
+        seed: int,
+        search_budget: Mapping[str, int],
+        search_space_payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Run a bounded, source-controlled multi-candidate standard search.
+
+        The Agent owns candidate generation and ranking.  The Harness owns
+        the equal-budget measurement, duplicate filtering, checkpoint
+        execution, and final selection by measured metrics.  A second depth
+        is available when ``search()`` returns ``stop: false``; this keeps the
+        standard path useful for recursive hybrid search without introducing a
+        second planner abstraction.
+        """
+
+        max_candidates = int(search_budget.get("max_candidates", 16))
+        max_full_evals = int(search_budget.get("max_full_evals", max_candidates))
+        max_depth = max(1, min(3, int(search_budget.get("max_search_depth", 2))))
+        if max_candidates <= 0 or max_full_evals <= 0:
+            raise ValueError("standard_algorithm_search_budget_invalid")
+        evaluator = AlgorithmModelEvaluator(
+            self.adapter,
+            self.registry,
+            parent,
+            profile,
+            Path(output_root),
+            seed=int(seed),
+            search_budget={
+                "max_candidates": max_candidates,
+                "max_full_evals": max_full_evals,
+                "max_interaction_evals": int(search_budget.get("max_interaction_evals", 0)),
+            },
+        )
+        seen: set[str] = set()
+        measured: list[Mapping[str, Any]] = []
+        decisions: list[Mapping[str, Any]] = []
+        remaining = max_full_evals
+        state: Mapping[str, Any] = {
+            "depth": 1,
+            "parent_state_id": "uncompressed",
+            "proposed_plan": proposed_result.plan.to_dict() if proposed_result.plan is not None else None,
+            "budget": {"max_candidates": max_candidates},
+            "measured_candidates": [],
+            "frontier": [],
+        }
+        selected_plan: Optional[SandboxCompressionPlan] = None
+        selected_metrics: Optional[Mapping[str, Any]] = None
+        selected_record: Optional[Mapping[str, Any]] = None
+
+        for depth in range(1, max_depth + 1):
+            if remaining <= 0:
+                break
+            decision = _run_algorithm_search_program(source, self.sandbox, profile, history, state, search_space_payload)
+            decisions.append({
+                "depth": depth,
+                "source_sha256": decision.source_sha256,
+                "payload_sha256": decision.payload_sha256,
+                "plan_digests": [stable_digest(item) for item in decision.plans],
+                "rank": list(decision.rank),
+                "stop": decision.stop,
+            })
+            depth_records: list[Mapping[str, Any]] = []
+            for rank_index in decision.rank:
+                if remaining <= 0:
+                    break
+                raw_plan = decision.plans[rank_index]
+                plan_digest = stable_digest(raw_plan)
+                if plan_digest in seen:
+                    continue
+                seen.add(plan_digest)
+                plan = SandboxCompressionPlan.from_mapping(raw_plan, operator_specs=self.sandbox.operator_specs)
+                candidate = SandboxResult(
+                    "success",
+                    decision.source_sha256,
+                    plan,
+                    metadata={"algorithm_program_search": True, "search_depth": depth, "search_rank_index": rank_index},
+                )
+                metrics = dict(evaluator.evaluate(candidate))
+                remaining -= 1
+                record = {
+                    "depth": depth,
+                    "rank_index": int(rank_index),
+                    "plan_digest": plan_digest,
+                    "plan": plan.to_dict(),
+                    "valid": bool(metrics.get("valid") is True),
+                    "quality_score": metrics.get("quality_score"),
+                    "search_score": metrics.get("search_score"),
+                    "failure_reason": metrics.get("failure_reason"),
+                }
+                depth_records.append(record)
+                measured.append(record)
+
+                def metric_key(item: Mapping[str, Any]) -> tuple[float, float, float, float]:
+                    valid = 1.0 if item.get("valid") is True else 0.0
+                    score = item.get("search_score")
+                    quality = item.get("quality_score")
+                    return (
+                        valid,
+                        float(score) if isinstance(score, (int, float)) and not isinstance(score, bool) else float("-inf"),
+                        float(quality) if isinstance(quality, (int, float)) and not isinstance(quality, bool) else float("-inf"),
+                        -float(item.get("rank_index", 0)),
+                    )
+
+                if selected_record is None or metric_key(record) > metric_key(selected_record):
+                    selected_metrics = metrics
+                    selected_plan = plan
+                    selected_record = record
+
+            if decision.stop or remaining <= 0:
+                break
+            feasible = [item for item in depth_records if item.get("valid") is True]
+            if not feasible:
+                break
+            best = max(feasible, key=lambda item: (float(item.get("search_score", float("-inf"))), -int(item.get("rank_index", 0))))
+            state = {
+                "depth": depth + 1,
+                "parent_state_id": str(best["plan_digest"]),
+                "proposed_plan": dict(best["plan"]),
+                "budget": {"max_candidates": max_candidates},
+                "measured_candidates": depth_records,
+                "frontier": [dict(item["plan"]) for item in feasible],
+            }
+
+        if selected_plan is None or selected_metrics is None:
+            return {
+                "valid": False,
+                "failure_reason": "standard_algorithm_search_no_candidate",
+                "algorithm_search": {
+                    "protocol": "standard_hbps",
+                    "complete": False,
+                    "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                    "candidate_count": 0,
+                    "evaluated_candidate_count": 0,
+                    "budget": dict(search_budget),
+                    "trace": decisions,
+                },
+            }
+        result = dict(selected_metrics)
+        result["algorithm_search"] = {
+            "protocol": "standard_hbps",
+            "complete": True,
+            "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            "candidate_count": len(seen),
+            "evaluated_candidate_count": len(measured),
+            "selected_plan_digest": stable_digest(selected_plan.to_dict()),
+            "candidate_results": measured,
+            "budget": {**dict(search_budget), "full_evals_used": len(measured)},
+            "trace": decisions,
+        }
+        result["selected_plan"] = selected_plan.to_dict()
+        return result
 
     def _complete_tica_algorithm_measurement_evaluator(
         self,

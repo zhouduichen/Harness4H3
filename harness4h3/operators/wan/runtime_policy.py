@@ -56,6 +56,27 @@ class SparseRuntimePolicy:
 
 
 @dataclass(frozen=True)
+class AttentionWindowPolicy:
+    """Local Self-Attention policy with a bounded per-query K/V window."""
+
+    window_size: int
+    attention: str = "attn1"
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "AttentionWindowPolicy":
+        value = raw.get("window_size")
+        if not isinstance(value, int) or isinstance(value, bool) or not 1 <= int(value) <= 4096:
+            raise ValueError("attention_window.window_size must be an integer in [1, 4096]")
+        attention = str(raw.get("attention", "attn1"))
+        if attention not in {"attn1", "self", "all"}:
+            raise ValueError("unsupported attention window target")
+        return cls(int(value), attention)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class SamplingStepPolicy:
     target_steps: int
     strategy: str = "uniform"

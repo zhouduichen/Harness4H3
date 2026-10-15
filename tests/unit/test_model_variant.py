@@ -22,6 +22,7 @@ def test_runtime_only_variant_manifest_preserves_order_and_zero_weight_claim(tmp
             "steps": [
                 {"operator": "prune_tokens", "args": {"keep_ratio": 0.75}},
                 {"operator": "sparse_runtime", "args": {"keep_ratio": 0.5, "attention": "attn1"}},
+                {"operator": "attention_window", "args": {"window_size": 32, "attention": "attn1"}},
                 {"operator": "sampling_step_skip", "args": {"target_steps": 8}},
             ]
         },
@@ -48,9 +49,10 @@ def test_runtime_only_variant_manifest_preserves_order_and_zero_weight_claim(tmp
     assert [item["operator"] for item in variant.ordered_operations] == [
         "prune_tokens",
         "sparse_runtime",
+        "attention_window",
         "sampling_step_skip",
     ]
-    assert set(variant.runtime_policy) == {"prune_tokens", "sparse_runtime"}
+    assert set(variant.runtime_policy) == {"prune_tokens", "sparse_runtime", "attention_window"}
     assert set(variant.sampler_policy) == {"sampling_step_skip"}
 
     path = variant.write_manifest(tmp_path / "manifests" / "variant_manifest.json")

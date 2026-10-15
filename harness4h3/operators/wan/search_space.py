@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, CompressionResult, OperatorCapability, WanModelAdapter
 from ...sandbox import AlgorithmSandbox
-from .compression import AttentionHeadPruningOperator, FFNChannelPruningOperator, HeadPruningOperator, LayerPruningOperator, SamplingStepSkipOperator, SparseRuntimeOperator, TimestepBlockGatingOperator, TokenPruningOperator, WanCompressionRegistry
+from .compression import AttentionHeadPruningOperator, AttentionWindowOperator, FFNChannelPruningOperator, HeadPruningOperator, LayerPruningOperator, SamplingStepSkipOperator, SparseRuntimeOperator, TimestepBlockGatingOperator, TokenPruningOperator, WanCompressionRegistry
 
 
 def _jsonable(value: Any) -> Any:
@@ -306,6 +306,7 @@ def default_search_space() -> SearchSpaceVersion:
             OperatorSpec("prune_heads", "1", {"head_indices": "list[int]", "attention_names": "list[str]"}, "head", ("retain_at_least_one_head",), (), "prune_heads", implementation_ref="harness4h3.operators.wan.compression.HeadPruningOperator"),
             OperatorSpec("prune_tokens", "1", {"keep_ratio": "float"}, "token", ("keep_at_least_one_token",), ("dynamic_policy",), "prune_tokens", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.TokenPruningOperator"),
             OperatorSpec("sparse_runtime", "1", {"keep_ratio": "float", "attention": "str"}, "sparse_runtime", ("self_attention_top_k",), ("dynamic_policy",), "sparse_runtime", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.SparseRuntimeOperator"),
+            OperatorSpec("attention_window", "1", {"window_size": "int", "attention": "str"}, "attention", ("self_attention_local_window",), ("dynamic_policy", "requires_sequence_order"), "attention_window", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.AttentionWindowOperator"),
             OperatorSpec("sampling_step_skip", "1", {"target_steps": "int"}, "sampling_step", ("preserve_endpoints",), ("dynamic_policy",), "sampling_step_skip", execution_domain="sampler", implementation_ref="harness4h3.operators.wan.compression.SamplingStepSkipOperator"),
         ),
         constraints={"wan_channel_pruning_requires_all_blocks": True},
@@ -400,6 +401,8 @@ class SearchSpaceManager:
                 plan_args = {"keep_ratio": 0.75}
             elif implementation_key == "sparse_runtime":
                 plan_args = {"keep_ratio": 0.75, "attention": "attn1"}
+            elif implementation_key == "attention_window":
+                plan_args = {"window_size": 32, "attention": "attn1"}
             elif implementation_key == "sampling_step_skip":
                 plan_args = {"target_steps": 8}
             if proposal.spec.implementation_source:
@@ -646,6 +649,7 @@ _TRUSTED_FACTORIES: dict[str, Callable[[], Any]] = {
     "prune_heads": HeadPruningOperator,
     "prune_tokens": TokenPruningOperator,
     "sparse_runtime": SparseRuntimeOperator,
+    "attention_window": AttentionWindowOperator,
     "sampling_step_skip": SamplingStepSkipOperator,
 }
 

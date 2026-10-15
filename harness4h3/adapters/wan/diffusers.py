@@ -11,7 +11,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange
 from .attention import prune_attention_module_heads
 from ...operators.wan.runtime_gating import rule_matches, rules_to_dict, validate_timestep_gate_plan
-from ...operators.wan.runtime_policy import SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy, select_sampling_steps
+from ...operators.wan.runtime_policy import AttentionWindowPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy, select_sampling_steps
 
 
 def _torch_modules() -> tuple[Any, Any]:
@@ -110,6 +110,58 @@ def _slice_rotary(rotary: Any, indices: Any, sequence_length: int) -> Any:
             selected = value
         result.append(selected)
     return tuple(result)
+
+
+def _apply_wan_rotary(hidden_states: Any, rotary_emb: Any) -> Any:
+    """Apply Wan's real-valued RoPE tuple to Q/K tensors."""
+
+    if rotary_emb is None:
+        return hidden_states
+    freqs_cos, freqs_sin = rotary_emb
+    x1, x2 = hidden_states.unflatten(-1, (-1, 2)).unbind(-1)
+    cos = freqs_cos[..., 0::2]
+    sin = freqs_sin[..., 1::2]
+    output = hidden_states.new_empty(hidden_states.shape)
+    output[..., 0::2] = x1 * cos - x2 * sin
+    output[..., 1::2] = x1 * sin + x2 * cos
+    return output.type_as(hidden_states)
+
+
+def _wan_sparse_self_attention(attention: Any, hidden_states: Any, keys: Any, indices: Any, rotary_emb: Any, torch: Any) -> Any:
+    """Run Wan self-attention with full Q and selected K/V tokens.
+
+    The stock Wan processor accepts one RoPE tuple for both Q and K.  This
+    small adapter keeps its Q/K normalization and output projection while
+    slicing K's positions independently, so reduced K/V work does not drop
+    positional semantics.
+    """
+
+    fused = bool(getattr(attention, "fused_projections", False))
+    if fused:
+        query = attention.to_qkv(hidden_states).chunk(3, dim=-1)[0]
+        key, value = attention.to_qkv(keys).chunk(3, dim=-1)[1:]
+    else:
+        query = attention.to_q(hidden_states)
+        key = attention.to_k(keys)
+        value = attention.to_v(keys)
+    norm_q = getattr(attention, "norm_q", None)
+    norm_k = getattr(attention, "norm_k", None)
+    if callable(norm_q):
+        query = norm_q(query)
+    if callable(norm_k):
+        key = norm_k(key)
+    heads = int(attention.heads)
+    query = query.unflatten(2, (heads, -1))
+    key = key.unflatten(2, (heads, -1))
+    value = value.unflatten(2, (heads, -1))
+    query = _apply_wan_rotary(query, rotary_emb)
+    key = _apply_wan_rotary(key, _slice_rotary(rotary_emb, indices, int(hidden_states.shape[1])))
+    output = torch.nn.functional.scaled_dot_product_attention(
+        query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), dropout_p=0.0, is_causal=False
+    ).transpose(1, 2)
+    output = output.flatten(2, 3).type_as(query)
+    output = attention.to_out[0](output)
+    return attention.to_out[1](output)
 
 
 def _copy_shared_components(source: Path, target: Path) -> bool:
@@ -294,6 +346,8 @@ class DiffusersWanAdapter:
                     self.apply_token_sparsity(pipe, args)
                 elif operator == "sparse_runtime":
                     self.apply_sparse_runtime(pipe, args)
+                elif operator == "attention_window":
+                    self.apply_attention_window(pipe, args)
                 elif operator == "sampling_step_skip":
                     self.apply_sampling_step_policy(pipe, args)
                 else:
@@ -310,6 +364,9 @@ class DiffusersWanAdapter:
             sparse_policy = getattr(config, "harness4h3_sparse_runtime", None)
             if sparse_policy:
                 self.apply_sparse_runtime(pipe, sparse_policy)
+            window_policy = getattr(config, "harness4h3_attention_window", None)
+            if window_policy:
+                self.apply_attention_window(pipe, window_policy)
             sampling_policy = getattr(config, "harness4h3_sampling_step", None)
             if sampling_policy:
                 self.apply_sampling_step_policy(pipe, sampling_policy)
@@ -516,11 +573,11 @@ class DiffusersWanAdapter:
                 scores = hidden_states.detach().float().pow(2).mean(dim=(0, 2))
                 indices = torch.topk(scores, count).indices.sort().values
                 keys = hidden_states.index_select(1, indices)
-                # The sparse branch uses the full query and a reduced key/value
-                # set.  Rotary positions are omitted only for this reduced
-                # branch because Wan's stock processor accepts one shared
-                # rotary tuple for query and key.
-                result = _base(hidden_states, keys, None, None, *args, **kwargs)
+                # Keep full Q, reduce K/V, and slice K's original RoPE
+                # positions independently.  Calling the stock processor with
+                # a shared tuple would either misalign positions or disable
+                # RoPE for the sparse branch.
+                result = _wan_sparse_self_attention(attention_self, hidden_states, keys, indices, rotary_emb, torch)
                 transformer._harness4h3_sparse_runtime_stats["full_tokens"] += int(hidden_states.shape[1])
                 transformer._harness4h3_sparse_runtime_stats["selected_tokens"] += int(count)
                 return result
@@ -529,6 +586,57 @@ class DiffusersWanAdapter:
             attention.forward = MethodType(sparse_forward, attention)
         _record_runtime_operation(transformer, "sparse_runtime", parsed.to_dict())
         return StructuralChange("runtime_sparse_attention", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
+
+    def apply_attention_window(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
+        torch, _ = _torch_modules()
+        parsed = AttentionWindowPolicy.from_mapping(policy)
+        transformer = self._transformer(model)
+        _register_config(transformer, "harness4h3_attention_window", parsed.to_dict())
+        transformer._harness4h3_attention_window_policy = parsed.to_dict()
+        transformer._harness4h3_attention_window_stats = {"query_tokens": 0, "selected_kv_tokens": 0, "windows": 0}
+        _path, blocks = self._blocks(model)
+        for block in blocks:
+            attention = getattr(block, "attn1", None)
+            if attention is None or hasattr(attention, "_harness4h3_window_base_forward"):
+                continue
+            base = attention.forward
+
+            def window_forward(attention_self: Any, hidden_states: Any, encoder_hidden_states: Any = None, attention_mask: Any = None, rotary_emb: Any = None, *args: Any, _base: Any = base, **kwargs: Any) -> Any:
+                active = getattr(transformer, "_harness4h3_attention_window_policy", parsed.to_dict())
+                if encoder_hidden_states is not None or hidden_states.ndim < 3 or hidden_states.shape[1] <= 1:
+                    return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
+                width = int(active["window_size"])
+                pieces = []
+                selected = 0
+                for start in range(0, int(hidden_states.shape[1]), width):
+                    stop = min(int(hidden_states.shape[1]), start + width)
+                    query = hidden_states[:, start:stop]
+                    # Wan's processor applies one RoPE tuple to both Q and K.
+                    # Use non-overlapping local blocks so the same slice is
+                    # valid for both tensors and preserves the original
+                    # flattened video-token positions.
+                    keys = hidden_states[:, start:stop]
+                    local_rotary = rotary_emb
+                    if isinstance(rotary_emb, (tuple, list)) and len(rotary_emb) == 2:
+                        sliced = []
+                        for frequencies in rotary_emb:
+                            if getattr(frequencies, "ndim", 0) >= 2 and int(frequencies.shape[1]) >= stop:
+                                sliced.append(frequencies[:, start:stop, ...])
+                            else:
+                                sliced = []
+                                break
+                        local_rotary = tuple(sliced) if len(sliced) == 2 else None
+                    pieces.append(_base(query, keys, None, local_rotary, *args, **kwargs))
+                    selected += stop - start
+                transformer._harness4h3_attention_window_stats["query_tokens"] += int(hidden_states.shape[1])
+                transformer._harness4h3_attention_window_stats["selected_kv_tokens"] += int(selected)
+                transformer._harness4h3_attention_window_stats["windows"] += len(pieces)
+                return torch.cat(pieces, dim=1)
+
+            attention._harness4h3_window_base_forward = base
+            attention.forward = MethodType(window_forward, attention)
+        _record_runtime_operation(transformer, "attention_window", parsed.to_dict())
+        return StructuralChange("runtime_attention_window", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
 
     def apply_sampling_step_policy(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
         parsed = SamplingStepPolicy.from_mapping(policy)
@@ -578,11 +686,14 @@ class DiffusersWanAdapter:
                 total += 4.0 * heads * head_dim * 64.0 * 64.0
         token_policy = getattr(transformer, "_harness4h3_token_sparsity_policy", {})
         sparse_policy = getattr(transformer, "_harness4h3_sparse_runtime_policy", {})
+        window_policy = getattr(transformer, "_harness4h3_attention_window_policy", {})
         sampling_policy = getattr(transformer, "_harness4h3_sampling_step_policy", {})
         if token_policy:
             total *= float(token_policy.get("keep_ratio", 1.0))
         if sparse_policy:
             total *= float(sparse_policy.get("keep_ratio", 1.0))
+        if window_policy:
+            total *= min(1.0, float(window_policy.get("window_size", 64)) / 64.0)
         if sampling_policy:
             total *= float(sampling_policy.get("target_steps", 16)) / 16.0
         return int(max(0.0, round(total)))

@@ -6,7 +6,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, ChannelPruningConfig, CompressionResult, WanModelAdapter
 from .runtime_gating import validate_timestep_gate_plan
-from .runtime_policy import SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy
+from .runtime_policy import AttentionWindowPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy
 
 
 class CompressionOperator(Protocol):
@@ -171,6 +171,15 @@ class SparseRuntimeOperator:
         return _execute_runtime_policy(adapter, parent, plan, output_dir, policy_name="sparse_runtime", parser=SparseRuntimePolicy.from_mapping, adapter_method="apply_sparse_runtime", failure_type="sparse_runtime_failed")
 
 
+class AttentionWindowOperator:
+    """Dynamic local Self-Attention with an actual per-query K/V window."""
+
+    name = "attention_window"
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        return _execute_runtime_policy(adapter, parent, plan, output_dir, policy_name="attention_window", parser=AttentionWindowPolicy.from_mapping, adapter_method="apply_attention_window", failure_type="attention_window_failed")
+
+
 class SamplingStepSkipOperator:
     """Persist and execute a reduced denoising schedule policy."""
 
@@ -284,6 +293,7 @@ class CompositeCompressionOperator:
         "prune_heads": HeadPruningOperator,
         "prune_tokens": TokenPruningOperator,
         "sparse_runtime": SparseRuntimeOperator,
+        "attention_window": AttentionWindowOperator,
         "sampling_step_skip": SamplingStepSkipOperator,
         "timestep_block_gate": TimestepBlockGatingOperator,
     }
@@ -406,6 +416,7 @@ def build_wan_compression_registry(*, include_tica: bool = False, include_multig
                 HeadPruningOperator(),
                 TokenPruningOperator(),
                 SparseRuntimeOperator(),
+                AttentionWindowOperator(),
                 SamplingStepSkipOperator(),
                 TimestepBlockGatingOperator(),
             ]

@@ -341,13 +341,13 @@ def test_evo_compress_features_form_restartable_cpu_fake_pipeline(tmp_path):
     assert search_space["version_id"] == "S0001"
     assert "prune_ffn_by_weight_threshold" not in {item["name"] for item in search_space["operators"]}
     feedback = json.loads((tmp_path / "run" / "search-space-feedback.json").read_text())
-    assert feedback["ready"] is False
+    assert feedback["ready"] is True
     assert feedback["observed_rounds"] >= 2
     assert feedback["evidence_ids"]
     third_dir = tmp_path / "run" / "rounds" / third.round_id
     third_search_space = json.loads((third_dir / "search-space.json").read_text())
-    assert third_search_space["version_id"] == "S0001"
-    assert "prune_ffn_by_weight_threshold" not in {item["name"] for item in third_search_space["operators"]}
+    assert third_search_space["version_id"] == "S0002"
+    assert "timestep_block_gate" in {item["name"] for item in third_search_space["operators"]}
     screening = json.loads((second_dir / "screening" / "screening.json").read_text())
     assert [item["stage"] for item in screening["results"]] == ["static", "diagnostic", "full"]
     validation = json.loads((second_dir / "algorithm-validation.json").read_text())
@@ -357,6 +357,13 @@ def test_evo_compress_features_form_restartable_cpu_fake_pipeline(tmp_path):
     assert validation["candidate_metrics"]["parameter_reduction_ratio"] > 0.0
     assert validation["candidate_metrics"]["hardware_metrics"]["available"] is False
     assert validation["scenario_results"][0]["candidate_metrics"]["parent_checkpoint_sha256"] == validation["scenario_results"][0]["parent_metrics"]["parent_checkpoint_sha256"]
+    parent_search = validation["parent_metrics"]["algorithm_search"]
+    candidate_search = validation["candidate_metrics"]["algorithm_search"]
+    assert parent_search["protocol"] == candidate_search["protocol"] == "standard_hbps"
+    assert parent_search["budgets"][0]["max_full_evals"] == candidate_search["budgets"][0]["max_full_evals"]
+    assert parent_search["evaluated_candidate_counts"][0] <= parent_search["budgets"][0]["max_full_evals"]
+    assert candidate_search["evaluated_candidate_counts"][0] <= candidate_search["budgets"][0]["max_full_evals"]
+    assert parent_search["evaluated_candidate_counts"][0] >= 2
     algorithm = json.loads((second_dir / "algorithm.json").read_text())
     assert algorithm["parent_algorithm_id"] == "A0001"
     assert algorithm["parent_source_sha256"] == validation["parent_source_sha256"]
@@ -370,10 +377,22 @@ def test_evo_compress_features_form_restartable_cpu_fake_pipeline(tmp_path):
     assert algorithms[2]["source_sha256"] != algorithms[1]["source_sha256"]
     assert algorithms[1]["source_diff"]
     assert algorithms[2]["source_diff"]
-    assert json.loads((third_dir / "algorithm.json").read_text())["parent_algorithm_id"] == "A0002"
-    assert (tmp_path / "run" / "algorithm-skills.jsonl").is_file()
+    assert "algorithm-search-revision-2" in algorithms[1]["source"]
+    second_trace = json.loads((second_dir / "algorithm-program-trace.json").read_text())
+    assert second_trace["measured_search"]["protocol"] == "standard_hbps"
+    assert second_trace["measured_search"]["evaluated_candidate_count"] >= 2
+    # A rejected algorithm remains searchable as failure evidence but is not
+    # promoted as the next algorithm parent.
+    assert json.loads((third_dir / "algorithm.json").read_text())["parent_algorithm_id"] == "A0001"
+    skills_path = tmp_path / "run" / "algorithm-skills.jsonl"
+    if validation["valid"]:
+        assert skills_path.is_file()
+    else:
+        # Equal-budget search correctly keeps an algorithm that did not beat
+        # its parent out of the verified-skill store.
+        assert not skills_path.exists()
     skills = loop.skill_hub.search(architecture="WanFakeDiT", limit=16)
-    assert any(item.get("memory_kind") == "algorithm_skill" for item in skills)
+    assert any(item.get("memory_kind") == "algorithm_skill" for item in skills) is validation["valid"]
     genes = [json.loads(line) for line in (tmp_path / "run" / "design-genes.jsonl").read_text().splitlines()]
     assert any(item["gene_id"] == "G-" + first.round_id for item in genes)
     assert any(item["gene_id"] == "G-" + second.round_id for item in genes)

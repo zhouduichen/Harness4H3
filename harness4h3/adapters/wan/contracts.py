@@ -306,7 +306,7 @@ class ModelVariant:
 
         ordered = tuple(operations(plan))
         structural_names = {"prune_blocks", "prune_layers", "prune_ffn_channels", "prune_attention_heads", "prune_heads", "tica_prune"}
-        runtime_names = {"timestep_block_gate", "prune_tokens", "sparse_runtime"}
+        runtime_names = {"timestep_block_gate", "prune_tokens", "sparse_runtime", "attention_window"}
         sampler_names = {"sampling_step_skip"}
         structural = any(str(item.get("operator")) in structural_names for item in ordered)
         runtime_policy = {
@@ -388,6 +388,9 @@ class WanModelAdapter(Protocol):
         ...
 
     def apply_sparse_runtime(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
+        ...
+
+    def apply_attention_window(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
         ...
 
     def apply_sampling_step_policy(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:

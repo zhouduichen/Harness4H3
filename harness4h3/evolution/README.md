@@ -55,9 +55,10 @@ the usual algorithm/model evidence. `tica_prune` is classified as an
 algorithm rule over the existing Block/FFN structural closure, not as a new
 primitive search-space operator.
 
-The legacy sparse-attention runtime boundary now delegates enabled requests to
-the adapter's executable top-k KV backend. It remains weight-neutral and does
-not claim an SVOO/SparseVideo CUDA implementation or GPU speedup without
-independent measurements. Real Wan use requires an explicit cached-input
-manifest; a missing manifest is rejected rather than replaced by random
-probes.
+The runtime attention boundary now includes an executable top-k KV backend and
+a block-local self-attention window policy. Both are weight-neutral and
+preserve the ordered runtime manifest; the Diffusers path keeps Wan's Q/K
+normalization, RoPE positions, and output projection. These paths do not claim
+an SVOO/SparseVideo CUDA implementation or GPU speedup without independent
+measurements. Real Wan use requires an explicit cached-input manifest; a
+missing manifest is rejected rather than replaced by random probes.
