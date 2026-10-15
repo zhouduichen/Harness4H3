@@ -168,6 +168,92 @@ class AlgorithmAgent:
             metadata={"generator": "structured_provider", "search_choice": search_choice, "predicted_gain": dict(raw.get("predicted_gain") or {})},
         )
 
+    def improve(
+        self,
+        algorithm_id: str,
+        *,
+        parent: AlgorithmCandidate,
+        parent_id: Optional[str],
+        profile: Mapping[str, Any],
+        history: Sequence[Mapping[str, Any]],
+        failures: Sequence[str] = (),
+        skills: Sequence[Mapping[str, Any]] = (),
+        search_space: Optional[Mapping[str, Any]] = None,
+    ) -> AlgorithmCandidate:
+        """Improve an existing source with bounded, explicit feedback context."""
+
+        if not isinstance(parent, AlgorithmCandidate):
+            raise TypeError("algorithm improvement requires an AlgorithmCandidate parent")
+        feedback = [str(item) for item in failures if str(item).strip()]
+        if not feedback:
+            feedback = list(_feedback_reasons(history))
+        if self.provider is None:
+            source, summary, rationale, hypothesis = _deterministic_improvement_source(
+                algorithm_id, parent, profile, feedback
+            )
+            return AlgorithmCandidate.from_source(
+                algorithm_id,
+                source,
+                parent_id=parent_id,
+                parent_algorithm_id=parent.algorithm_id,
+                parent_source_sha256=parent.source_sha256,
+                hypothesis=hypothesis,
+                change_summary=summary,
+                change_rationale=rationale,
+                evidence_ids=_history_ids(history),
+                validation_status="pending",
+                metadata={
+                    "generator": "deterministic_improvement",
+                    "algorithm_improvement": True,
+                    "parent_source_sha256": parent.source_sha256,
+                    "failure_reasons": feedback[:16],
+                    "search_space": dict(search_space or {}),
+                },
+            )
+
+        payload = {
+            "parent_algorithm_id": parent.algorithm_id,
+            "parent_source_sha256": parent.source_sha256,
+            "parent_source": parent.source[:12000],
+            "profile": _compact_profile(profile),
+            "history": _compact_context_items(history),
+            "skills": _compact_context_items(skills),
+            "failure_reasons": feedback[:16],
+            "search_space": dict(search_space or {}),
+            "parent_id": parent_id,
+            "task": "improve_existing_algorithm_source",
+        }
+        raw = self.provider(payload)
+        if not isinstance(raw, Mapping):
+            raise ValueError("algorithm_improvement_invalid: provider response must be an object")
+        unknown = sorted(set(raw) - {"source", "hypothesis", "parent_id", "predicted_gain", "change_summary", "change_rationale", "evidence_ids"})
+        if unknown:
+            raise ValueError("algorithm_improvement_invalid: unsupported field(s): %s" % ", ".join(unknown))
+        if raw.get("parent_id", parent_id) != parent_id:
+            raise ValueError("algorithm_improvement_invalid: provider cannot change parent_id")
+        source = raw.get("source")
+        if not isinstance(source, str):
+            raise ValueError("algorithm_improvement_invalid: source must be text")
+        return AlgorithmCandidate.from_source(
+            algorithm_id,
+            source,
+            parent_id=parent_id,
+            parent_algorithm_id=parent.algorithm_id,
+            parent_source_sha256=parent.source_sha256,
+            hypothesis=str(raw.get("hypothesis", "")),
+            change_summary=str(raw.get("change_summary", "provider source revision")),
+            change_rationale=str(raw.get("change_rationale", "provider used parent source and feedback")),
+            evidence_ids=tuple(str(item) for item in raw.get("evidence_ids", _history_ids(history))),
+            validation_status="pending",
+            metadata={
+                "generator": "structured_improvement_provider",
+                "algorithm_improvement": True,
+                "parent_source_sha256": parent.source_sha256,
+                "failure_reasons": feedback[:16],
+                "predicted_gain": dict(raw.get("predicted_gain") or {}),
+            },
+        )
+
     @staticmethod
     def _least_sensitive_block(profile: Mapping[str, Any], excluded: Optional[set[str]] = None) -> str:
         records = profile.get("block_sensitivity", [])
@@ -265,6 +351,88 @@ class AlgorithmAgent:
             if before > 0.0 and (before - after) / before < 0.10:
                 ratio = max(0.10, ratio * 0.75)
         return ratio
+
+
+def _history_ids(history: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    return tuple(
+        str(item.get("experience_id", item.get("round_id")))
+        for item in history
+        if isinstance(item, Mapping) and (item.get("experience_id") or item.get("round_id"))
+    )[:16]
+
+
+def _feedback_reasons(history: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    values: list[str] = []
+    for item in history:
+        if not isinstance(item, Mapping):
+            continue
+        decision = item.get("decision")
+        if isinstance(decision, Mapping):
+            promotion = decision.get("promotion")
+            reasons = promotion.get("reasons", []) if isinstance(promotion, Mapping) else []
+            if isinstance(reasons, Sequence) and not isinstance(reasons, (str, bytes)):
+                values.extend(str(reason) for reason in reasons if str(reason).strip())
+            if decision.get("failure_type"):
+                values.append(str(decision["failure_type"]))
+        if item.get("failure_reason"):
+            values.append(str(item["failure_reason"]))
+    result: list[str] = []
+    for value in values:
+        if value not in result:
+            result.append(value)
+    return tuple(result[:16])
+
+
+def _deterministic_improvement_source(
+    algorithm_id: str,
+    parent: AlgorithmCandidate,
+    profile: Mapping[str, Any],
+    failures: Sequence[str],
+) -> tuple[str, str, str, str]:
+    """Produce a source-level revision, not an unrelated fresh seed."""
+
+    failure_text = " ".join(str(item).lower() for item in failures)
+    if "quality" in failure_text or "integrity" in failure_text:
+        source = (
+            "def propose(profile, history):\n"
+            "    # Improve %s: quality feedback narrows the mutation to the least sensitive block.\n"
+            "    records = [item for item in profile.get('block_sensitivity', []) if item.get('available') and item.get('importance_score') is not None]\n"
+            "    if records:\n"
+            "        selected = min(records, key=lambda item: float(item['importance_score']))['block_id']\n"
+            "    else:\n"
+            "        selected = profile.get('layers', [{'block_id': 'block.0'}])[0]['block_id']\n"
+            "    return {'operator': 'prune_blocks', 'args': {'block_ids': [selected]}}\n"
+        ) % parent.algorithm_id
+        return (
+            source,
+            "replace broad mutation with sensitivity-ranked conservative block pruning",
+            "quality or integrity feedback shows that the parent mutation is too aggressive",
+            "conserve quality by selecting one least-sensitive block from the measured profile",
+        )
+
+    source = (
+        "def propose(profile, history):\n"
+        "    # Improve %s: efficiency feedback changes channel ordering while keeping the trusted operator.\n"
+        "    width = int(profile.get('model', {}).get('ffn_width', 1))\n"
+        "    target = max(1, int(width * 0.75))\n"
+        "    records = []\n"
+        "    for item in profile.get('channel_sensitivity', []):\n"
+        "        for channel in item.get('channels', []):\n"
+        "            if channel.get('importance_score') is not None:\n"
+        "                records.append(channel)\n"
+        "    ordered = sorted(records, key=lambda item: float(item.get('importance_score', 0.0)))\n"
+        "    retained_indices = [int(item['channel']) for item in ordered[:target]]\n"
+        "    if not retained_indices:\n"
+        "        retained_indices = list(range(target))\n"
+        "    block_ids = [item['block_id'] for item in profile.get('layers', [])]\n"
+        "    return {'operator': 'prune_ffn_channels', 'args': {'block_ids': block_ids, 'retained_indices': retained_indices}}\n"
+    ) % parent.algorithm_id
+    return (
+        source,
+        "change block-only selection into profile-ranked FFN channel selection",
+        "efficiency or model-size feedback shows that the parent block choice cannot reach the target",
+        "reduce width using the lowest estimated channel contribution while preserving the trusted FFN operator",
+    )
 
 
 def _compact_profile(profile: Mapping[str, Any]) -> dict[str, Any]:

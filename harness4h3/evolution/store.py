@@ -41,6 +41,18 @@ class AlgorithmStore:
         self._atomic_write(metadata_path, json.dumps(candidate.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n")
         return candidate
 
+    def create_child(self, candidate: AlgorithmCandidate, parent_source_sha256: str) -> AlgorithmCandidate:
+        """Create an immutable algorithm child after checking parent content."""
+
+        parent_id = candidate.parent_algorithm_id
+        if not parent_id:
+            raise ValueError("algorithm_parent_required")
+        parent = self.get(parent_id)
+        expected = str(parent_source_sha256)
+        if parent.source_sha256 != expected or candidate.parent_source_sha256 != expected:
+            raise ValueError("parent_source_hash_mismatch")
+        return self.create(candidate)
+
     def duplicate_of(self, candidate: AlgorithmCandidate) -> AlgorithmCandidate | None:
         logic = _algorithm_logic_digest(candidate.source)
         return next(
