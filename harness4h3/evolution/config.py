@@ -27,6 +27,10 @@ class CompressionConfig:
     sandbox_timeout_s: float = 10.0
     exploit_ratio: float = 0.7
     seed: int = 7
+    advanced_profiling: bool = False
+    algorithm_improvement: bool = False
+    search_space_evolution: bool = False
+    candidate_screening: bool = False
 
     def __post_init__(self) -> None:
         if self.backend not in {"fake", "diffusers"}:
@@ -49,7 +53,7 @@ class CompressionConfig:
             raise CompressionConfigError("unable to read compression config: %s" % exc) from exc
         if not isinstance(raw, Mapping):
             raise CompressionConfigError("compression config must be a mapping")
-        allowed = {"backend", "checkpoint", "output_root", "device", "dtype", "local_files_only", "fake", "controller", "evaluator", "memory_enabled", "adapt_search_policy", "sandbox_timeout_s", "exploit_ratio", "seed"}
+        allowed = {"backend", "checkpoint", "output_root", "device", "dtype", "local_files_only", "fake", "controller", "evaluator", "memory_enabled", "adapt_search_policy", "sandbox_timeout_s", "exploit_ratio", "seed", "advanced_profiling", "algorithm_improvement", "search_space_evolution", "candidate_screening"}
         unknown = sorted(set(raw) - allowed)
         if unknown:
             raise CompressionConfigError("unsupported compression config field(s): %s" % ", ".join(unknown))
@@ -81,4 +85,8 @@ class CompressionConfig:
             sandbox_timeout_s=float(raw.get("sandbox_timeout_s", 10.0)),
             exploit_ratio=float(raw.get("exploit_ratio", 0.7)),
             seed=int(raw.get("seed", 7)),
+            advanced_profiling=bool(raw.get("advanced_profiling", False)),
+            algorithm_improvement=bool(raw.get("algorithm_improvement", False)),
+            search_space_evolution=bool(raw.get("search_space_evolution", False)),
+            candidate_screening=bool(raw.get("candidate_screening", False)),
         )
