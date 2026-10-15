@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import tempfile
 import time
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, CompressionResult, WanModelAdapter
+from ...sandbox import AlgorithmSandbox
 from .compression import FFNChannelPruningOperator, WanCompressionRegistry
 
 
@@ -31,6 +33,7 @@ class OperatorSpec:
     constraints: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     trusted_factory_key: str = ""
+    implementation_source: str = ""
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.version.strip() or not self.granularity.strip():
@@ -51,6 +54,7 @@ class OperatorSpec:
             constraints=tuple(str(item) for item in raw.get("constraints", [])),
             limitations=tuple(str(item) for item in raw.get("limitations", [])),
             trusted_factory_key=str(raw.get("trusted_factory_key", "")),
+            implementation_source=str(raw.get("implementation_source", "")),
         )
 
 
@@ -136,6 +140,7 @@ class SearchSpaceStore:
         self.root = Path(root)
         self.proposals_dir = self.root / "proposals"
         self.versions_dir = self.root / "versions"
+        self.active_path = self.root / "active.json"
 
     def _ensure(self) -> None:
         self.proposals_dir.mkdir(parents=True, exist_ok=True)
@@ -183,6 +188,18 @@ class SearchSpaceStore:
         versions = self.read_versions()
         return versions[-1] if versions else None
 
+    def read_active_id(self) -> Optional[str]:
+        try:
+            payload = json.loads(self.active_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        value = payload.get("version_id") if isinstance(payload, Mapping) else None
+        return str(value) if value else None
+
+    def write_active_id(self, version_id: str) -> None:
+        self._ensure()
+        self._atomic_write(self.active_path, {"version_id": str(version_id)})
+
     @staticmethod
     def _atomic_write(path: Path, value: Mapping[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -218,9 +235,18 @@ class SearchSpaceManager:
         self.store = SearchSpaceStore(Path(root))
         if self.store.latest() is None:
             self.store.write_version(default_search_space())
+        if self.store.read_active_id() is None:
+            latest = self.store.latest()
+            if latest is not None:
+                self.store.write_active_id(latest.version_id)
 
     @property
     def active(self) -> SearchSpaceVersion:
+        active_id = self.store.read_active_id()
+        versions = {item.version_id: item for item in self.store.read_versions()}
+        selected = versions.get(active_id) if active_id else None
+        if selected is not None and selected.status == "validated":
+            return selected
         return self.store.latest() or default_search_space()
 
     def propose(self, spec: OperatorSpec, rationale: str, evidence_ids: Sequence[str] = ()) -> SearchSpaceProposal:
@@ -251,20 +277,24 @@ class SearchSpaceManager:
         started = time.monotonic()
         try:
             factory = _TRUSTED_FACTORIES[proposal.spec.trusted_factory_key]
-            operator = factory()
+            operator = _make_trusted_operator(proposal.spec, factory)
             if operator.name != proposal.spec.name:
                 raise ValueError("trusted_factory_name_mismatch")
             parent_model = adapter.reload_model(parent)
             block_ids = [item.block_id for item in adapter.get_blocks(parent_model)]
-            scores = _channel_scores(adapter, parent_model, block_ids)
-            lower, upper = min(scores), max(scores)
-            if upper <= lower:
-                raise ValueError("threshold_validation_requires_nonuniform_channel_scores")
-            threshold = lower + (upper - lower) * 0.5
+            threshold = None
+            plan_args: dict[str, Any] = {"block_ids": block_ids}
+            if proposal.spec.trusted_factory_key == "prune_ffn_by_weight_threshold":
+                scores = _channel_scores(adapter, parent_model, block_ids)
+                lower, upper = min(scores), max(scores)
+                if upper <= lower:
+                    raise ValueError("threshold_validation_requires_nonuniform_channel_scores")
+                threshold = lower + (upper - lower) * 0.5
+                plan_args["threshold"] = threshold
             result = operator.execute(
                 adapter,
                 parent,
-                {"block_ids": block_ids, "threshold": threshold},
+                plan_args,
                 Path(output_dir or (self.store.root / "validation" / proposal.proposal_id)),
             )
             if result.status != "success" or result.child_checkpoint is None:
@@ -282,9 +312,12 @@ class SearchSpaceManager:
                 "child_checkpoint_sha256": result.child_checkpoint.sha256,
                 "block_count": int(structure.block_count),
                 "ffn_width": int(structure.ffn_width),
-                "threshold": float(threshold),
                 "metrics": metrics,
             }
+            if threshold is not None:
+                validation["threshold"] = float(threshold)
+            if proposal.spec.implementation_source:
+                validation["implementation_source_sha256"] = hashlib.sha256(proposal.spec.implementation_source.encode("utf-8")).hexdigest()
             validated = replace(base, status="validated", validation=validation)
         except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
             validated = replace(
@@ -309,7 +342,25 @@ class SearchSpaceManager:
             evidence_ids=tuple((*active.evidence_ids, *proposal.evidence_ids, proposal.proposal_id)),
             status="validated",
         )
-        return self.store.write_version(version)
+        version = self.store.write_version(version)
+        self.store.write_active_id(version.version_id)
+        return version
+
+    def activate(self, version_id: str) -> SearchSpaceVersion:
+        """Select a previously validated version without deleting newer branches."""
+
+        version = next((item for item in self.store.read_versions() if item.version_id == str(version_id)), None)
+        if version is None:
+            raise ValueError("search_space_version_unavailable: %s" % version_id)
+        if version.status != "validated":
+            raise ValueError("search_space_version_not_validated: %s" % version_id)
+        self.store.write_active_id(version.version_id)
+        return version
+
+    def rollback(self, version_id: str) -> SearchSpaceVersion:
+        """Revert execution to an older validated version while retaining the newer version."""
+
+        return self.activate(version_id)
 
     def registry_for(self, version: Optional[SearchSpaceVersion] = None, base: Optional[WanCompressionRegistry] = None) -> WanCompressionRegistry:
         target = version or self.active
@@ -347,6 +398,50 @@ class ThresholdFFNChannelOperator:
             return replace(result, structural_change={**dict(result.structural_change), "operator": self.name, "threshold": float(threshold), "derived_retained_indices": retained})
         except (AttributeError, IndexError, OSError, RuntimeError, TypeError, ValueError) as exc:
             return CompressionResult("failed", parent.sha256, None, failure_type="threshold_operator_failed", message=str(exc))
+
+
+class GeneratedChannelRuleOperator:
+    """Execute Agent-authored channel-ranking rules through AlgorithmSandbox."""
+
+    def __init__(self, name: str, source: str) -> None:
+        self.name = str(name)
+        self.source = str(source)
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        try:
+            model = adapter.reload_model(parent)
+            profile = _rule_profile(adapter, model, plan)
+            sandbox = AlgorithmSandbox(Path(output_dir) / "rule-sandbox")
+            generated = sandbox.run(self.source, profile, [])
+            if generated.status != "success" or generated.plan is None:
+                return CompressionResult(
+                    "failed",
+                    parent.sha256,
+                    None,
+                    failure_type=generated.failure_type or "generated_rule_failed",
+                    message=generated.message,
+                )
+            if generated.plan.operator != "prune_ffn_channels":
+                return CompressionResult("failed", parent.sha256, None, failure_type="generated_rule_wrong_base_operator", message="generated rule must delegate to prune_ffn_channels")
+            result = FFNChannelPruningOperator().execute(
+                adapter,
+                parent,
+                generated.plan.args,
+                Path(output_dir) / "mutation",
+            )
+            if result.status != "success":
+                return result
+            return replace(
+                result,
+                structural_change={
+                    **dict(result.structural_change),
+                    "operator": self.name,
+                    "generated_rule_source_sha256": hashlib.sha256(self.source.encode("utf-8")).hexdigest(),
+                    "delegated_operator": generated.plan.operator,
+                },
+            )
+        except (AttributeError, IndexError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            return CompressionResult("failed", parent.sha256, None, failure_type="generated_rule_failed", message=str(exc))
 
 
 def _resolve(root: Any, path: str) -> Any:
@@ -394,10 +489,54 @@ def _assert_finite(model: Any) -> None:
 
 _TRUSTED_FACTORIES: dict[str, Callable[[], Any]] = {
     "prune_ffn_by_weight_threshold": ThresholdFFNChannelOperator,
+    "generated_channel_rule": lambda spec=None: GeneratedChannelRuleOperator(
+        str(getattr(spec, "name", "generated_channel_rule")),
+        str(getattr(spec, "implementation_source", "")),
+    ),
 }
 
 
+def _make_trusted_operator(spec: OperatorSpec, factory: Callable[..., Any]) -> Any:
+    if spec.trusted_factory_key == "generated_channel_rule":
+        if not spec.implementation_source.strip():
+            raise ValueError("generated_rule_source_required")
+        return factory(spec)
+    return factory()
+
+
+def _rule_profile(adapter: WanModelAdapter, model: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
+    block_refs = {item.block_id: item for item in adapter.get_blocks(model)}
+    requested = plan.get("block_ids") if isinstance(plan, Mapping) else None
+    block_ids = [str(item) for item in requested] if isinstance(requested, (list, tuple)) and requested else list(block_refs)
+    scores = _channel_scores(adapter, model, block_ids)
+    structure = adapter.inspect(model)
+    return {
+        "model": {
+            "architecture": structure.architecture,
+            "block_count": int(structure.block_count),
+            "ffn_width": int(structure.ffn_width),
+        },
+        "layers": [{"block_id": item} for item in block_ids if item in block_refs],
+        "channel_sensitivity": [{
+            "block_id": item,
+            "width": len(scores),
+            "available": True,
+            "channels": [
+                {"channel": index, "importance_score": float(value), "available": True}
+                for index, value in enumerate(scores)
+            ],
+        } for item in block_ids if item in block_refs],
+        "timestep_sensitivity": {
+            "high_noise": {"importance_score": 0.8, "available": True},
+            "middle": {"importance_score": 0.5, "available": True},
+            "low_noise": {"importance_score": 0.2, "available": True},
+        },
+        "provenance": {"offline_simulation": bool(structure.metadata.get("offline_simulation", False)), "method": "validated_generated_rule_profile"},
+    }
+
+
 __all__ = [
+    "GeneratedChannelRuleOperator",
     "OperatorSpec",
     "SearchSpaceManager",
     "SearchSpaceProposal",

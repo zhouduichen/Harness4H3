@@ -101,6 +101,10 @@ def build_design_record(
     history: Sequence[Mapping[str, Any]],
     plan: Mapping[str, Any],
     hypothesis: str,
+    change_summary: str = "",
+    change_rationale: str = "",
+    source_sha256: str | None = None,
+    parent_source_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Build the immutable evidence context for one executable algorithm."""
 
@@ -122,6 +126,10 @@ def build_design_record(
         "history_ids": history_ids,
         "feedback": list(feedback),
         "hypothesis": str(hypothesis),
+        "change_summary": str(change_summary),
+        "change_rationale": str(change_rationale),
+        "source_sha256": source_sha256,
+        "parent_source_sha256": parent_source_sha256,
         "plan": dict(plan),
     }
     return {**body, "fingerprint": design_fingerprint(body)}

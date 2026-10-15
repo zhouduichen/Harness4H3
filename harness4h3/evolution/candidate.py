@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import difflib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
@@ -30,6 +31,7 @@ class AlgorithmCandidate:
     created_at: str = ""
     metadata: Mapping[str, Any] = field(default_factory=dict)
     parent_source_sha256: Optional[str] = None
+    source_diff: str = ""
     change_summary: str = ""
     change_rationale: str = ""
     evidence_ids: tuple[str, ...] = ()
@@ -66,6 +68,7 @@ class AlgorithmCandidate:
         hypothesis: str = "",
         metadata: Optional[Mapping[str, Any]] = None,
         parent_source_sha256: Optional[str] = None,
+        source_diff: str = "",
         change_summary: str = "",
         change_rationale: str = "",
         evidence_ids: tuple[str, ...] = (),
@@ -81,6 +84,7 @@ class AlgorithmCandidate:
             hypothesis=hypothesis,
             metadata=dict(metadata or {}),
             parent_source_sha256=parent_source_sha256,
+            source_diff=str(source_diff),
             change_summary=str(change_summary),
             change_rationale=str(change_rationale),
             evidence_ids=tuple(str(item) for item in evidence_ids),
@@ -107,9 +111,23 @@ class AlgorithmCandidate:
             created_at=str(raw.get("created_at", "")),
             metadata=dict(raw.get("metadata") or {}),
             parent_source_sha256=str(raw["parent_source_sha256"]) if raw.get("parent_source_sha256") else None,
+            source_diff=str(raw.get("source_diff", "")),
             change_summary=str(raw.get("change_summary", "")),
             change_rationale=str(raw.get("change_rationale", "")),
             evidence_ids=tuple(str(item) for item in raw.get("evidence_ids", [])),
             validation_status=str(raw.get("validation_status", "unvalidated")),
             validation_record_path=str(raw["validation_record_path"]) if raw.get("validation_record_path") else None,
         )
+
+
+def build_source_diff(parent_source: str, child_source: str, *, parent_id: str, child_id: str) -> str:
+    """Return the auditable source-level change between two algorithm versions."""
+
+    return "".join(
+        difflib.unified_diff(
+            str(parent_source).splitlines(keepends=True),
+            str(child_source).splitlines(keepends=True),
+            fromfile="%s.py" % parent_id,
+            tofile="%s.py" % child_id,
+        )
+    )

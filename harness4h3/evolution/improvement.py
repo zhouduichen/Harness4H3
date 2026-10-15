@@ -55,6 +55,7 @@ class AlgorithmValidationRecord:
     candidate_plan: Optional[Mapping[str, Any]] = None
     parent_metrics: Mapping[str, Any] = field(default_factory=dict)
     candidate_metrics: Mapping[str, Any] = field(default_factory=dict)
+    scenario_results: tuple[Mapping[str, Any], ...] = ()
     reasons: tuple[str, ...] = ()
     created_at: str = ""
 
@@ -89,25 +90,55 @@ class AlgorithmValidator:
         evaluate_plan: PlanEvaluator,
         *,
         budget: Optional[Mapping[str, Any]] = None,
+        profiles: Sequence[Mapping[str, Any]] = (),
     ) -> AlgorithmValidationRecord:
         if child.parent_algorithm_id != parent.algorithm_id:
-            return self._failed(parent, child, profile, history, "parent_algorithm_mismatch", budget=budget)
+            return self._failed(parent, child, profile, history, "parent_algorithm_mismatch", budget=budget, profiles=profiles)
         if child.parent_source_sha256 != parent.source_sha256:
-            return self._failed(parent, child, profile, history, "parent_source_hash_mismatch", budget=budget)
-        parent_result = sandbox.run(parent.source, profile, history)
-        child_result = sandbox.run(child.source, profile, history)
-        if parent_result.status != "success" or parent_result.plan is None:
-            return self._failed(parent, child, profile, history, "parent_algorithm_execution_failed", budget=budget)
-        if child_result.status != "success" or child_result.plan is None:
-            return self._failed(parent, child, profile, history, "candidate_algorithm_execution_failed", budget=budget)
-        try:
-            parent_metrics = dict(evaluate_plan(parent_result))
-            child_metrics = dict(evaluate_plan(child_result))
-        except (RuntimeError, TypeError, ValueError) as exc:
-            return self._failed(parent, child, profile, history, "algorithm_comparison_failed:%s" % exc, budget=budget)
+            return self._failed(parent, child, profile, history, "parent_source_hash_mismatch", budget=budget, profiles=profiles)
+
+        scenario_profiles = tuple(profiles) or (profile,)
+        scenario_results: list[Mapping[str, Any]] = []
+        for index, scenario_profile in enumerate(scenario_profiles):
+            parent_result = sandbox.run(parent.source, scenario_profile, history)
+            child_result = sandbox.run(child.source, scenario_profile, history)
+            scenario: dict[str, Any] = {
+                "scenario_id": "scenario-%02d" % index,
+                "profile_digest": stable_digest(scenario_profile),
+            }
+            if parent_result.status != "success" or parent_result.plan is None:
+                scenario["valid"] = False
+                scenario["reasons"] = ["parent_algorithm_execution_failed"]
+                scenario_results.append(scenario)
+                continue
+            if child_result.status != "success" or child_result.plan is None:
+                scenario["valid"] = False
+                scenario["reasons"] = ["candidate_algorithm_execution_failed"]
+                scenario_results.append(scenario)
+                continue
+            try:
+                parent_metrics = dict(evaluate_plan(parent_result))
+                child_metrics = dict(evaluate_plan(child_result))
+            except (RuntimeError, TypeError, ValueError) as exc:
+                scenario["valid"] = False
+                scenario["reasons"] = ["algorithm_comparison_failed:%s" % exc]
+                scenario_results.append(scenario)
+                continue
+            scenario["valid"] = True
+            scenario["parent_plan"] = parent_result.plan.to_dict()
+            scenario["candidate_plan"] = child_result.plan.to_dict()
+            scenario["parent_metrics"] = parent_metrics
+            scenario["candidate_metrics"] = child_metrics
+            if parent_metrics.get("valid") is not True or child_metrics.get("valid") is not True:
+                scenario["valid"] = False
+                scenario["reasons"] = ["comparison_evidence_invalid"]
+            scenario_results.append(scenario)
+
+        parent_metrics = _aggregate_metrics([item.get("parent_metrics", {}) for item in scenario_results if item.get("valid") is True])
+        child_metrics = _aggregate_metrics([item.get("candidate_metrics", {}) for item in scenario_results if item.get("valid") is True])
 
         reasons: list[str] = []
-        if parent_metrics.get("valid") is not True or child_metrics.get("valid") is not True:
+        if not scenario_results or any(item.get("valid") is not True for item in scenario_results):
             reasons.append("comparison_evidence_invalid")
         parent_score = _score(parent_metrics)
         child_score = _score(child_metrics)
@@ -125,11 +156,12 @@ class AlgorithmValidator:
             candidate_source_sha256=child.source_sha256,
             valid=not reasons,
             evidence_level=evidence_level,
-            controlled_conditions_digest=_conditions_digest(profile, history, budget),
-            parent_plan=parent_result.plan.to_dict(),
-            candidate_plan=child_result.plan.to_dict(),
+            controlled_conditions_digest=_conditions_digest(profile, history, budget, scenario_profiles),
+            parent_plan=scenario_results[0].get("parent_plan") if scenario_results else None,
+            candidate_plan=scenario_results[0].get("candidate_plan") if scenario_results else None,
             parent_metrics=parent_metrics,
             candidate_metrics=child_metrics,
+            scenario_results=tuple(scenario_results),
             reasons=tuple(reasons),
         )
 
@@ -142,6 +174,7 @@ class AlgorithmValidator:
         reason: str,
         *,
         budget: Optional[Mapping[str, Any]],
+        profiles: Sequence[Mapping[str, Any]] = (),
     ) -> AlgorithmValidationRecord:
         return AlgorithmValidationRecord(
             algorithm_id=child.algorithm_id,
@@ -150,7 +183,7 @@ class AlgorithmValidator:
             candidate_source_sha256=child.source_sha256,
             valid=False,
             evidence_level="sandbox_only",
-            controlled_conditions_digest=_conditions_digest(profile, history, budget),
+            controlled_conditions_digest=_conditions_digest(profile, history, budget, tuple(profiles) or (profile,)),
             reasons=(reason,),
         )
 
@@ -161,6 +194,20 @@ def _score(metrics: Mapping[str, Any]) -> Optional[float]:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
     return None
+
+
+def _aggregate_metrics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Aggregate equal-weight diagnostic scenarios without hiding missing data."""
+
+    if not records:
+        return {"valid": False, "scenario_count": 0}
+    result: dict[str, Any] = {"valid": all(item.get("valid") is not False for item in records), "scenario_count": len(records)}
+    for key in ("search_score", "quality_score", "model_size_gb", "latency_s", "cost_units"):
+        values = [float(item[key]) for item in records if isinstance(item.get(key), (int, float)) and not isinstance(item.get(key), bool)]
+        if values:
+            result[key] = sum(values) / len(values)
+    result["offline_simulation"] = all(bool(item.get("offline_simulation", False)) for item in records)
+    return result
 
 
 def _lower_cost(candidate: Mapping[str, Any], parent: Mapping[str, Any]) -> bool:
@@ -184,6 +231,7 @@ def _conditions_digest(
     profile: Mapping[str, Any],
     history: Sequence[Mapping[str, Any]],
     budget: Optional[Mapping[str, Any]],
+    profiles: Sequence[Mapping[str, Any]],
 ) -> str:
     history_ids = [
         str(item.get("experience_id", item.get("round_id")))
@@ -196,6 +244,7 @@ def _conditions_digest(
             "profile_seed": profile.get("provenance", {}).get("seed") if isinstance(profile.get("provenance"), Mapping) else None,
             "history_ids": history_ids,
             "budget": dict(budget or {}),
+            "profile_digests": [stable_digest(item) for item in profiles],
         }
     )
 

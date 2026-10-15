@@ -165,7 +165,13 @@ class WanCompressionRegistry:
             factory = factories.get(factory_key)
             if factory is None:
                 raise ValueError("unavailable_trusted_operator_factory: %s" % factory_key)
-            operator = factory()
+            try:
+                operator = factory(spec)
+            except TypeError:
+                # Existing trusted factories predate version-aware factories.
+                # Keep their zero-argument contract while allowing a validated
+                # generated rule to receive its immutable OperatorSpec.
+                operator = factory()
             if operator.name != spec.name:
                 raise ValueError("trusted_operator_factory_name_mismatch")
             view._operators[operator.name] = operator

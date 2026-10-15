@@ -5,6 +5,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from harness4h3.adapters.wan import FakeWanDiTAdapter
+from harness4h3.evolution.agent import AlgorithmAgent
 from harness4h3.operators.wan import (
     OperatorSpec,
     SearchSpaceManager,
@@ -96,3 +97,65 @@ def test_threshold_operator_rejects_non_structural_threshold(tmp_path):
     )
     assert result.status == "failed"
     assert result.child_checkpoint is None
+
+
+def test_search_space_active_pointer_can_roll_back_without_deleting_new_version(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    manager = SearchSpaceManager(tmp_path / "space")
+    proposal = manager.propose(_threshold_spec(), "weight proxy plateau", ["R0001"])
+    validated = manager.validate(proposal, adapter, parent, output_dir=tmp_path / "validation")
+    version = manager.register(validated)
+    assert manager.active.version_id == version.version_id
+    rolled_back = manager.rollback("S0001")
+    assert rolled_back.version_id == "S0001"
+    assert manager.active.version_id == "S0001"
+    assert manager.store.latest().version_id == version.version_id
+    assert (tmp_path / "space" / "active.json").is_file()
+
+
+def test_agent_generated_rule_is_sandboxed_validated_registered_and_reused(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    rule_source = """def propose(profile, history):
+    channels = profile['channel_sensitivity'][0]['channels']
+    ordered = sorted(channels, key=lambda item: float(item['importance_score']))
+    retained = sorted([int(item['channel']) for item in ordered[:8]])
+    block_ids = [item['block_id'] for item in profile['layers']]
+    return {'operator': 'prune_ffn_channels', 'args': {'block_ids': block_ids, 'retained_indices': retained}}
+"""
+    spec = OperatorSpec(
+        name="agent_rule_low_noise_channel_rank",
+        version="1",
+        argument_schema={"block_ids": "list[str]"},
+        granularity="channel",
+        constraints=("delegates_to_trusted_ffn_operator",),
+        limitations=("cpu_fake_rule_evidence_only",),
+        trusted_factory_key="generated_channel_rule",
+        implementation_source=rule_source,
+    )
+    manager = SearchSpaceManager(tmp_path / "space")
+    agent = AlgorithmAgent(
+        provider=lambda payload: {
+            "spec": spec.to_dict(),
+            "rationale": "the fixed space cannot express this profile-ranked rule",
+            "evidence_ids": ["R0001"],
+        }
+    )
+    suggestion = agent.propose_search_space_change(search_space=manager.active.to_dict(), history=[], failures=["channel_importance_plateau"])
+    proposal = manager.propose(
+        OperatorSpec.from_dict(suggestion["spec"]),
+        suggestion["rationale"],
+        suggestion["evidence_ids"],
+    )
+    validated = manager.validate(proposal, adapter, parent, output_dir=tmp_path / "validation")
+    assert validated.status == "validated"
+    assert validated.validation["offline_simulation"] is True
+    assert validated.validation["implementation_source_sha256"]
+    version = manager.register(validated)
+    registry = manager.registry_for(version, build_wan_compression_registry())
+    assert spec.name in registry.names()
+    result = registry.execute(spec.name, adapter, parent, {"block_ids": ["block.0", "block.1", "block.2", "block.3"]}, tmp_path / "child")
+    assert result.status == "success"
+    assert result.structural_change["delegated_operator"] == "prune_ffn_channels"
+    assert result.structural_change["generated_rule_source_sha256"]
+    restored = SearchSpaceManager(tmp_path / "space")
+    assert spec.name in restored.registry_for(restored.active, build_wan_compression_registry()).names()

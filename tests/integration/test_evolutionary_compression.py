@@ -281,9 +281,11 @@ def test_evo_compress_features_form_restartable_cpu_fake_pipeline(tmp_path):
 
     first = loop.run_round()
     second = loop.run_round()
+    third = loop.run_round()
 
     assert first.status in {"promoted", "rejected"}
     assert second.status in {"promoted", "rejected"}
+    assert third.status in {"promoted", "rejected"}
     first_dir = tmp_path / "run" / "rounds" / first.round_id
     second_dir = tmp_path / "run" / "rounds" / second.round_id
     first_profile = json.loads((first_dir / "profile.json").read_text())
@@ -301,6 +303,20 @@ def test_evo_compress_features_form_restartable_cpu_fake_pipeline(tmp_path):
     assert algorithm["parent_algorithm_id"] == "A0001"
     assert algorithm["parent_source_sha256"] == validation["parent_source_sha256"]
     assert algorithm["validation_status"] in {"validated", "rejected"}
+    third_dir = tmp_path / "run" / "rounds" / third.round_id
+    algorithms = [
+        json.loads((tmp_path / "run" / "algorithms" / "candidates" / ("A%04d.json" % index)).read_text())
+        for index in (1, 2, 3)
+    ]
+    assert [item["algorithm_id"] for item in algorithms] == ["A0001", "A0002", "A0003"]
+    assert algorithms[1]["source_sha256"] != algorithms[0]["source_sha256"]
+    assert algorithms[2]["source_sha256"] != algorithms[1]["source_sha256"]
+    assert algorithms[1]["source_diff"]
+    assert algorithms[2]["source_diff"]
+    assert json.loads((third_dir / "algorithm.json").read_text())["parent_algorithm_id"] == "A0002"
+    assert (tmp_path / "run" / "algorithm-skills.jsonl").is_file()
+    skills = loop.skill_hub.search(architecture="WanFakeDiT", limit=16)
+    assert any(item.get("memory_kind") == "algorithm_skill" for item in skills)
     genes = [json.loads(line) for line in (tmp_path / "run" / "design-genes.jsonl").read_text().splitlines()]
     assert any(item["gene_id"].startswith("G-SS-") for item in genes)
     assert any(item["gene_id"] == "G-" + first.round_id for item in genes)

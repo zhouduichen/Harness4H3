@@ -81,7 +81,11 @@ class EvolutionLoop:
         self.model_store = model_store or ModelStore(self.output_root / "models")
         self.algorithm_store = algorithm_store or AlgorithmStore(self.output_root / "algorithms")
         self.experience_store = experience_store or ExperienceStore(self.output_root / "experiences.jsonl")
-        self.skill_hub = skill_hub or SkillHub(self.experience_store.path, self.output_root / "design-genes.jsonl")
+        self.skill_hub = skill_hub or SkillHub(
+            self.experience_store.path,
+            self.output_root / "design-genes.jsonl",
+            self.output_root / "algorithm-skills.jsonl",
+        )
         self.agent = agent or AlgorithmAgent()
         self.sandbox = sandbox or AlgorithmSandbox(self.output_root / "sandbox")
         self.registry = registry or build_wan_compression_registry()
@@ -172,7 +176,12 @@ class EvolutionLoop:
                 benefit=dict(validation.get("metrics") or {}),
                 remaining_limitation={"reason": "not_real_wan_validated", "limitations": list(spec.limitations)},
                 risks_lessons=["new execution capability is trusted only after interface, reload, and finite-value checks"],
-                evidence={"proposal_id": proposal.proposal_id, "search_space_version": self.search_space_version.version_id, "validation": validation},
+                evidence={
+                    "proposal_id": proposal.proposal_id,
+                    "search_space_version": self.search_space_version.version_id,
+                    "implementation_source_sha256": validation.get("implementation_source_sha256"),
+                    "validation": validation,
+                },
                 confidence="partial",
             )
         )
@@ -244,9 +253,10 @@ class EvolutionLoop:
                 improved_algorithm = improvement_parent is not None
             if not any(item.algorithm_id == algorithm.algorithm_id for item in self.algorithm_store.read()):
                 if algorithm.parent_algorithm_id and algorithm.parent_source_sha256:
-                    self.algorithm_store.create_child(algorithm, algorithm.parent_source_sha256)
+                    algorithm = self.algorithm_store.create_child(algorithm, algorithm.parent_source_sha256)
                 else:
-                    self.algorithm_store.create(algorithm)
+                    algorithm = self.algorithm_store.create(algorithm)
+                _write_json(algorithm_path, algorithm.to_dict())
         else:
             try:
                 if self.algorithm_improvement and improvement_parent is not None:
@@ -286,11 +296,12 @@ class EvolutionLoop:
             _write_json(algorithm_path, algorithm.to_dict())
             try:
                 if improved_algorithm:
-                    self.algorithm_store.create_child(algorithm, improvement_parent.source_sha256)  # type: ignore[union-attr]
+                    algorithm = self.algorithm_store.create_child(algorithm, improvement_parent.source_sha256)  # type: ignore[union-attr]
                 else:
-                    self.algorithm_store.create(algorithm)
+                    algorithm = self.algorithm_store.create(algorithm)
             except ValueError as exc:
                 return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "generation", "duplicate_algorithm", str(exc), {"profile": str(profile_path), "algorithm": str(algorithm_path)}, algorithm_persisted=False)
+            _write_json(algorithm_path, algorithm.to_dict())
         self._write_round_state(round_dir, {**round_state, "round_id": round_id, "parent_model_id": parent_candidate.id, "search_choice": search_choice, "algorithm_id": algorithm.algorithm_id, "status": "in_progress"})
 
         sandbox_path = round_dir / "sandbox.json"
@@ -302,17 +313,23 @@ class EvolutionLoop:
             return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "sandbox", sandbox_result.failure_type or "sandbox_failed", sandbox_result.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path)})
 
         validation_path = round_dir / "algorithm-validation.json"
+        validation_profiles_path = round_dir / "algorithm-validation-profiles.json"
         if improved_algorithm and improvement_parent is not None:
             validation = self._load_algorithm_validation(validation_path)
             if validation is None:
+                validation_profiles = self._load_validation_profiles(validation_profiles_path)
+                if validation_profiles is None:
+                    validation_profiles = self._build_validation_profiles(parent_artifact, profile)
+                    _write_json(validation_profiles_path, {"profiles": list(validation_profiles)})
                 validation = AlgorithmValidator().validate(
                     improvement_parent,
                     algorithm,
                     self.sandbox,
-                    profile.to_dict(),
+                    validation_profiles[0],
                     agent_history,
                     self._algorithm_proxy_evaluator,
                     budget={"sandbox_timeout_s": self.sandbox.timeout_s, "mode": "cpu_fake"},
+                    profiles=validation_profiles,
                 )
                 _write_json(validation_path, validation.to_dict())
             algorithm = replace(
@@ -334,6 +351,10 @@ class EvolutionLoop:
                 history=agent_history,
                 plan=sandbox_result.plan.to_dict(),
                 hypothesis=algorithm.hypothesis,
+                change_summary=algorithm.change_summary,
+                change_rationale=algorithm.change_rationale,
+                source_sha256=algorithm.source_sha256,
+                parent_source_sha256=algorithm.parent_source_sha256,
             )
             _write_json(design_path, design)
 
@@ -430,6 +451,9 @@ class EvolutionLoop:
             "parent_model_id": parent_candidate.id,
             "child_model_id": child_candidate.id,
             "algorithm_id": algorithm.algorithm_id,
+            "algorithm_source_sha256": algorithm.source_sha256,
+            "algorithm_parent_source_sha256": algorithm.parent_source_sha256,
+            "algorithm_source_diff": algorithm.source_diff,
             "operator": sandbox_result.plan.operator,
             "operator_args": dict(sandbox_result.plan.args),
             "algorithm_plan": sandbox_result.plan.to_dict(),
@@ -461,6 +485,17 @@ class EvolutionLoop:
         status = "accepted" if feasible else "rejected"
         self._record_experience(round_id, parent_candidate, child_candidate, algorithm, evaluation, decision, status, decision_path, design=design)
         self.algorithm_store.update(replace(algorithm, status=status, experiment_ids=(round_id,)))
+        if status == "accepted" or algorithm.validation_status == "validated":
+            self.skill_hub.record_algorithm(
+                algorithm,
+                architecture=parent_candidate.state.architecture_name,
+                validation_status="model_promoted" if status == "accepted" else algorithm.validation_status,
+                evidence={
+                    "round_id": round_id,
+                    "decision_path": str(decision_path),
+                    "offline_simulation": evaluation_offline,
+                },
+            )
         if feasible:
             self._update_pareto_front(child_candidate.id, evaluation)
             self.model_store.set_active(child_candidate.id)
@@ -471,6 +506,8 @@ class EvolutionLoop:
             paths["screening"] = str(screening_path / "screening.json")
         if validation_path.exists():
             paths["algorithm_validation"] = str(validation_path)
+        if validation_profiles_path.exists():
+            paths["algorithm_validation_profiles"] = str(validation_profiles_path)
         return EvolutionRound(round_id, parent_candidate.id, algorithm.algorithm_id, decision_status, child_candidate.id, decision, paths)
 
     def _finish_failure(self, round_id: str, round_dir: Path, parent: ModelCandidate, algorithm: AlgorithmCandidate, search_choice: str, stage: str, failure_type: str, message: str, paths: Mapping[str, str], *, algorithm_persisted: bool = True, design: Optional[Mapping[str, Any]] = None) -> EvolutionRound:
@@ -542,6 +579,12 @@ class EvolutionLoop:
             "architecture": parent.state.architecture_name,
             "algorithm_id": algorithm.algorithm_id,
             "algorithm_parent_id": algorithm.parent_algorithm_id,
+            "algorithm_source_sha256": algorithm.source_sha256,
+            "algorithm_parent_source_sha256": algorithm.parent_source_sha256,
+            "algorithm_source_diff": algorithm.source_diff,
+            "algorithm_change_summary": algorithm.change_summary,
+            "algorithm_change_rationale": algorithm.change_rationale,
+            "algorithm_validation_status": algorithm.validation_status,
             "hypothesis": algorithm.hypothesis,
             "predicted_gain": dict(algorithm.metadata.get("predicted_gain") or {}),
         }
@@ -611,6 +654,8 @@ class EvolutionLoop:
             state={
                 "architecture": parent.state.architecture_name,
                 "parent_model_id": parent.id,
+                "algorithm_id": decision.get("algorithm_id"),
+                "algorithm_parent_id": design.get("parent_algorithm_id"),
                 "offline_simulation": bool(parent.state.provenance.get("offline_simulation", False)),
             },
             bottleneck={
@@ -621,6 +666,8 @@ class EvolutionLoop:
                 "operator": plan.get("operator"),
                 "steps": list((plan.get("args") or {}).get("steps") or []),
                 "strategy": design.get("strategy"),
+                "algorithm_change_summary": design.get("change_summary"),
+                "algorithm_change_rationale": design.get("change_rationale"),
             },
             controlled_conditions={
                 "search_choice": design.get("search_choice"),
@@ -637,6 +684,8 @@ class EvolutionLoop:
                 "design_fingerprint": design.get("fingerprint"),
                 "parent_model_id": parent.id,
                 "child_model_id": child.id if child else None,
+                "algorithm_id": decision.get("algorithm_id"),
+                "algorithm_source_sha256": decision.get("algorithm_source_sha256"),
             },
             confidence="measured" if measured.get("valid") is True else "partial",
             created_at="",
@@ -837,6 +886,35 @@ class EvolutionLoop:
             "model_size_gb": cost,
             "cost_units": cost,
         }
+
+    def _build_validation_profiles(self, parent: CheckpointArtifact, profile: ProfileReport) -> tuple[Mapping[str, Any], ...]:
+        """Create fixed, same-parent diagnostic scenarios for algorithm comparison."""
+
+        base = profile.to_dict()
+        model = self.adapter.reload_model(parent)
+        seed = int(profile.provenance.get("seed", 7) or 7) if isinstance(profile.provenance, Mapping) else 7
+        alternate = profile_model(
+            self.adapter,
+            model,
+            seed=seed + 1,
+            advanced=self.advanced_profiling,
+            channel_chunk_size=16 if self.advanced_profiling else None,
+        ).to_dict()
+        alternate_provenance = dict(alternate.get("provenance") or {})
+        alternate_provenance["validation_scenario"] = "alternate_seed"
+        alternate["provenance"] = alternate_provenance
+        return (base, alternate)
+
+    @staticmethod
+    def _load_validation_profiles(path: Path) -> Optional[tuple[Mapping[str, Any], ...]]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            profiles = payload.get("profiles") if isinstance(payload, Mapping) else None
+            if not isinstance(profiles, list) or len(profiles) < 2:
+                return None
+            return tuple(dict(item) for item in profiles if isinstance(item, Mapping))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
 
     @staticmethod
     def _load_algorithm_validation(path: Path) -> Optional[AlgorithmValidationRecord]:

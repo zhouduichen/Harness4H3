@@ -5,10 +5,11 @@ import os
 import ast
 import hashlib
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Iterator
 
-from .candidate import AlgorithmCandidate
+from .candidate import AlgorithmCandidate, build_source_diff
 
 
 class AlgorithmStore:
@@ -39,6 +40,8 @@ class AlgorithmStore:
             raise ValueError("algorithm_candidate_exists: %s" % candidate.algorithm_id)
         self._atomic_write(source_path, candidate.source)
         self._atomic_write(metadata_path, json.dumps(candidate.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        if candidate.source_diff:
+            self._atomic_write(self.candidates_dir / (candidate.algorithm_id + ".diff"), candidate.source_diff)
         return candidate
 
     def create_child(self, candidate: AlgorithmCandidate, parent_source_sha256: str) -> AlgorithmCandidate:
@@ -51,7 +54,11 @@ class AlgorithmStore:
         expected = str(parent_source_sha256)
         if parent.source_sha256 != expected or candidate.parent_source_sha256 != expected:
             raise ValueError("parent_source_hash_mismatch")
-        return self.create(candidate)
+        expected_diff = build_source_diff(parent.source, candidate.source, parent_id=parent.algorithm_id, child_id=candidate.algorithm_id)
+        if candidate.source_diff and candidate.source_diff != expected_diff:
+            raise ValueError("algorithm_source_diff_mismatch")
+        prepared = candidate if candidate.source_diff else replace(candidate, source_diff=expected_diff)
+        return self.create(prepared)
 
     def duplicate_of(self, candidate: AlgorithmCandidate) -> AlgorithmCandidate | None:
         logic = _algorithm_logic_digest(candidate.source)

@@ -39,6 +39,24 @@ EvaluationRecord / archive / ExperienceStore
 `models/` 和 `experiences.jsonl`。fake 结果显式带有
 `offline_simulation=true`，不能作为真实 Wan 质量或硬件结论。
 
+要在 CPU Fake 上运行本阶段的完整 RSI 功能开关，使用
+`configs/evolutionary-compression.fake-rsi.yaml`：
+
+```bash
+.venv/bin/python -m harness4h3 evolve-compression \
+  --config configs/evolutionary-compression.fake-rsi.yaml --rounds 3 --json
+```
+
+该模式会保存至少三代算法源码和 `.diff`、算法级多 Profile 验证、
+`algorithm-skills.jsonl`、SearchSpaceVersion 的 `active.json` 和候选筛选记录。
+输出中的 `offline_simulation=true` 只能证明 RSI 机制可执行，不能替代真实 Wan
+的视频质量、延迟或显存证据。
+
+搜索空间提案中的 Agent 规则源码不会直接进入模型执行进程：它先经过独立
+Sandbox 生成已有可信算子的计划，再经过 Fake 模型 forward、保存/重载、哈希和
+有限值检查；未通过的提案保持 `rejected`，已注册版本可通过
+`SearchSpaceManager.rollback("S0001")` 回退。
+
 ## 真实 Wan smoke
 
 编辑 `configs/evolutionary-compression.wan.example.yaml` 中的可信本地

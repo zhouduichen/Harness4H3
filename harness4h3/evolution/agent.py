@@ -7,7 +7,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from .candidate import AlgorithmCandidate
+from .candidate import AlgorithmCandidate, build_source_diff
 
 
 Provider = Callable[[Mapping[str, Any]], Mapping[str, Any]]
@@ -22,6 +22,46 @@ ALGORITHM_RESPONSE_SCHEMA = {
         "hypothesis": {"type": "string"},
         "parent_id": {"type": ["string", "null"]},
         "predicted_gain": {"type": "object"},
+    },
+}
+
+IMPROVEMENT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["source", "hypothesis", "parent_id"],
+    "properties": {
+        "source": {"type": "string"},
+        "hypothesis": {"type": "string"},
+        "parent_id": {"type": ["string", "null"]},
+        "predicted_gain": {"type": "object"},
+        "change_summary": {"type": "string"},
+        "change_rationale": {"type": "string"},
+        "evidence_ids": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+SEARCH_SPACE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["spec", "rationale", "evidence_ids"],
+    "properties": {
+        "spec": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["name", "version", "argument_schema", "granularity", "trusted_factory_key"],
+            "properties": {
+                "name": {"type": "string"},
+                "version": {"type": "string"},
+                "argument_schema": {"type": "object"},
+                "granularity": {"type": "string"},
+                "constraints": {"type": "array", "items": {"type": "string"}},
+                "limitations": {"type": "array", "items": {"type": "string"}},
+                "trusted_factory_key": {"type": "string"},
+                "implementation_source": {"type": "string"},
+            },
+        },
+        "rationale": {"type": "string"},
+        "evidence_ids": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -197,6 +237,7 @@ class AlgorithmAgent:
                 parent_id=parent_id,
                 parent_algorithm_id=parent.algorithm_id,
                 parent_source_sha256=parent.source_sha256,
+                source_diff=build_source_diff(parent.source, source, parent_id=parent.algorithm_id, child_id=algorithm_id),
                 hypothesis=hypothesis,
                 change_summary=summary,
                 change_rationale=rationale,
@@ -214,7 +255,10 @@ class AlgorithmAgent:
         payload = {
             "parent_algorithm_id": parent.algorithm_id,
             "parent_source_sha256": parent.source_sha256,
-            "parent_source": parent.source[:12000],
+            # The parent source is the object being improved.  Keep it intact;
+            # bounded history/profile fields are handled separately below.
+            "parent_source": parent.source,
+            "parent_source_line_count": len(parent.source.splitlines()),
             "profile": _compact_profile(profile),
             "history": _compact_context_items(history),
             "skills": _compact_context_items(skills),
@@ -240,6 +284,7 @@ class AlgorithmAgent:
             parent_id=parent_id,
             parent_algorithm_id=parent.algorithm_id,
             parent_source_sha256=parent.source_sha256,
+            source_diff=build_source_diff(parent.source, source, parent_id=parent.algorithm_id, child_id=algorithm_id),
             hypothesis=str(raw.get("hypothesis", "")),
             change_summary=str(raw.get("change_summary", "provider source revision")),
             change_rationale=str(raw.get("change_rationale", "provider used parent source and feedback")),
@@ -463,6 +508,33 @@ def _deterministic_improvement_source(
             "conserve quality by selecting one least-sensitive block from the measured profile",
         )
 
+    if "prune_ffn_channels" in parent.source:
+        source = (
+            "def propose(profile, history):\n"
+            "    # Improve %s: use low-noise timestep evidence and a tighter width budget after the FFN revision.\n"
+            "    width = int(profile.get('model', {}).get('ffn_width', 1))\n"
+            "    timestep = profile.get('timestep_sensitivity', {}).get('low_noise', {})\n"
+            "    timestep_weight = 1.0 + float(timestep.get('importance_score', 0.0) or 0.0)\n"
+            "    target = max(1, int(width * 0.625))\n"
+            "    records = []\n"
+            "    for item in profile.get('channel_sensitivity', []):\n"
+            "        for channel in item.get('channels', []):\n"
+            "            if channel.get('importance_score') is not None:\n"
+            "                records.append({'channel': channel['channel'], 'score': float(channel['importance_score']) * timestep_weight})\n"
+            "    ordered = sorted(records, key=lambda item: float(item['score']))\n"
+            "    retained_indices = sorted({int(item['channel']) for item in ordered[:target]})\n"
+            "    if not retained_indices:\n"
+            "        retained_indices = list(range(target))\n"
+            "    block_ids = [item['block_id'] for item in profile.get('layers', [])]\n"
+            "    return {'operator': 'prune_ffn_channels', 'args': {'block_ids': block_ids, 'retained_indices': retained_indices}}\n"
+        ) % parent.algorithm_id
+        return (
+            source,
+            "add timestep-aware channel ranking and tighten the FFN budget",
+            "the previous FFN rule reached an efficiency plateau without using timestep evidence",
+            "rank channels with low-noise sensitivity and retain a smaller aligned width",
+        )
+
     source = (
         "def propose(profile, history):\n"
         "    # Improve %s: efficiency feedback changes channel ordering while keeping the trusted operator.\n"
@@ -558,6 +630,15 @@ def _compact_memory_item(item: Mapping[str, Any]) -> dict[str, Any]:
         if field in item:
             value = item[field]
             compact[field] = value[:240] if isinstance(value, str) else value
+    for field in ("algorithm_id", "algorithm_parent_id", "change_summary", "change_rationale"):
+        if field in item:
+            value = item[field]
+            compact[field] = value[:240] if isinstance(value, str) else value
+    if item.get("memory_kind") == "algorithm_skill" and isinstance(item.get("algorithm_source"), str):
+        # The complete immutable source remains in AlgorithmStore.  This
+        # bounded copy lets a provider reuse the skill without allowing
+        # unbounded historical sources to overflow its prompt.
+        compact["algorithm_source"] = item["algorithm_source"][:6000]
 
     def compact_args(value: Any) -> dict[str, Any]:
         if not isinstance(value, Mapping):
@@ -668,8 +749,29 @@ def build_algorithm_provider(
         raise ValueError("unsupported_algorithm_provider: %s" % provider_name)
 
     def call(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        prompt = (
-            "Generate one concise compression algorithm for a trusted Wan DiT harness. "
+        task = str(payload.get("task", "generate_algorithm"))
+        if task == "improve_existing_algorithm_source":
+            instruction = (
+                "Improve the complete parent algorithm source included in this request. "
+                "Read every line of parent_source, identify a concrete failure or limitation, "
+                "and return the complete modified source, not a patch, pseudocode, or a fresh "
+                "unrelated seed. State exactly what source-level behavior changed and why. "
+            )
+            response_schema = IMPROVEMENT_RESPONSE_SCHEMA
+        elif task == "propose_search_space_extension":
+            instruction = (
+                "Analyze the current compression search space and propose one capability it "
+                "cannot express. Return a declarative OperatorSpec proposal only; do not return "
+                "imports, shell commands, or an untrusted factory. If using the "
+                "generated_channel_rule factory, implementation_source may contain one complete "
+                "bounded propose(profile, history) function that delegates to a base operator; "
+                "the trusted validator will run it in the Sandbox. "
+            )
+            response_schema = SEARCH_SPACE_RESPONSE_SCHEMA
+        else:
+            instruction = "Generate one concise compression algorithm for a trusted Wan DiT harness. "
+            response_schema = ALGORITHM_RESPONSE_SCHEMA
+        algorithm_rules = (
             "Return JSON only with source, hypothesis, and parent_id. The source must define "
             "a complete Python function `def propose(profile, history): ...` and return only "
             "a bounded operator/args plan; keep the source body under 500 tokens, never return "
@@ -694,8 +796,16 @@ def build_algorithm_provider(
             "The returned parent_id must exactly match the supplied parent_id. "
             "Never output paths, devices, shell commands, imports outside the sandbox allowlist, "
             "or evaluator settings.\n\n"
-            + json.dumps(dict(payload), ensure_ascii=False, sort_keys=True)
         )
+        search_space_rules = (
+            "Return JSON only with spec, rationale, and evidence_ids. The spec must describe "
+            "one new declarative capability not already present in search_space. Do not include "
+            "imports, shell commands, paths, devices, evaluator settings, or a factory "
+            "implementation. A generated_channel_rule may include bounded implementation_source "
+            "only; it must delegate to prune_ffn_channels and will be sandboxed.\n\n"
+        )
+        prompt = instruction + (search_space_rules if task == "propose_search_space_extension" else algorithm_rules)
+        prompt += json.dumps(dict(payload), ensure_ascii=False, sort_keys=True)
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if provider in {"openai", "openai_compatible", "vllm"} and api_key_env:
             token = os.environ.get(api_key_env, "").strip()
@@ -707,7 +817,7 @@ def build_algorithm_provider(
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
                 "think": False,
-                "format": ALGORITHM_RESPONSE_SCHEMA,
+                "format": response_schema,
                 "options": {"temperature": 0.2},
             }
         elif provider in {"vllm", "openai_compatible"}:
@@ -733,7 +843,7 @@ def build_algorithm_provider(
                 "instructions": "Return JSON only; do not call tools or output unsafe execution instructions.",
                 "input": prompt,
                 "store": False,
-                "text": {"format": {"type": "json_schema", "name": "compression_algorithm", "strict": True, "schema": ALGORITHM_RESPONSE_SCHEMA}},
+                "text": {"format": {"type": "json_schema", "name": "evolution_request", "strict": True, "schema": response_schema}},
             }
         request = urllib.request.Request(url, data=json.dumps(request_payload).encode("utf-8"), headers=headers, method="POST")
         try:
