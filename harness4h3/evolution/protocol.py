@@ -197,6 +197,7 @@ def _config_record(name: str, path: Path, *, allow_missing_assets: bool) -> dict
         "latency_warmup": int(evaluator.get("latency_warmup", 1)),
         "latency_repeats": int(evaluator.get("latency_repeats", DEFAULT_LATENCY_REPEATS)),
         "visual_quality_gate": dict(evaluator.get("visual_quality_gate") or {}),
+        "evaluation_split": str(evaluator.get("evaluation_split", "unspecified")).strip().lower(),
         "source_revision": source_revision,
     }
     controller = _controller_record(raw)

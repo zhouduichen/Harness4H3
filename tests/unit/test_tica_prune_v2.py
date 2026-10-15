@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from harness4h3.evolution.tica_calibration import TICACalibrationManifest, TICAEvaluationSplits
@@ -50,6 +52,54 @@ def test_greedy_and_beam_have_different_state_trajectories():
     beam = TICAPruner().search(None, None, _manifest(), _profile(), TICARecipe(strategy="greedy_beam", beam_width=2, **common), evaluate_candidate=_measure)
     assert len(beam.search_states) > len(greedy.search_states)
     assert {item["depth"] for item in beam.search_states} >= {1, 2}
+
+
+def test_selected_plan_carries_search_rule_and_is_on_pareto_front():
+    recipe = TICARecipe(
+        baseline_name="tica_block",
+        include_baseline_suite=False,
+        strategy="greedy",
+        max_search_depth=2,
+        risk_limit=0.8,
+        max_full_evals=4,
+        max_fast_evals=8,
+    )
+    result = TICAPruner().search(None, None, _manifest(), _profile(), recipe, evaluate_candidate=_measure)
+    assert result.selected_candidate_id is not None
+    selected = next(item for item in result.candidates if item.candidate_id == result.selected_candidate_id)
+    assert selected.plan["strategy"] == "greedy"
+    assert selected.plan["max_search_depth"] == 2
+    assert result.selected_candidate_id in {item["candidate_id"] for item in result.pareto_front}
+
+
+def test_agent_seed_plan_changes_the_search_trajectory():
+    recipe = TICARecipe(
+        baseline_name="tica_block",
+        include_baseline_suite=False,
+        risk_limit=0.8,
+        max_full_evals=2,
+        max_fast_evals=4,
+    )
+    first = TICAPruner().search(
+        None,
+        None,
+        _manifest(),
+        _profile(),
+        recipe,
+        evaluate_candidate=_measure,
+        seed_plan={"block_ids": ["block.0"], "retained_indices": [0, 1, 2, 3, 4, 5]},
+    )
+    second = TICAPruner().search(
+        None,
+        None,
+        _manifest(),
+        _profile(),
+        recipe,
+        evaluate_candidate=_measure,
+        seed_plan={"block_ids": ["block.3"], "retained_indices": [2, 3, 4, 5, 6, 7]},
+    )
+    assert first.candidates[0].plan["block_ids"] != second.candidates[0].plan["block_ids"]
+    assert first.selected_plan_digest != second.selected_plan_digest
 
 
 def test_risk_time_and_activation_rules_change_search_decisions():
@@ -131,11 +181,70 @@ def test_search_refuses_test_split_and_missing_ffn_evidence():
     assert result.selected_candidate_id is None
 
 
+def test_evaluation_splits_reject_reused_cached_source_hash():
+    digest = "a" * 64
+    def manifest(sample_id, prefix):
+        return TICACalibrationManifest.from_dict(
+            {
+                "provider_name": "cached_real_wan",
+                "specs": [
+                    {
+                        "sample_id": sample_id,
+                        "prompt": prefix,
+                        "seed": 7,
+                        "latent_shape": [1, 1, 1, 1, 1],
+                        "timesteps": [0.5],
+                        "latent_path": "/tmp/%s-latent.pt" % prefix,
+                        "encoder_hidden_states_path": "/tmp/%s-hidden.pt" % prefix,
+                        "latent_sha256": digest,
+                        "encoder_hidden_states_sha256": "b" * 64,
+                    }
+                ],
+            }
+        )
+
+    calibration = manifest("calibration-0", "shared")
+    validation = manifest("validation-0", "shared")
+    test = TICACalibrationManifest.from_fake(hidden_size=1, sample_prefix="test")
+    with pytest.raises(ValueError, match="source is reused"):
+        TICAEvaluationSplits(calibration=calibration, validation=validation, test=test)
+
+
 def test_evaluation_splits_reject_reused_sample_ids():
     calibration = TICACalibrationManifest.from_fake(hidden_size=8, sample_count=1)
     validation = TICACalibrationManifest.from_fake(hidden_size=8, sample_count=1)
     with pytest.raises(ValueError, match="split leakage"):
         TICAEvaluationSplits(calibration=calibration, validation=validation, test=calibration)
+
+
+def test_real_manifest_verifies_cached_tensor_source_hashes(tmp_path):
+    latent = tmp_path / "latent.bin"
+    hidden = tmp_path / "hidden.bin"
+    latent.write_bytes(b"latent-v1")
+    hidden.write_bytes(b"hidden-v1")
+    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest = TICACalibrationManifest.from_dict(
+        {
+            "provider_name": "cached_real_wan",
+            "specs": [
+                {
+                    "sample_id": "real-0",
+                    "prompt": "a real sample",
+                    "seed": 7,
+                    "latent_shape": [2, 8],
+                    "timesteps": [0.9, 0.5, 0.1],
+                    "latent_path": str(latent),
+                    "encoder_hidden_states_path": str(hidden),
+                    "latent_sha256": digest(latent),
+                    "encoder_hidden_states_sha256": digest(hidden),
+                }
+            ],
+        }
+    )
+    manifest.verify_cached_sources()
+    latent.write_bytes(b"latent-v2")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        manifest.verify_cached_sources()
 
 
 def test_human_tica_source_matches_full_rule_schema(tmp_path):

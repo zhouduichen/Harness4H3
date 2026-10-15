@@ -25,7 +25,8 @@ candidate_screening: true
 - `rounds/Rxxxx/algorithm-validation-measurements/`：父子算法在相同参考 Checkpoint 和固定 Probe 下的真实 Fake 模型级压缩、重载、输出和成本测量。
 - `rounds/Rxxxx/tica-search.json`：TICA-Prune v2 的规范化 SearchState、候选计划摘要、选中候选、Pareto 前沿、预算账本和缓存命中记录。交互分析的独立模型执行同时计入 `full_evals`。
 - TICA 指标口径固定为：`parameter_count`/Transformer 权重大小只描述压缩目标 Transformer；`pipeline_model_size` 描述包含文本编码器、VAE 和配置的完整 Pipeline 逻辑大小，并按 inode 去重硬链接/软链接；CUDA 峰值显存只接受实际执行 Device 上的正数监控值，不可用时写 `null`。
-- TICA 的校准输入只能用于敏感度和候选搜索；算法比较使用固定 Validation 场景，Test split 不会进入搜索或反馈。`TICAEvaluationSplits` 会拒绝复用 sample ID 的划分。
+- TICA 的校准输入只能用于敏感度和候选搜索；算法比较使用独立 Validation manifest，最终 Wan 视频评价使用 held-out Test manifest，Test split 不会进入搜索或反馈。`TICAEvaluationSplits` 会拒绝复用 sample ID 的划分；真实 Wan TICA 运行必须显式提供三份 manifest。
+- 真实 Wan TICA 配置必须将 `evaluator.evaluation_split` 设为 `test`；这表示最终晋升只读取独立 held-out 视频评测结果，不能把 Calibration/Validation 指标冒充最终结果。
 - TICA 搜索结果是最终执行计划的唯一来源。`decision.json` 同时记录 `selected_candidate_id`、`selected_plan_digest` 和 `final_plan_digest`，摘要不一致时不会进入压缩和晋升流程。
 - `rounds/Rxxxx/screening/screening.json`：静态、诊断、完整评测三阶段及每阶段成本/证据等级。
 - `design-genes.jsonl` 与 `algorithm-skills.jsonl`：可供下一轮 SkillHub 检索的算法、源码哈希、改动理由、验证状态和搜索空间经验。

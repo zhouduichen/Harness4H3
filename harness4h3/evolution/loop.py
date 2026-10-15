@@ -28,7 +28,7 @@ from .screening import CandidateScreeningPipeline, ScreeningContext
 from .skill_hub import SkillHub
 from .store import AlgorithmStore
 from .taxonomy import classify_algorithm_change, classify_search_space_proposal
-from .tica_calibration import TICACalibrationManifest
+from .tica_calibration import TICACalibrationManifest, TICAEvaluationSplits
 from .tica_prune import TICARecipe, TICAPruner, build_human_tica_source, collect_tica_profile, tica_operator_spec, tica_score
 from ..operators.wan import WanCompressionRegistry, build_wan_compression_registry
 
@@ -78,6 +78,7 @@ class EvolutionLoop:
         search_space_manager: Optional[SearchSpaceManager] = None,
         tica_prune: bool = False,
         tica_manifest: Optional[TICACalibrationManifest] = None,
+        tica_splits: Optional[TICAEvaluationSplits] = None,
         tica_recipe: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.adapter = adapter
@@ -96,11 +97,24 @@ class EvolutionLoop:
         self.agent = agent or AlgorithmAgent()
         self.sandbox = sandbox or AlgorithmSandbox(self.output_root / "sandbox")
         self.tica_prune = bool(tica_prune)
-        self.tica_manifest = tica_manifest
-        if self.tica_prune and self.tica_manifest is None and bool(parent.metadata.get("offline_simulation", False)):
-            self.tica_manifest = TICACalibrationManifest.from_fake(hidden_size=int(parent.structure.hidden_size))
+        self.tica_splits = tica_splits
+        self.tica_manifest = tica_splits.calibration if tica_splits is not None else tica_manifest
+        if self.tica_prune and self.tica_splits is None and bool(parent.metadata.get("offline_simulation", False)):
+            self.tica_splits = TICAEvaluationSplits(
+                calibration=self.tica_manifest or TICACalibrationManifest.from_fake(hidden_size=int(parent.structure.hidden_size), sample_prefix="calibration"),
+                validation=TICACalibrationManifest.from_fake(hidden_size=int(parent.structure.hidden_size), seed=1007, sample_prefix="validation"),
+                test=TICACalibrationManifest.from_fake(hidden_size=int(parent.structure.hidden_size), seed=2007, sample_prefix="test"),
+            )
+            self.tica_manifest = self.tica_splits.calibration
         if self.tica_prune and self.tica_manifest is None:
-            raise ValueError("TICA requires an explicit cached-real-Wan calibration manifest")
+            raise ValueError("TICA requires explicit Calibration/Validation/Test manifests")
+        if self.tica_prune and self.tica_splits is None:
+            raise ValueError("TICA requires Calibration/Validation/Test split manifests")
+        if self.tica_prune:
+            if any(manifest.provider_name != "fake_wan_cpu" for manifest in (self.tica_splits.calibration, self.tica_splits.validation, self.tica_splits.test)):  # type: ignore[union-attr]
+                for manifest in (self.tica_splits.calibration, self.tica_splits.validation, self.tica_splits.test):  # type: ignore[union-attr]
+                    manifest.verify_cached_sources()
+            _write_json(self.output_root / "tica-splits.json", self.tica_splits.to_dict())  # type: ignore[union-attr]
         self.tica_recipe = TICARecipe.from_mapping(tica_recipe)
         self._custom_evaluator = evaluator is not None
         self.registry = registry or build_wan_compression_registry(include_tica=self.tica_prune)
@@ -348,22 +362,40 @@ class EvolutionLoop:
             return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "sandbox", sandbox_result.failure_type or "sandbox_failed", sandbox_result.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path)})
 
         tica_search_payload: Mapping[str, Any] | None = None
+        active_tica_recipe: Optional[TICARecipe] = None
+        tica_agent_rule_digest: Optional[str] = None
         if self.tica_prune:
             # The Agent source is a bounded algorithm-rule proposal.  Its
             # returned recipe fields configure the actual search; the Agent
             # does not get to bypass trusted operators or execute a model.
             tica_recipe = self._tica_recipe_from_plan(sandbox_result.plan.args)
+            active_tica_recipe = tica_recipe
+            tica_agent_rule_digest = stable_digest(dict(sandbox_result.plan.args))
             if tica_search_path.exists():
                 cached_search = self._read_json(tica_search_path)
                 if (
                     cached_search.get("recipe") == tica_recipe.to_dict()
+                    and cached_search.get("algorithm_id") == algorithm.algorithm_id
+                    and cached_search.get("algorithm_source_sha256") == algorithm.source_sha256
+                    and cached_search.get("agent_rule_digest") == tica_agent_rule_digest
                     and cached_search.get("selected_candidate_id")
                     and cached_search.get("selected_plan_digest")
                 ):
                     tica_search_payload = cached_search
             if tica_search_payload is None:
-                search = self._run_tica_search(parent_artifact, profile_payload, round_dir, recipe=tica_recipe)
-                tica_search_payload = search.to_dict()
+                search = self._run_tica_search(
+                    parent_artifact,
+                    profile_payload,
+                    round_dir,
+                    recipe=tica_recipe,
+                    seed_plan=sandbox_result.plan.args,
+                )
+                tica_search_payload = {
+                    **search.to_dict(),
+                    "algorithm_id": algorithm.algorithm_id,
+                    "algorithm_source_sha256": algorithm.source_sha256,
+                    "agent_rule_digest": tica_agent_rule_digest,
+                }
                 _write_json(tica_search_path, tica_search_payload)
             selected_id = str(tica_search_payload.get("selected_candidate_id", ""))
             selected_digest = str(tica_search_payload.get("selected_plan_digest", ""))
@@ -406,7 +438,7 @@ class EvolutionLoop:
                     **dict(sandbox_result.metadata),
                     "tica_selected_candidate_id": selected_id,
                     "tica_selected_plan_digest": selected_digest,
-                    "tica_agent_rule_digest": stable_digest(dict(sandbox_result.plan.args)),
+                    "tica_agent_rule_digest": tica_agent_rule_digest,
                 },
             )
 
@@ -430,11 +462,12 @@ class EvolutionLoop:
                         validation_parent,
                         validation_profiles,
                         round_dir / "algorithm-validation-measurements",
+                        recipe=active_tica_recipe,
                     ),
                     budget={
                         "sandbox_timeout_s": self.sandbox.timeout_s,
                         "mode": "cpu_fake" if bool(validation_parent.metadata.get("offline_simulation", False)) else "real_wan_structure",
-                        "tica_search_budget": self.tica_recipe.budget() if self.tica_prune else None,
+                        "tica_search_budget": (active_tica_recipe or self.tica_recipe).budget() if self.tica_prune else None,
                     },
                     profiles=validation_profiles,
                 )
@@ -560,7 +593,7 @@ class EvolutionLoop:
                         round_dir / "model-evaluation",
                         seed=int(profile_payload.get("provenance", {}).get("seed", 7)),
                         calibration_manifest=self.tica_manifest,
-                        search_budget=self.tica_recipe.budget(),
+                        search_budget=(active_tica_recipe or self.tica_recipe).budget(),
                     )
                     evaluation = dict(measurement.evaluate(sandbox_result))
                 else:
@@ -664,6 +697,8 @@ class EvolutionLoop:
             decision["selected_plan_digest"] = tica_search_payload.get("selected_plan_digest")
             decision["final_plan_digest"] = TICAPruner._plan_digest(sandbox_result.plan.args)
             decision["tica_plan_digest_match"] = decision["selected_plan_digest"] == decision["final_plan_digest"]
+            decision["tica_agent_rule_digest"] = tica_search_payload.get("agent_rule_digest")
+            decision["tica_search_algorithm_id"] = tica_search_payload.get("algorithm_id")
         if self.candidate_screening:
             decision["screening"] = [item.to_dict() for item in CandidateScreeningPipeline(screening_path).load()]
         decision_path = round_dir / "decision.json"
@@ -1074,6 +1109,13 @@ class EvolutionLoop:
         _write_json(path, collected)
         return collected
 
+    def _tica_manifest_for_split(self, split: str) -> TICACalibrationManifest:
+        if self.tica_splits is None:
+            if self.tica_manifest is None:
+                raise ValueError("TICA split manifest is unavailable")
+            return self.tica_manifest
+        return self.tica_splits.manifest(split)
+
     def _tica_recipe_from_plan(self, plan: Mapping[str, Any]) -> TICARecipe:
         """Bind sandbox-approved Agent rule fields to the TICA search recipe."""
 
@@ -1097,7 +1139,15 @@ class EvolutionLoop:
         # silently changed by a structural plan field.
         return TICARecipe.from_mapping(raw)
 
-    def _run_tica_search(self, parent: CheckpointArtifact, profile: Mapping[str, Any], round_dir: Path, *, recipe: Optional[TICARecipe] = None) -> Any:
+    def _run_tica_search(
+        self,
+        parent: CheckpointArtifact,
+        profile: Mapping[str, Any],
+        round_dir: Path,
+        *,
+        recipe: Optional[TICARecipe] = None,
+        seed_plan: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
         """Run stateful TICA search under one bounded, shared budget.
 
         Fast measurements come from the already executed local sensitivity
@@ -1150,6 +1200,7 @@ class EvolutionLoop:
             profile,
             recipe,
             evaluate_candidate=measure,
+            seed_plan=seed_plan,
         )
 
     def _screening_context(
@@ -1184,6 +1235,8 @@ class EvolutionLoop:
         parent: CheckpointArtifact,
         profiles: tuple[Mapping[str, Any], ...],
         output_root: Path,
+        *,
+        recipe: Optional[TICARecipe] = None,
     ) -> Callable[..., Mapping[str, Any]]:
         """Build a scenario-aware callback for AlgorithmValidator.
 
@@ -1193,9 +1246,14 @@ class EvolutionLoop:
         """
 
         evaluators: dict[str, AlgorithmModelEvaluator] = {}
+        evaluator_recipe = recipe or self.tica_recipe
 
         def evaluate(result: SandboxResult, scenario_profile: Mapping[str, Any]) -> Mapping[str, Any]:
-            digest = stable_digest(scenario_profile)
+            split = str(scenario_profile.get("evaluation_split", "validation")).lower()
+            if split == "test":
+                raise ValueError("TICA algorithm validation cannot consume Test split")
+            scenario_manifest = self._tica_manifest_for_split(split) if self.tica_prune else None
+            digest = stable_digest({"profile": scenario_profile, "manifest": scenario_manifest.digest() if scenario_manifest is not None else None})
             evaluator = evaluators.get(digest)
             if evaluator is None:
                 seed_value = scenario_profile.get("provenance", {}).get("seed", 7) if isinstance(scenario_profile.get("provenance"), Mapping) else 7
@@ -1206,8 +1264,8 @@ class EvolutionLoop:
                     scenario_profile,
                     output_root / digest,
                     seed=int(seed_value or 7),
-                    calibration_manifest=self.tica_manifest if self.tica_prune else None,
-                    search_budget=self.tica_recipe.budget() if self.tica_prune else {"max_fast_evals": 8, "max_full_evals": 4, "max_interaction_evals": 2},
+                    calibration_manifest=scenario_manifest if self.tica_prune else None,
+                    search_budget=evaluator_recipe.budget() if self.tica_prune else {"max_fast_evals": 8, "max_full_evals": 4, "max_interaction_evals": 2},
                 )
                 evaluators[digest] = evaluator
             return evaluator.evaluate(result)
@@ -1358,7 +1416,7 @@ class EvolutionLoop:
             channel_chunk_size=16 if self.advanced_profiling else None,
         ).to_dict()
         if self.tica_prune:
-            tica = dict(collect_tica_profile(self.adapter, model, self.tica_manifest)) if self.tica_manifest is not None else {}
+            tica = dict(collect_tica_profile(self.adapter, model, self._tica_manifest_for_split("validation"))) if self.tica_prune else {}
             base = {**dict(base), **tica}
             alternate = {**dict(alternate), **tica}
             base["evaluation_split"] = "validation"

@@ -33,6 +33,8 @@ class CompressionConfig:
     candidate_screening: bool = False
     tica_prune: bool = False
     tica_calibration_manifest: Optional[Path] = None
+    tica_validation_manifest: Optional[Path] = None
+    tica_test_manifest: Optional[Path] = None
     tica_recipe: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -56,7 +58,7 @@ class CompressionConfig:
             raise CompressionConfigError("unable to read compression config: %s" % exc) from exc
         if not isinstance(raw, Mapping):
             raise CompressionConfigError("compression config must be a mapping")
-        allowed = {"backend", "checkpoint", "output_root", "device", "dtype", "local_files_only", "fake", "controller", "evaluator", "memory_enabled", "adapt_search_policy", "sandbox_timeout_s", "exploit_ratio", "seed", "advanced_profiling", "algorithm_improvement", "search_space_evolution", "candidate_screening", "tica_prune", "tica_calibration_manifest", "tica_recipe"}
+        allowed = {"backend", "checkpoint", "output_root", "device", "dtype", "local_files_only", "fake", "controller", "evaluator", "memory_enabled", "adapt_search_policy", "sandbox_timeout_s", "exploit_ratio", "seed", "advanced_profiling", "algorithm_improvement", "search_space_evolution", "candidate_screening", "tica_prune", "tica_calibration_manifest", "tica_validation_manifest", "tica_test_manifest", "tica_recipe"}
         unknown = sorted(set(raw) - allowed)
         if unknown:
             raise CompressionConfigError("unsupported compression config field(s): %s" % ", ".join(unknown))
@@ -76,12 +78,15 @@ class CompressionConfig:
         recipe = raw.get("tica_recipe", {})
         if not isinstance(recipe, Mapping):
             raise CompressionConfigError("tica_recipe must be a mapping")
-        manifest_raw = raw.get("tica_calibration_manifest")
-        manifest_path = None
-        if manifest_raw:
-            manifest_path = Path(str(manifest_raw)).expanduser()
-            if not manifest_path.is_absolute():
-                manifest_path = (source.parent / manifest_path).resolve()
+        manifest_paths: dict[str, Optional[Path]] = {}
+        for field_name in ("tica_calibration_manifest", "tica_validation_manifest", "tica_test_manifest"):
+            manifest_raw = raw.get(field_name)
+            manifest_path = None
+            if manifest_raw:
+                manifest_path = Path(str(manifest_raw)).expanduser()
+                if not manifest_path.is_absolute():
+                    manifest_path = (source.parent / manifest_path).resolve()
+            manifest_paths[field_name] = manifest_path
         return cls(
             backend=str(raw.get("backend", "fake")),
             checkpoint=str(raw.get("checkpoint", "fake://baseline")),
@@ -102,6 +107,8 @@ class CompressionConfig:
             search_space_evolution=bool(raw.get("search_space_evolution", False)),
             candidate_screening=bool(raw.get("candidate_screening", False)),
             tica_prune=bool(raw.get("tica_prune", False)),
-            tica_calibration_manifest=manifest_path,
+            tica_calibration_manifest=manifest_paths["tica_calibration_manifest"],
+            tica_validation_manifest=manifest_paths["tica_validation_manifest"],
+            tica_test_manifest=manifest_paths["tica_test_manifest"],
             tica_recipe=dict(recipe),
         )

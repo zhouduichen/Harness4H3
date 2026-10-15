@@ -50,6 +50,8 @@ class TICACalibrationSpec:
     timesteps: tuple[float, ...]
     latent_path: str | None = None
     encoder_hidden_states_path: str | None = None
+    latent_sha256: str | None = None
+    encoder_hidden_states_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not str(self.sample_id).strip():
@@ -62,6 +64,10 @@ class TICACalibrationSpec:
             raise ValueError("TICA calibration timesteps must be finite")
         if any(float(value) < 0.0 or float(value) > 1.0 for value in self.timesteps):
             raise ValueError("TICA calibration timesteps must be normalized to [0, 1]")
+        for name in ("latent_sha256", "encoder_hidden_states_sha256"):
+            value = getattr(self, name)
+            if value is not None and (len(str(value)) != 64 or any(char not in "0123456789abcdefABCDEF" for char in str(value))):
+                raise ValueError("TICA %s must be a SHA-256 digest" % name)
 
     def to_dict(self) -> dict[str, Any]:
         return _jsonable(asdict(self))
@@ -125,13 +131,14 @@ class TICACalibrationManifest:
         sample_count: int = 2,
         timesteps: Sequence[float] = (0.9, 0.5, 0.1),
         seed: int = 7,
+        sample_prefix: str = "fake",
     ) -> "TICACalibrationManifest":
         if int(hidden_size) <= 0 or int(sample_count) <= 0:
             raise ValueError("fake TICA manifest dimensions must be positive")
         specs = tuple(
             TICACalibrationSpec(
-                sample_id="fake-%02d" % index,
-                prompt="fake Wan calibration sample %d" % index,
+                sample_id="%s-%02d" % (sample_prefix, index),
+                prompt="fake Wan calibration sample %d (%s)" % (index, sample_prefix),
                 seed=int(seed) + index,
                 latent_shape=(2, int(hidden_size)),
                 timesteps=tuple(float(value) for value in timesteps),
@@ -165,6 +172,12 @@ class TICACalibrationManifest:
                     if item.get("encoder_hidden_states_path")
                     else None
                 ),
+                latent_sha256=str(item["latent_sha256"]) if item.get("latent_sha256") else None,
+                encoder_hidden_states_sha256=(
+                    str(item["encoder_hidden_states_sha256"])
+                    if item.get("encoder_hidden_states_sha256")
+                    else None
+                ),
             )
             for item in raw.get("specs", [])
             if isinstance(item, Mapping)
@@ -192,6 +205,27 @@ class TICACalibrationManifest:
             "offline_simulation": self.provider_name == "fake_wan_cpu",
         }
 
+    def verify_cached_sources(self) -> None:
+        """Verify replayable tensor files before a real Wan run starts."""
+
+        for spec in self.specs:
+            sources = (
+                ("latent", spec.latent_path, spec.latent_sha256),
+                ("encoder_hidden_states", spec.encoder_hidden_states_path, spec.encoder_hidden_states_sha256),
+            )
+            for name, raw_path, expected in sources:
+                if not raw_path or not expected:
+                    raise ValueError("TICA %s source/hash is missing for sample %s" % (name, spec.sample_id))
+                path = Path(raw_path).expanduser()
+                if not path.is_file():
+                    raise ValueError("TICA %s source is missing for sample %s: %s" % (name, spec.sample_id, path))
+                digest = hashlib.sha256()
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != str(expected).lower():
+                    raise ValueError("TICA %s source hash mismatch for sample %s" % (name, spec.sample_id))
+
     def samples(self, model: Any, adapter: Any) -> tuple[TICACalibrationInput, ...]:
         loader = getattr(adapter, "tica_calibration_inputs", None)
         if not callable(loader):
@@ -214,6 +248,7 @@ class TICAEvaluationSplits:
             "test": self.test,
         }
         seen: dict[str, str] = {}
+        seen_sources: dict[tuple[str, str], str] = {}
         for role, manifest in manifests.items():
             if not isinstance(manifest, TICACalibrationManifest):
                 raise TypeError("TICA %s split must be a TICACalibrationManifest" % role)
@@ -222,6 +257,27 @@ class TICAEvaluationSplits:
                 if sample_id in seen:
                     raise ValueError("TICA evaluation split leakage: %s appears in %s and %s" % (sample_id, seen[sample_id], role))
                 seen[sample_id] = role
+                for source_name, raw_path, source_hash in (
+                    ("latent", spec.latent_path, spec.latent_sha256),
+                    ("encoder_hidden_states", spec.encoder_hidden_states_path, spec.encoder_hidden_states_sha256),
+                ):
+                    # A split must not reuse the same cached tensor under a
+                    # different sample ID.  Prefer the immutable content
+                    # hash; the resolved path catches manifests created
+                    # before hashes were added and also handles symlinks.
+                    identities = []
+                    if source_hash:
+                        identities.append((source_name, "sha256:" + str(source_hash).lower()))
+                    if raw_path:
+                        identities.append((source_name, "path:" + str(Path(raw_path).expanduser().resolve())))
+                    for identity in identities:
+                        previous_role = seen_sources.get(identity)
+                        if previous_role is not None and previous_role != role:
+                            raise ValueError(
+                                "TICA evaluation split leakage: %s source is reused between %s and %s"
+                                % (source_name, previous_role, role)
+                            )
+                        seen_sources[identity] = role
 
     def digest(self) -> str:
         return stable_digest(

@@ -170,6 +170,7 @@ class TICASearchResult:
     selected_plan_digest: Optional[str] = None
     search_states: tuple[Mapping[str, Any], ...] = ()
     budget_audit: tuple[Mapping[str, Any], ...] = ()
+    seed_plan: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -184,6 +185,7 @@ class TICASearchResult:
             "selected_plan_digest": self.selected_plan_digest,
             "search_states": [_jsonable(item) for item in self.search_states],
             "budget_audit": [_jsonable(item) for item in self.budget_audit],
+            "seed_plan": _jsonable(self.seed_plan),
         }
 
 
@@ -306,6 +308,8 @@ class TICASearchState:
             "max_fast_evals": int(recipe.max_fast_evals),
             "max_full_evals": int(recipe.max_full_evals),
             "max_interaction_evals": int(recipe.max_interaction_evals),
+            "strategy": recipe.strategy,
+            "max_search_depth": int(recipe.max_search_depth),
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -807,6 +811,7 @@ class TICAPruner:
         recipe: TICARecipe,
         *,
         parent_state_id: Optional[str] = None,
+        seed_plan: Optional[Mapping[str, Any]] = None,
     ) -> tuple[TICASearchState, ...]:
         names = BASELINE_NAMES if recipe.include_baseline_suite else (recipe.baseline_name,)
         roots: list[TICASearchState] = []
@@ -816,6 +821,9 @@ class TICAPruner:
             blocks = _profile_block_ids(profile, score)
             if not blocks:
                 continue
+            profile_blocks = set(blocks)
+            seeded_blocks = [str(item) for item in (seed_plan or {}).get("block_ids", ()) if str(item) in profile_blocks]
+            blocks = list(dict.fromkeys([*seeded_blocks, *blocks]))
             if baseline == "interaction_block":
                 selected = tuple(blocks[:2])
                 mode = "block"
@@ -823,7 +831,15 @@ class TICAPruner:
             elif baseline == "tica_block_ffn":
                 selected = tuple(blocks[:1])
                 mode = "block_plus_ffn"
-                retained = tuple(_retained_indices(profile, score, activation_weight=recipe.activation_weight))
+                profile_retained = _retained_indices(profile, score, activation_weight=recipe.activation_weight)
+                width = int((profile.get("model") or {}).get("ffn_width", 0) or 0)
+                seeded_retained = [
+                    int(item)
+                    for item in (seed_plan or {}).get("retained_indices", ())
+                    if isinstance(item, int) and not isinstance(item, bool) and 0 <= int(item) < width
+                ]
+                target = max(1, min(width - 1, int(width * 0.75))) if width > 1 else 1
+                retained = tuple(list(dict.fromkeys([*seeded_retained, *profile_retained]))[:target])
             else:
                 selected = tuple(blocks[:1])
                 mode = "block"
@@ -947,7 +963,10 @@ class TICAPruner:
         plan = state.plan(recipe)
         digest = self._plan_digest(plan)
         structure_digest = self._structure_digest(plan)
-        risk = self._risk(state, score, profile, recipe)
+        state_score = score
+        if state.baseline_name in BASELINE_NAMES:
+            state_score = self._baseline_score(profile, state.baseline_name, recipe)
+        risk = self._risk(state, state_score, profile, recipe)
         entry = cache.setdefault(digest, {})
         cache_hit = False
         fast_metrics: Mapping[str, Any] = entry.get("fast", {})
@@ -1057,6 +1076,7 @@ class TICAPruner:
         recipe: TICARecipe,
         *,
         evaluate_candidate: Optional[EvaluateCandidate] = None,
+        seed_plan: Optional[Mapping[str, Any]] = None,
     ) -> TICASearchResult:
         del adapter
         split = profile.get("evaluation_split")
@@ -1081,7 +1101,15 @@ class TICAPruner:
             status="baseline",
         )
         states.append({**root_state.to_dict(), "feasible": True, "status": "baseline"})
-        frontier = list(self._root_states(parent, profile, recipe, parent_state_id=root_state.state_id))
+        frontier = list(
+            self._root_states(
+                parent,
+                profile,
+                recipe,
+                parent_state_id=root_state.state_id,
+                seed_plan=seed_plan,
+            )
+        )
         seen_states: set[str] = set()
         seen_plans: set[str] = set()
         while frontier:
@@ -1116,7 +1144,9 @@ class TICAPruner:
                 break
         pareto = _pareto_front(candidates)
         feasible = [item for item in candidates if item.feasible and item.full_metrics]
-        selected = max(feasible, key=_candidate_rank, default=None)
+        pareto_ids = {str(item.get("candidate_id")) for item in pareto}
+        pareto_candidates = [item for item in feasible if item.candidate_id in pareto_ids]
+        selected = max(pareto_candidates or feasible, key=_candidate_rank, default=None)
         return TICASearchResult(
             recipe=recipe,
             candidates=tuple(candidates),
@@ -1129,6 +1159,7 @@ class TICAPruner:
             selected_plan_digest=selected.plan_digest if selected else None,
             search_states=tuple(states),
             budget_audit=tuple(budget.audit),
+            seed_plan=dict(seed_plan or {}),
         )
 
     def measure_interaction(self, independent: Sequence[Mapping[str, Any]], joint: Mapping[str, Any]) -> dict[str, Any]:

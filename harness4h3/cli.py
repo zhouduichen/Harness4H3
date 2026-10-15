@@ -56,7 +56,7 @@ from research.experiments.remote_h3_closed_loop import RemoteCampaign
 from .adapters.wan import build_wan_adapter
 from .evolution import CompressionConfig, EvolutionLoop, PromotionPolicy, SearchPolicy, WanVideoEvaluationConfig, WanVideoEvaluator
 from .evolution.agent import AlgorithmAgent, build_algorithm_provider
-from .evolution.tica_calibration import TICACalibrationManifest
+from .evolution.tica_calibration import TICACalibrationManifest, TICAEvaluationSplits
 from .operators.wan import build_wan_compression_registry
 from .profiler import CalibrationCorpus, CalibrationSampleSpec, FakeWanCalibrationProvider, profile_model
 from .sandbox import AlgorithmSandbox
@@ -135,6 +135,23 @@ def cmd_compress_wan(args: argparse.Namespace) -> int:
     return 0 if compression.status == "success" else 1
 
 
+def _load_tica_manifest(path: Path) -> TICACalibrationManifest:
+    raw_manifest = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw_manifest, dict):
+        raise ValueError("TICA manifest must be a JSON object: %s" % path)
+    normalized_specs = []
+    for raw_spec in raw_manifest.get("specs", []):
+        if not isinstance(raw_spec, dict):
+            continue
+        normalized = dict(raw_spec)
+        for key in ("latent_path", "encoder_hidden_states_path"):
+            value = normalized.get(key)
+            if value and not Path(str(value)).is_absolute():
+                normalized[key] = str((path.parent / str(value)).resolve())
+        normalized_specs.append(normalized)
+    return TICACalibrationManifest.from_dict({**raw_manifest, "specs": normalized_specs})
+
+
 def cmd_evolve_compression(args: argparse.Namespace) -> int:
     config = _compression_config(args)
     if int(args.rounds) <= 0:
@@ -161,35 +178,39 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         if evaluator_backend != "wan_video":
             raise ValueError("diffusers evolutionary compression requires evaluator.backend=wan_video; structural proxy is disabled for real checkpoints")
         evaluator_config = WanVideoEvaluationConfig.from_mapping(config.evaluator, config.output_root / "real-evaluation")
+        if config.tica_prune and evaluator_config.evaluation_split != "test":
+            raise ValueError("real TICA promotion requires evaluator.evaluation_split=test")
         evaluator = WanVideoEvaluator(evaluator_config, baseline=parent)
     elif evaluator_backend and evaluator_backend != "structural_proxy":
         raise ValueError("fake evolutionary compression supports only the default structural proxy evaluator")
     tica_manifest = None
+    tica_splits = None
     if config.tica_prune:
         if config.tica_calibration_manifest is not None:
-            raw_manifest = json.loads(config.tica_calibration_manifest.read_text(encoding="utf-8"))
-            normalized_specs = []
-            for raw_spec in raw_manifest.get("specs", []) if isinstance(raw_manifest, dict) else []:
-                if not isinstance(raw_spec, dict):
-                    continue
-                normalized = dict(raw_spec)
-                for key in ("latent_path", "encoder_hidden_states_path"):
-                    value = normalized.get(key)
-                    if value and not Path(str(value)).is_absolute():
-                        normalized[key] = str((config.tica_calibration_manifest.parent / str(value)).resolve())
-                normalized_specs.append(normalized)
-            if isinstance(raw_manifest, dict):
-                raw_manifest = {**raw_manifest, "specs": normalized_specs}
-            tica_manifest = TICACalibrationManifest.from_dict(raw_manifest)
+            if config.tica_validation_manifest is None or config.tica_test_manifest is None:
+                raise ValueError("TICA requires calibration, validation, and test manifests together")
+            calibration = _load_tica_manifest(config.tica_calibration_manifest)
+            validation = _load_tica_manifest(config.tica_validation_manifest)
+            test = _load_tica_manifest(config.tica_test_manifest)
+            tica_splits = TICAEvaluationSplits(calibration=calibration, validation=validation, test=test)
+            tica_manifest = tica_splits.calibration
+            if config.backend == "diffusers":
+                for manifest in (calibration, validation, test):
+                    manifest.verify_cached_sources()
             if config.backend == "fake" and tica_manifest.provider_name != "fake_wan_cpu":
                 raise ValueError("fake TICA backend requires provider_name=fake_wan_cpu")
             if config.backend == "diffusers" and tica_manifest.provider_name == "fake_wan_cpu":
                 raise ValueError("real Wan TICA backend cannot use fake calibration inputs")
         elif config.backend == "fake":
             structure = adapter.inspect(adapter.reload_model(parent))
-            tica_manifest = TICACalibrationManifest.from_fake(hidden_size=int(structure.hidden_size), seed=config.seed)
+            tica_splits = TICAEvaluationSplits(
+                calibration=TICACalibrationManifest.from_fake(hidden_size=int(structure.hidden_size), seed=config.seed, sample_prefix="calibration"),
+                validation=TICACalibrationManifest.from_fake(hidden_size=int(structure.hidden_size), seed=config.seed + 1000, sample_prefix="validation"),
+                test=TICACalibrationManifest.from_fake(hidden_size=int(structure.hidden_size), seed=config.seed + 2000, sample_prefix="test"),
+            )
+            tica_manifest = tica_splits.calibration
         else:
-            raise ValueError("real Wan TICA requires an explicit cached calibration manifest")
+            raise ValueError("real Wan TICA requires explicit calibration, validation, and test manifests")
     policy_path = config.output_root / "search-policy.json"
     search_policy = None if policy_path.exists() else SearchPolicy(exploit_ratio=config.exploit_ratio, seed=config.seed)
     loop = EvolutionLoop(
@@ -209,6 +230,7 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         candidate_screening=config.candidate_screening,
         tica_prune=config.tica_prune,
         tica_manifest=tica_manifest,
+        tica_splits=tica_splits,
         tica_recipe=config.tica_recipe,
     )
     outcomes = [loop.run_round().to_dict() for _ in range(int(args.rounds))]

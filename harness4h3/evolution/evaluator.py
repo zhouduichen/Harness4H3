@@ -276,6 +276,7 @@ class WanVideoEvaluationConfig:
     visual_quality_gate: Mapping[str, Any] = field(default_factory=lambda: dict(DEFAULT_VISUAL_QUALITY_GATE))
     quality_device: str = "cpu"
     source_revision: str = "unknown"
+    evaluation_split: str = "unspecified"
 
     def __post_init__(self) -> None:
         if not str(self.wan_config).strip() or not str(self.evaluation_manifest).strip():
@@ -286,6 +287,8 @@ class WanVideoEvaluationConfig:
             raise ValueError("real Wan evaluation budgets must be positive")
         if not 0.0 <= float(self.max_quality_drop) <= 1.0:
             raise ValueError("max_quality_drop must be in [0, 1]")
+        if self.evaluation_split not in {"unspecified", "calibration", "validation", "test"}:
+            raise ValueError("unsupported real Wan evaluation split")
 
     @property
     def resolved_pipeline_device(self) -> str:
@@ -320,6 +323,7 @@ class WanVideoEvaluationConfig:
                 raw.get("source_revision")
                 or os.environ.get("HARNESS4H3_SOURCE_REVISION", "unknown")
             ).strip() or "unknown",
+            evaluation_split=str(raw.get("evaluation_split", "unspecified")).strip().lower() or "unspecified",
         )
 
 

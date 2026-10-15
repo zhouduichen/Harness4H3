@@ -1,0 +1,63 @@
+# Independent Wan2.1-T2V-1.3B TICA-Prune v2 experiment template.
+# Replace every /path/to/... asset on the target host. This file is not used
+# by the historical four-arm experiment directories.
+backend: diffusers
+checkpoint: /path/to/Wan2.1-T2V-1.3B-Diffusers
+output_root: /data/models/harness4h3-tica-v2-20261015
+device: cuda:0
+dtype: bfloat16
+local_files_only: true
+sandbox_timeout_s: 10
+exploit_ratio: 0.7
+seed: 7
+algorithm_improvement: true
+candidate_screening: true
+memory_enabled: true
+adapt_search_policy: true
+tica_prune: true
+tica_calibration_manifest: /path/to/tica-calibration-manifest.json
+tica_validation_manifest: /path/to/tica-validation-manifest.json
+tica_test_manifest: /path/to/tica-test-manifest.json
+tica_recipe:
+  include_baseline_suite: true
+  strategy: greedy_beam
+  max_search_depth: 3
+  time_weight_formula: early_log
+  risk_limit: 0.25
+  activation_weight: 0.5
+  interaction_weight: 0.5
+  beam_width: 2
+  max_fast_evals: 8
+  max_full_evals: 4
+  max_interaction_evals: 2
+controller:
+  provider: vllm
+  model: /path/to/controller-model
+  endpoint: http://127.0.0.1:8000/v1/chat/completions
+  timeout_s: 180
+evaluator:
+  backend: wan_video
+  # This is the held-out video evaluation manifest, not a TICA calibration set.
+  wan_config: /path/to/wan-student-1.3b.yaml
+  evaluation_manifest: /path/to/wan-test-evaluation-manifest.json
+  clip_model_path: /path/to/clip-vit-large-patch14-336
+  device: cuda:0
+  quality_device: cuda:0
+  dtype: bfloat16
+  local_files_only: true
+  max_cases: 8
+  seed_count: 2
+  sample_frames: 4
+  latency_warmup: 1
+  latency_repeats: 3
+  max_quality_drop: 0.05
+  evaluation_split: test
+  source_revision: replace-with-committed-revision
+  visual_quality_gate:
+    enabled: true
+    version: visual-structure-v1
+    min_spatial_gradient: 0.05
+    min_laplacian_std: 0.50
+    min_block_variance: 1.0
+    min_frame_difference: 0.001
+    max_low_texture_frame_ratio: 0.75
