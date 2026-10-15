@@ -238,6 +238,8 @@ class AlgorithmModelEvaluator:
                     "input_digest": self.input_digest,
                 },
                 "calibration_digest": self.calibration_manifest.digest() if self.calibration_manifest is not None else None,
+                "measurement_manifest_digest": self.calibration_manifest.digest() if self.calibration_manifest is not None else None,
+                "evaluation_split": str(self.profile.get("evaluation_split", "calibration")),
                 "calibration_input_digests": [sample.digest() for sample in self._tica_samples],
                 "search_budget": dict(self.search_budget),
                 "plan_time_weight_formula": result.plan.args.get("time_weight_formula") if self.calibration_manifest is not None else None,
@@ -259,6 +261,7 @@ class AlgorithmModelEvaluator:
             "hardware_metrics": {"latency_s": None, "peak_memory_gb": None, "available": False},
             "invocations": {"compression": 1 if compression is not None else 0, "forward": 0, "total": self._invocations},
             "evaluation_cost": {"elapsed_s": time.perf_counter() - started, "input_seed": int(self.seed), "input_digest": self.input_digest},
+            "evaluation_split": str(self.profile.get("evaluation_split", "calibration")),
         }
 
     @staticmethod

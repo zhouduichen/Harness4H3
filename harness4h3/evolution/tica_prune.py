@@ -1008,6 +1008,20 @@ class TICAPruner:
         else:
             cache_hit = True
             budget.consume("full", plan_digest=digest, cache_hit=True)
+        # The fast screen is only a bounded pre-filter.  A candidate is not
+        # feasible when the actual structural execution reports a larger
+        # denoising error than the configured risk limit.  Run this gate
+        # before interaction bookkeeping so the recorded reason identifies
+        # the decisive full-model failure.
+        if feasible and full_metrics and full_metrics.get("valid") is True:
+            measured_full_error = full_metrics.get("quality_error")
+            if not isinstance(measured_full_error, (int, float)) or not math.isfinite(float(measured_full_error)):
+                feasible = False
+                status = "full_risk_unknown"
+            elif float(measured_full_error) > float(recipe.risk_limit):
+                feasible = False
+                status = "full_risk_rejected"
+
         interaction: Mapping[str, Any] = {}
         if feasible and full_metrics and state.baseline_name in {"interaction_block", "tica_block_ffn"}:
             if not budget.can_consume("interaction", cache_hit=True):

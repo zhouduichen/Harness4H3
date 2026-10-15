@@ -585,14 +585,18 @@ class EvolutionLoop:
         if evaluation is None:
             try:
                 if self.tica_prune and not self._custom_evaluator:
+                    # Calibration is search-only.  Model-level selection and
+                    # promotion must use the held-out Validation split; the
+                    # Test split is reserved for a later frozen evaluation.
+                    promotion_profile = {**dict(profile_payload), "evaluation_split": "validation"}
                     measurement = AlgorithmModelEvaluator(
                         self.adapter,
                         self.registry,
                         parent_artifact,
-                        profile_payload,
+                        promotion_profile,
                         round_dir / "model-evaluation",
                         seed=int(profile_payload.get("provenance", {}).get("seed", 7)),
-                        calibration_manifest=self.tica_manifest,
+                        calibration_manifest=self._tica_manifest_for_split("validation"),
                         search_budget=(active_tica_recipe or self.tica_recipe).budget(),
                     )
                     evaluation = dict(measurement.evaluate(sandbox_result))
@@ -1096,6 +1100,7 @@ class EvolutionLoop:
             if tica.get("calibration_digest") == expected_digest and cached.get("parent_checkpoint_sha256") == parent.sha256:
                 if "evaluation_split" not in tica:
                     cached["tica"] = {**dict(tica), "evaluation_split": "calibration"}
+                cached.setdefault("evaluation_split", "calibration")
                 return cached
         model = self.adapter.reload_model(parent)
         if self.tica_manifest is None:
@@ -1104,6 +1109,7 @@ class EvolutionLoop:
         tica_metadata = dict(collected.get("tica") or {})
         tica_metadata["evaluation_split"] = "calibration"
         collected["tica"] = tica_metadata
+        collected["evaluation_split"] = "calibration"
         collected["parent_checkpoint_sha256"] = parent.sha256
         collected["source_revision"] = "tica-prune-v1"
         _write_json(path, collected)
@@ -1147,6 +1153,7 @@ class EvolutionLoop:
         *,
         recipe: Optional[TICARecipe] = None,
         seed_plan: Optional[Mapping[str, Any]] = None,
+        manifest: Optional[TICACalibrationManifest] = None,
     ) -> Any:
         """Run stateful TICA search under one bounded, shared budget.
 
@@ -1156,8 +1163,9 @@ class EvolutionLoop:
         constants are introduced here.
         """
 
-        if self.tica_manifest is None:
-            raise ValueError("TICA search requires calibration manifest")
+        manifest = manifest or self.tica_manifest
+        if manifest is None:
+            raise ValueError("TICA search requires an evaluation split manifest")
         recipe = recipe or self.tica_recipe
         score = tica_score(profile, time_weight_formula=recipe.time_weight_formula, time_weights=recipe.time_weights or None)
         evaluator = AlgorithmModelEvaluator(
@@ -1167,7 +1175,7 @@ class EvolutionLoop:
             profile,
             round_dir / "tica-search-measurements",
             seed=int(profile.get("provenance", {}).get("seed", 7)) if isinstance(profile.get("provenance"), Mapping) else 7,
-            calibration_manifest=self.tica_manifest,
+            calibration_manifest=manifest,
             search_budget=recipe.budget(),
         )
 
@@ -1177,7 +1185,7 @@ class EvolutionLoop:
                 risks = [score.block_risk.get(item) for item in selected if item in score.block_risk]
                 return {
                     "valid": bool(risks),
-                    "evidence_level": "cpu_fake_local_output" if self.tica_manifest.provider_name == "fake_wan_cpu" else "real_wan_local_output",
+                    "evidence_level": "cpu_fake_local_output" if manifest.provider_name == "fake_wan_cpu" else "real_wan_local_output",
                     "evaluation_status": "local_output_screen",
                     "quality_error": sum(risks) / max(len(risks), 1) if risks else None,
                     "selected_blocks": selected,
@@ -1196,7 +1204,7 @@ class EvolutionLoop:
         return TICAPruner().search(
             self.adapter,
             parent,
-            self.tica_manifest,
+            manifest,
             profile,
             recipe,
             evaluate_candidate=measure,
@@ -1245,7 +1253,7 @@ class EvolutionLoop:
         from that same artifact, independent of the model-promotion path.
         """
 
-        evaluators: dict[str, AlgorithmModelEvaluator] = {}
+        evaluators: dict[tuple[str, str], AlgorithmModelEvaluator] = {}
         evaluator_recipe = recipe or self.tica_recipe
 
         def evaluate(result: SandboxResult, scenario_profile: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1254,7 +1262,20 @@ class EvolutionLoop:
                 raise ValueError("TICA algorithm validation cannot consume Test split")
             scenario_manifest = self._tica_manifest_for_split(split) if self.tica_prune else None
             digest = stable_digest({"profile": scenario_profile, "manifest": scenario_manifest.digest() if scenario_manifest is not None else None})
-            evaluator = evaluators.get(digest)
+            # Parent and child must not share a mutable evaluator/search
+            # ledger.  Keying by source hash gives each algorithm its own
+            # complete search while retaining identical model/input
+            # conditions.
+            if self.tica_prune and result.plan is not None and result.plan.operator == "tica_prune":
+                return self._evaluate_tica_algorithm_search(
+                    parent,
+                    scenario_profile,
+                    result,
+                    output_root / ("algorithm-" + result.source_sha256[:16]) / digest,
+                    evaluator_recipe=evaluator_recipe,
+                )
+            evaluator_key = (digest, result.source_sha256)
+            evaluator = evaluators.get(evaluator_key)
             if evaluator is None:
                 seed_value = scenario_profile.get("provenance", {}).get("seed", 7) if isinstance(scenario_profile.get("provenance"), Mapping) else 7
                 evaluator = AlgorithmModelEvaluator(
@@ -1267,10 +1288,89 @@ class EvolutionLoop:
                     calibration_manifest=scenario_manifest if self.tica_prune else None,
                     search_budget=evaluator_recipe.budget() if self.tica_prune else {"max_fast_evals": 8, "max_full_evals": 4, "max_interaction_evals": 2},
                 )
-                evaluators[digest] = evaluator
+                evaluators[evaluator_key] = evaluator
             return evaluator.evaluate(result)
 
         return evaluate
+
+    def _evaluate_tica_algorithm_search(
+        self,
+        parent: CheckpointArtifact,
+        profile: Mapping[str, Any],
+        result: SandboxResult,
+        output_root: Path,
+        *,
+        evaluator_recipe: TICARecipe,
+    ) -> Mapping[str, Any]:
+        """Evaluate one algorithm by running its complete bounded TICA search.
+
+        The source-level plan supplies rule choices and a seed state, but the
+        comparison budget is owned by the experiment recipe and is identical
+        for parent and child.  This prevents AlgorithmValidator from
+        rewarding a child merely because one hand-picked plan happened to
+        look better.
+        """
+
+        if result.plan is None:
+            return {"valid": False, "failure_reason": "algorithm_plan_missing"}
+        split = str(profile.get("evaluation_split", "validation")).lower()
+        if split == "test":
+            raise ValueError("TICA algorithm validation cannot consume Test split")
+        manifest = self._tica_manifest_for_split(split)
+        proposed = self._tica_recipe_from_plan(result.plan.args)
+        fair_values = proposed.to_dict()
+        for name in ("max_fast_evals", "max_full_evals", "max_interaction_evals"):
+            fair_values[name] = getattr(evaluator_recipe, name)
+        fair_recipe = TICARecipe.from_mapping(fair_values)
+        search = self._run_tica_search(
+            parent,
+            profile,
+            output_root,
+            recipe=fair_recipe,
+            seed_plan=result.plan.args,
+            manifest=manifest,
+        )
+        selected = next(
+            (item for item in search.candidates if item.candidate_id == search.selected_candidate_id),
+            None,
+        )
+        search_evidence = {
+            "protocol": "tica_pruner_full_bounded_search",
+            "complete": selected is not None,
+            "algorithm_source_sha256": result.source_sha256,
+            "evaluation_split": split,
+            "recipe": fair_recipe.to_dict(),
+            "budget": dict(search.budget),
+            "selected_candidate_id": search.selected_candidate_id,
+            "selected_plan_digest": search.selected_plan_digest,
+            "pareto_front": list(search.pareto_front),
+            "candidates": [item.to_dict() for item in search.candidates],
+            "search_states": list(search.search_states),
+            "budget_audit": list(search.budget_audit),
+        }
+        if selected is None:
+            return {
+                "valid": False,
+                "evaluation_status": "algorithm_search_no_feasible_candidate",
+                "failure_reason": "algorithm_search_no_feasible_candidate",
+                "algorithm_search": search_evidence,
+                "search_budget": fair_recipe.budget(),
+                "search_cost": dict(search.budget),
+                "evaluation_split": split,
+            }
+        metrics = dict(selected.full_metrics)
+        metrics["algorithm_search"] = search_evidence
+        metrics["search_candidate_count"] = len(search.candidates)
+        metrics["search_full_evals"] = int(search.budget.get("full_evals", 0))
+        metrics["search_interaction_evals"] = int(search.budget.get("interaction_evals", 0))
+        # The configured budget is the fairness condition; measured elapsed
+        # time and actual consumption belong to the separate search evidence.
+        metrics["search_budget"] = fair_recipe.budget()
+        metrics["search_cost"] = dict(search.budget)
+        metrics["evaluation_split"] = split
+        metrics["selected_plan_digest"] = selected.plan_digest
+        metrics["valid"] = bool(selected.feasible and metrics.get("valid") is True)
+        return metrics
 
     def _maybe_evolve_search_space(self) -> None:
         """Propose an extension only after persisted experiments show a bottleneck."""

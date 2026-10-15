@@ -256,6 +256,9 @@ def _aggregate_metrics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "parameter_reduction_ratio",
         "estimated_flops",
         "elapsed_s",
+        "search_candidate_count",
+        "search_full_evals",
+        "search_interaction_evals",
     ):
         values = [float(item[key]) for item in records if isinstance(item.get(key), (int, float)) and not isinstance(item.get(key), bool)]
         if values:
@@ -282,6 +285,16 @@ def _aggregate_metrics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         values = [item.get(key) for item in records if item.get(key) is not None]
         if values and all(value == values[0] for value in values):
             result[key] = values[0]
+    search_records = [item.get("algorithm_search") for item in records if isinstance(item.get("algorithm_search"), Mapping)]
+    if search_records:
+        result["algorithm_search"] = {
+            "protocol": "tica_pruner_full_bounded_search",
+            "complete": all(bool(item.get("complete")) for item in search_records),
+            "scenario_count": len(search_records),
+            "candidate_counts": [len(item.get("candidates", ())) for item in search_records],
+            "selected_plan_digests": [item.get("selected_plan_digest") for item in search_records],
+            "budgets": [dict(item.get("budget") or {}) for item in search_records],
+        }
     result["evidence_level"] = _evidence_level(*records)
     return result
 
@@ -326,6 +339,13 @@ def _fairness_mismatch(parent: Mapping[str, Any], child: Mapping[str, Any]) -> O
         if left is not None or right is not None:
             if left != right:
                 return reason
+    parent_search = parent.get("algorithm_search")
+    child_search = child.get("algorithm_search")
+    if isinstance(parent_search, Mapping) or isinstance(child_search, Mapping):
+        if not isinstance(parent_search, Mapping) or not isinstance(child_search, Mapping):
+            return "comparison_search_protocol_mismatch"
+        if not bool(parent_search.get("complete")) or not bool(child_search.get("complete")):
+            return "comparison_search_incomplete"
     return None
 
 
