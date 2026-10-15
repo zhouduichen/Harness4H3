@@ -25,10 +25,13 @@ class ProfileReport:
     timestep_sensitivity: Mapping[str, Mapping[str, Any]]
     provenance: Mapping[str, Any]
     hardware: Mapping[str, Any] = field(default_factory=dict)
-    schema_version: int = 1
+    calibration: Mapping[str, Any] = field(default_factory=dict)
+    relationships: Mapping[str, Any] = field(default_factory=dict)
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+    schema_version: int = 2
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
+        if self.schema_version not in {1, 2}:
             raise ValueError("unsupported profile schema version: %s" % self.schema_version)
         if not isinstance(self.model, Mapping) or not self.model.get("architecture"):
             raise ValueError("profile model architecture is required")
@@ -39,6 +42,9 @@ class ProfileReport:
             raise ValueError("profile provenance must declare offline_simulation")
         if not isinstance(self.hardware, Mapping):
             raise ValueError("profile hardware must be a mapping")
+        for name in ("calibration", "relationships", "evidence"):
+            if not isinstance(getattr(self, name), Mapping):
+                raise ValueError("profile %s must be a mapping" % name)
 
     def to_dict(self) -> dict[str, Any]:
         return _jsonable(asdict(self))
@@ -59,6 +65,9 @@ class ProfileReport:
             timestep_sensitivity={str(key): dict(value) for key, value in dict(raw["timestep_sensitivity"]).items()},
             provenance=dict(raw["provenance"]),
             hardware=dict(raw.get("hardware") or {}),
+            calibration=dict(raw.get("calibration") or {}),
+            relationships=dict(raw.get("relationships") or {}),
+            evidence=dict(raw.get("evidence") or {}),
             schema_version=int(raw.get("schema_version", 1)),
         )
 

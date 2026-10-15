@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from ..adapters.wan.contracts import ChannelPruningConfig, WanModelAdapter
 
@@ -73,21 +73,156 @@ def _paired_ffn(block: Any) -> tuple[Any, Any]:
     raise AttributeError("paired FFN projections unavailable")
 
 
-def measure_channel_sensitivity(adapter: WanModelAdapter, model: Any, *, max_probes: int = 32) -> tuple[Mapping[str, Any], ...]:
+class ChannelImportanceMethod(Protocol):
+    name: str
+
+    def measure(
+        self,
+        adapter: WanModelAdapter,
+        model: Any,
+        block: Any,
+        channel_indices: Sequence[int],
+        samples: Sequence[Any],
+    ) -> tuple[Mapping[str, Any], ...]:
+        ...
+
+
+def _offline_simulation(adapter: Any) -> bool:
+    try:
+        return bool(adapter.inspect(adapter.load_model("fake://baseline")).metadata.get("offline_simulation", False))
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+def _evidence(status: str, method: str, offline_simulation: bool, reason: Optional[str] = None) -> dict[str, Any]:
+    return {
+        "status": status,
+        "method": method,
+        "offline_simulation": bool(offline_simulation),
+        "reason": reason,
+    }
+
+
+class WeightContributionMethod:
+    name = "weight_proxy"
+
+    def measure(
+        self,
+        adapter: WanModelAdapter,
+        model: Any,
+        block: Any,
+        channel_indices: Sequence[int],
+        samples: Sequence[Any],
+    ) -> tuple[Mapping[str, Any], ...]:
+        del samples
+        module = _resolve(model, str(block.module_path))
+        up, down = _paired_ffn(module)
+        offline = bool(adapter.inspect(model).metadata.get("offline_simulation", False))
+        return tuple(
+            {
+                "channel": int(channel),
+                "importance_score": float(
+                    up.weight[channel].detach().float().abs().mean().item()
+                    + down.weight[:, channel].detach().float().abs().mean().item()
+                ),
+                "available": True,
+                "evidence": _evidence("estimated", self.name, offline),
+            }
+            for channel in channel_indices
+        )
+
+
+class UnavailableImportanceMethod:
+    def __init__(self, name: str, reason: str) -> None:
+        self.name = str(name)
+        self.reason = str(reason)
+
+    def measure(
+        self,
+        adapter: WanModelAdapter,
+        model: Any,
+        block: Any,
+        channel_indices: Sequence[int],
+        samples: Sequence[Any],
+    ) -> tuple[Mapping[str, Any], ...]:
+        del model, block, samples
+        offline = bool(getattr(adapter, "architecture_name", "").lower().startswith("wanfake"))
+        return tuple(
+            {
+                "channel": int(channel),
+                "importance_score": None,
+                "available": False,
+                "evidence": _evidence("unavailable", self.name, offline, self.reason),
+            }
+            for channel in channel_indices
+        )
+
+
+def _channel_method(method: str) -> ChannelImportanceMethod:
+    normalized = str(method).strip().lower().replace("-", "_")
+    if normalized in {"weight", "weight_proxy", "paired_ffn_weight_contribution"}:
+        return WeightContributionMethod()
+    if normalized in {"activation", "activation_importance"}:
+        return UnavailableImportanceMethod("activation", "activation_hook_not_declared_by_adapter")
+    if normalized in {"output_perturbation", "perturbation"}:
+        return UnavailableImportanceMethod("output_perturbation", "output_probe_not_declared_by_adapter")
+    raise ValueError("unsupported_channel_importance_method: %s" % method)
+
+
+def measure_channel_sensitivity(
+    adapter: WanModelAdapter,
+    model: Any,
+    *,
+    max_probes: int = 32,
+    method: str = "weight",
+    chunk_size: Optional[int] = None,
+    sample_set: Sequence[Any] = (),
+    full: bool = False,
+) -> tuple[Mapping[str, Any], ...]:
+    if int(max_probes) <= 0:
+        raise ValueError("max_probes must be positive")
+    if chunk_size is not None and int(chunk_size) <= 0:
+        raise ValueError("chunk_size must be positive")
+    importance_method = _channel_method(method)
+    effective_chunk = max(1, int(chunk_size or max_probes))
     records = []
     for block in adapter.get_blocks(model):
         try:
             module = _resolve(model, block.module_path)
             up, down = _paired_ffn(module)
             width = int(up.out_features)
-            limit = min(width, max(1, int(max_probes)))
-            values = []
-            for channel in range(limit):
-                weight = float(up.weight[channel].detach().float().abs().mean().item() + down.weight[:, channel].detach().float().abs().mean().item())
-                values.append({"channel": channel, "importance_score": weight, "available": True})
-            records.append({"block_id": block.block_id, "width": width, "channels": values, "method": "paired_ffn_weight_contribution", "available": True, "approximation": True, "score_semantics": "paired_weight_absolute_mean_not_activation_perturbation"})
-        except (AttributeError, IndexError, TypeError, RuntimeError):
-            records.append({"block_id": block.block_id, "width": None, "channels": [], "method": "paired_ffn_weight_contribution", "available": False, "approximation": True, "score_semantics": "paired_weight_absolute_mean_not_activation_perturbation"})
+            limit = width if full else min(width, max(1, int(max_probes)))
+            values: list[Mapping[str, Any]] = []
+            for start in range(0, limit, effective_chunk):
+                indices = tuple(range(start, min(start + effective_chunk, limit)))
+                values.extend(importance_method.measure(adapter, model, block, indices, sample_set))
+            available = bool(values) and all(item.get("available") is True for item in values)
+            evidence_status = "estimated" if importance_method.name == "weight_proxy" else "unavailable"
+            records.append({
+                "block_id": block.block_id,
+                "width": width,
+                "channels": values,
+                "method": importance_method.name,
+                "available": available,
+                "approximation": importance_method.name == "weight_proxy",
+                "full": bool(full),
+                "chunk_size": effective_chunk,
+                "evidence": _evidence(evidence_status, importance_method.name, bool(adapter.inspect(model).metadata.get("offline_simulation", False))),
+                "score_semantics": "paired_weight_absolute_mean_not_activation_perturbation" if importance_method.name == "weight_proxy" else "unavailable",
+            })
+        except (AttributeError, IndexError, TypeError, RuntimeError, ValueError) as exc:
+            records.append({
+                "block_id": block.block_id,
+                "width": None,
+                "channels": [],
+                "method": importance_method.name,
+                "available": False,
+                "approximation": importance_method.name == "weight_proxy",
+                "full": bool(full),
+                "chunk_size": effective_chunk,
+                "evidence": _evidence("unavailable", importance_method.name, False, str(exc)),
+                "score_semantics": "unavailable",
+            })
     return tuple(records)
 
 

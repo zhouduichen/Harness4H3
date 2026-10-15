@@ -6,6 +6,7 @@ import time
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ..adapters.wan.contracts import WanModelAdapter
+from .calibration import CalibrationCorpus
 from .report import ProfileReport
 from .sensitivity import measure_block_sensitivity, measure_channel_sensitivity, measure_timestep_sensitivity
 
@@ -289,13 +290,26 @@ def profile_model(
     max_channel_probes: int = 32,
     latency_warmup: int = 1,
     latency_repeats: int = 3,
+    calibration: Optional[CalibrationCorpus] = None,
+    advanced: bool = False,
+    channel_method: str = "weight",
+    channel_chunk_size: Optional[int] = None,
 ) -> ProfileReport:
     structure = adapter.inspect(model)
-    sample = _default_sample(adapter, model, seed)
+    calibration_samples = calibration.samples() if calibration is not None else ()
+    sample = calibration_samples[0].payload if calibration_samples else _default_sample(adapter, model, seed)
     effective_forward = forward_fn or (lambda current_model, current_sample: _adapter_forward(adapter, current_model, current_sample))
     layers, timing = _profile_layers(adapter, model, sample=sample, forward_fn=effective_forward, measure_latency=measure_latency, seed=seed, latency_warmup=latency_warmup, latency_repeats=latency_repeats)
     block_sensitivity = measure_block_sensitivity(adapter, model, sample=sample, forward_fn=effective_forward)
-    channel_sensitivity = measure_channel_sensitivity(adapter, model, max_probes=max_channel_probes)
+    channel_sensitivity = measure_channel_sensitivity(
+        adapter,
+        model,
+        max_probes=max_channel_probes,
+        method=channel_method,
+        chunk_size=channel_chunk_size,
+        sample_set=tuple(item.payload for item in calibration_samples),
+        full=bool(advanced),
+    )
     default_timestep = getattr(adapter, "forward_timestep_profile", None)
     if callable(default_timestep):
         timestep_forward = default_timestep
@@ -305,6 +319,17 @@ def profile_model(
     offline = bool(structure.metadata.get("offline_simulation", False))
     device = _runtime_device(model, sample)
     first = _first_tensor(sample)
+    relationships = {
+        str(item["block_id"]): {
+            "layer": str(item["block_id"]),
+            "block_sensitivity": str(item["block_id"]),
+            "channel_sensitivity": str(item["block_id"]),
+            "timestep_buckets": ["high_noise", "middle", "low_noise"],
+        }
+        for item in layers
+    }
+    calibration_payload = calibration.to_dict() if calibration is not None else {}
+    evidence_status = "offline_simulation" if offline else "measured_or_partial"
     return ProfileReport(
         model=structure.to_dict(),
         layers=layers,
@@ -334,6 +359,21 @@ def profile_model(
             "estimated_flops": sum(int(item["estimated_flops"]) for item in layers if item["estimated_flops"] is not None),
             "peak_memory_bytes": timing.get("peak_memory_bytes"),
             "memory_available": bool(timing.get("memory_available", False)),
+        },
+        calibration=calibration_payload,
+        relationships=relationships,
+        evidence={
+            "status": evidence_status,
+            "advanced": bool(advanced),
+            "latency": {
+                "status": "measured" if timing.get("available") else "unavailable",
+                "method": timing.get("method"),
+                "reason": timing.get("reason"),
+            },
+            "memory": {
+                "status": "measured" if timing.get("memory_available") else "unavailable",
+                "reason": None if timing.get("memory_available") else "runtime_telemetry_unavailable",
+            },
         },
     )
 
