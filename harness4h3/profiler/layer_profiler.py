@@ -8,7 +8,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from ..adapters.wan.contracts import WanModelAdapter
 from .calibration import CalibrationCorpus
 from .report import ProfileReport
-from .sensitivity import measure_block_sensitivity, measure_channel_sensitivity, measure_timestep_sensitivity
+from .sensitivity import measure_attention_sensitivity, measure_block_sensitivity, measure_channel_sensitivity, measure_head_sensitivity, measure_sampling_step_sensitivity, measure_timestep_sensitivity, measure_token_sensitivity
 
 
 ForwardFn = Callable[[Any, Any], Any]
@@ -316,6 +316,10 @@ def profile_model(
     else:
         timestep_forward = timestep_fn or _default_timestep_forward
     timestep_sensitivity = measure_timestep_sensitivity(adapter, model, sample=sample, forward_fn=timestep_forward)
+    head_sensitivity = measure_head_sensitivity(adapter, model)
+    attention_sensitivity = measure_attention_sensitivity(adapter, model)
+    token_sensitivity = measure_token_sensitivity(adapter, model, sample=sample)
+    sampling_step_sensitivity = measure_sampling_step_sensitivity(adapter, model)
     offline = bool(structure.metadata.get("offline_simulation", False))
     device = _runtime_device(model, sample)
     first = _first_tensor(sample)
@@ -354,6 +358,10 @@ def profile_model(
             "peak_memory_bytes": timing.get("peak_memory_bytes"),
             "measurement_status": "measured" if timing.get("available") else "partial_or_unavailable",
         },
+        head_sensitivity=head_sensitivity,
+        attention_sensitivity=attention_sensitivity,
+        token_sensitivity=token_sensitivity,
+        sampling_step_sensitivity=sampling_step_sensitivity,
         hardware={
             "parameter_count": int(structure.parameter_count),
             "estimated_flops": sum(int(item["estimated_flops"]) for item in layers if item["estimated_flops"] is not None),

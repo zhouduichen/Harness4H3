@@ -60,6 +60,12 @@ def _bottleneck(profile: Mapping[str, Any]) -> str:
     channels = _available_records(profile, "channel_sensitivity", "available")
     if channels:
         return "ffn_sensitivity"
+    heads = _available_records(profile, "head_sensitivity", "available")
+    if heads:
+        return "attention_head_sensitivity"
+    tokens = _available_records(profile, "token_sensitivity", "available")
+    if tokens:
+        return "token_sensitivity"
     blocks = _available_records(profile, "block_sensitivity", "importance_score")
     return "block_sensitivity" if blocks else "unknown"
 
@@ -83,6 +89,13 @@ def _evidence_refs(profile: Mapping[str, Any]) -> list[str]:
     timestep_sensitivity = profile.get("timestep_sensitivity")
     if isinstance(timestep_sensitivity, Mapping) and timestep_sensitivity:
         refs.append("profile.timestep_sensitivity")
+    for key in ("head_sensitivity", "attention_sensitivity", "token_sensitivity"):
+        values = profile.get(key)
+        if isinstance(values, Sequence) and not isinstance(values, (str, bytes)) and any(isinstance(item, Mapping) and item.get("available") is True for item in values):
+            refs.append("profile.%s" % key)
+    sampling = profile.get("sampling_step_sensitivity")
+    if isinstance(sampling, Mapping) and sampling.get("available") is True:
+        refs.append("profile.sampling_step_sensitivity")
     return refs
 
 

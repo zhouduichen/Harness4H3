@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange
+from .attention import prune_attention_module_heads
 from ...operators.wan.runtime_gating import rule_matches, rules_to_dict, validate_timestep_gate_plan
+from ...operators.wan.runtime_policy import SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy, select_sampling_steps
 
 
 def _torch_modules() -> tuple[Any, Any]:
@@ -68,6 +70,33 @@ def _module_at(root: Any, path: str) -> Any:
     for part in path.split("."):
         value = getattr(value, part) if not part.isdigit() else value[int(part)]
     return value
+
+
+def _register_config(module: Any, key: str, value: Any) -> None:
+    register = getattr(module, "register_to_config", None)
+    if callable(register):
+        register(**{key: value})
+    else:
+        setattr(getattr(module, "config", module), key, value)
+
+
+def _slice_rotary(rotary: Any, indices: Any, sequence_length: int) -> Any:
+    """Select matching positions from Wan's (cos, sin) rotary tuple."""
+
+    if rotary is None:
+        return None
+    result = []
+    for value in rotary:
+        selected = value
+        try:
+            for dimension, size in enumerate(tuple(value.shape)):
+                if int(size) == int(sequence_length):
+                    selected = value.index_select(dimension, indices.to(value.device))
+                    break
+        except (AttributeError, IndexError, RuntimeError, TypeError):
+            selected = value
+        result.append(selected)
+    return tuple(result)
 
 
 def _copy_shared_components(source: Path, target: Path) -> bool:
@@ -237,6 +266,15 @@ class DiffusersWanAdapter:
         runtime_rules = getattr(getattr(pipe.transformer, "config", None), "harness4h3_timestep_block_gating", None)
         if runtime_rules:
             self.apply_timestep_block_gating(pipe, runtime_rules)
+        token_policy = getattr(getattr(pipe.transformer, "config", None), "harness4h3_token_sparsity", None)
+        if token_policy:
+            self.apply_token_sparsity(pipe, token_policy)
+        sparse_policy = getattr(getattr(pipe.transformer, "config", None), "harness4h3_sparse_runtime", None)
+        if sparse_policy:
+            self.apply_sparse_runtime(pipe, sparse_policy)
+        sampling_policy = getattr(getattr(pipe.transformer, "config", None), "harness4h3_sampling_step", None)
+        if sampling_policy:
+            self.apply_sampling_step_policy(pipe, sampling_policy)
         return pipe
 
     @classmethod
@@ -357,6 +395,156 @@ class DiffusersWanAdapter:
                 raise ValueError("unsupported_model_layout: cannot replace FFN projections")
         _update_config(self._transformer(model), ffn_dim=len(config.retained_indices))
         return StructuralChange("ffn_channel_pruning", {"block_ids": list(config.block_ids), "retained_indices": list(config.retained_indices), "original_widths": original, "retained_width": len(config.retained_indices)})
+
+    def prune_attention_heads(self, model: Any, removed_heads: Sequence[int], attention_names: Sequence[str] = ("attn1", "attn2")) -> StructuralChange:
+        _path, blocks = self._blocks(model)
+        names = tuple(str(item) for item in attention_names)
+        if not names:
+            raise ValueError("invalid_attention_selection")
+        available_names = tuple(name for name in ("attn1", "attn2") if hasattr(blocks[0], name))
+        if set(names) != set(available_names):
+            raise ValueError("global_attention_alignment_required")
+        before = _param_count(self._transformer(model))
+        changes = []
+        for index, block in enumerate(blocks):
+            for name in names:
+                attention = getattr(block, name, None)
+                if attention is None:
+                    raise ValueError("unsupported_attention_layout: %s" % name)
+                changes.append({"block_id": "block.%d" % index, "attention": name, **prune_attention_module_heads(attention, removed_heads)})
+        remaining_heads = int(getattr(getattr(blocks[0], names[0]), "heads", 0))
+        _update_config(self._transformer(model), num_attention_heads=remaining_heads)
+        after = _param_count(self._transformer(model))
+        return StructuralChange("attention_head_pruning", {"attention_names": list(names), "head_indices": list(removed_heads), "changes": changes, "remaining_heads": remaining_heads, "parameter_reduction_ratio": 1.0 - float(after) / max(float(before), 1.0)})
+
+    def apply_token_sparsity(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
+        torch, _ = _torch_modules()
+        parsed = TokenSparsityPolicy.from_mapping(policy)
+        _path, blocks = self._blocks(model)
+        known = {"block.%d" % index for index in range(len(blocks))}
+        unknown = sorted(set(parsed.block_ids) - known)
+        if unknown:
+            raise ValueError("invalid_token_selection: unknown block %s" % unknown[0])
+        transformer = self._transformer(model)
+        _register_config(transformer, "harness4h3_token_sparsity", parsed.to_dict())
+        transformer._harness4h3_token_sparsity_policy = parsed.to_dict()
+        transformer._harness4h3_token_sparsity_stats = {"selected_tokens": 0, "skipped_tokens": 0}
+        for index, block in enumerate(blocks):
+            block_id = "block.%d" % index
+            if hasattr(block, "_harness4h3_token_base_forward"):
+                continue
+            base = block.forward
+
+            def token_forward(block_self: Any, hidden_states: Any, encoder_hidden_states: Any, temb: Any, rotary_emb: Any, *args: Any, _block_id: str = block_id, _base: Any = base, **kwargs: Any) -> Any:
+                active = getattr(transformer, "_harness4h3_token_sparsity_policy", parsed.to_dict())
+                if hidden_states.ndim < 3 or hidden_states.shape[1] <= 1 or (active.get("block_ids") and _block_id not in active["block_ids"]):
+                    return _base(hidden_states, encoder_hidden_states, temb, rotary_emb, *args, **kwargs)
+                count = max(1, min(int(hidden_states.shape[1]), int(round(float(hidden_states.shape[1]) * float(active["keep_ratio"])))) )
+                scores = hidden_states.detach().float().pow(2).mean(dim=(0, 2))
+                indices = torch.topk(scores, count).indices.sort().values
+                reduced = hidden_states.index_select(1, indices)
+                reduced_rotary = _slice_rotary(rotary_emb, indices, int(hidden_states.shape[1]))
+                output = _base(reduced, encoder_hidden_states, temb, reduced_rotary, *args, **kwargs)
+                restored = hidden_states.clone()
+                restored.index_copy_(1, indices, output)
+                transformer._harness4h3_token_sparsity_stats["selected_tokens"] += int(count)
+                transformer._harness4h3_token_sparsity_stats["skipped_tokens"] += int(hidden_states.shape[1] - count)
+                return restored
+
+            block._harness4h3_token_base_forward = base
+            block.forward = MethodType(token_forward, block)
+        return StructuralChange("runtime_token_sparsity", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
+
+    def apply_sparse_runtime(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
+        torch, _ = _torch_modules()
+        parsed = SparseRuntimePolicy.from_mapping(policy)
+        transformer = self._transformer(model)
+        _register_config(transformer, "harness4h3_sparse_runtime", parsed.to_dict())
+        transformer._harness4h3_sparse_runtime_policy = parsed.to_dict()
+        transformer._harness4h3_sparse_runtime_stats = {"full_tokens": 0, "selected_tokens": 0}
+        _path, blocks = self._blocks(model)
+        for block in blocks:
+            attention = getattr(block, "attn1", None)
+            if attention is None or hasattr(attention, "_harness4h3_sparse_base_forward"):
+                continue
+            base = attention.forward
+
+            def sparse_forward(attention_self: Any, hidden_states: Any, encoder_hidden_states: Any = None, attention_mask: Any = None, rotary_emb: Any = None, *args: Any, _base: Any = base, **kwargs: Any) -> Any:
+                active = getattr(transformer, "_harness4h3_sparse_runtime_policy", parsed.to_dict())
+                if encoder_hidden_states is not None or hidden_states.ndim < 3 or hidden_states.shape[1] <= 1:
+                    return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
+                count = max(1, min(int(hidden_states.shape[1]), int(round(float(hidden_states.shape[1]) * float(active["keep_ratio"])))) )
+                scores = hidden_states.detach().float().pow(2).mean(dim=(0, 2))
+                indices = torch.topk(scores, count).indices.sort().values
+                keys = hidden_states.index_select(1, indices)
+                # The sparse branch uses the full query and a reduced key/value
+                # set.  Rotary positions are omitted only for this reduced
+                # branch because Wan's stock processor accepts one shared
+                # rotary tuple for query and key.
+                result = _base(hidden_states, keys, None, None, *args, **kwargs)
+                transformer._harness4h3_sparse_runtime_stats["full_tokens"] += int(hidden_states.shape[1])
+                transformer._harness4h3_sparse_runtime_stats["selected_tokens"] += int(count)
+                return result
+
+            attention._harness4h3_sparse_base_forward = base
+            attention.forward = MethodType(sparse_forward, attention)
+        return StructuralChange("runtime_sparse_attention", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
+
+    def apply_sampling_step_policy(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
+        parsed = SamplingStepPolicy.from_mapping(policy)
+        transformer = self._transformer(model)
+        _register_config(transformer, "harness4h3_sampling_step", parsed.to_dict())
+        transformer._harness4h3_sampling_step_policy = parsed.to_dict()
+        setattr(model, "_harness4h3_sampling_step_policy", parsed.to_dict())
+        return StructuralChange("runtime_sampling_step_skip", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
+
+    def sampling_steps(self, model: Any, timesteps: Sequence[Any]) -> tuple[Any, ...]:
+        transformer = self._transformer(model)
+        policy = getattr(transformer, "_harness4h3_sampling_step_policy", {})
+        return select_sampling_steps(timesteps, policy) if policy else tuple(timesteps)
+
+    def estimate_flops(self, model: Any) -> int:
+        """Estimate Wan transformer work from the inspected live modules.
+
+        This is a structural multiply-add estimate, not a hardware timing
+        claim.  Runtime policies scale the attention work estimate so the
+        algorithm evaluator can compare static and dynamic candidates before
+        the independent GPU evaluator supplies wall-clock evidence.
+        """
+
+        transformer = self._transformer(model)
+        _path, blocks = self._blocks(model)
+        total = 0.0
+        for block in blocks:
+            pair = self._ffn_pair(block)
+            if pair is not None:
+                up, down = pair
+                total += 2.0 * (int(up.in_features) * int(up.out_features) + int(down.in_features) * int(down.out_features))
+            for name in ("attn1", "attn2"):
+                attention = getattr(block, name, None)
+                if attention is None:
+                    continue
+                projections = 0
+                for projection_name in ("to_q", "to_k", "to_v", "to_out"):
+                    projection = getattr(attention, projection_name, None)
+                    if isinstance(projection, (tuple, list)):
+                        projection = projection[0] if projection else None
+                    if projection is not None and hasattr(projection, "in_features"):
+                        projections += int(projection.in_features) * int(projection.out_features)
+                total += 2.0 * projections
+                heads = int(getattr(attention, "heads", 1))
+                head_dim = int(getattr(attention, "inner_dim", heads) // max(heads, 1))
+                total += 4.0 * heads * head_dim * 64.0 * 64.0
+        token_policy = getattr(transformer, "_harness4h3_token_sparsity_policy", {})
+        sparse_policy = getattr(transformer, "_harness4h3_sparse_runtime_policy", {})
+        sampling_policy = getattr(transformer, "_harness4h3_sampling_step_policy", {})
+        if token_policy:
+            total *= float(token_policy.get("keep_ratio", 1.0))
+        if sparse_policy:
+            total *= float(sparse_policy.get("keep_ratio", 1.0))
+        if sampling_policy:
+            total *= float(sampling_policy.get("target_steps", 16)) / 16.0
+        return int(max(0.0, round(total)))
 
     def profile_sample(self, model: Any, seed: int = 7) -> Mapping[str, Any]:
         """Create a small valid Wan transformer probe without running T5/VAE."""

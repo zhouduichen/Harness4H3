@@ -16,6 +16,8 @@ from .contracts import (
     ChannelPruningConfig,
     CompressionResult,
     ModelStructure,
+    ModelVariant,
+    OperatorCapability,
     StructuralChange,
     WanModelAdapter,
 )
@@ -41,6 +43,8 @@ __all__ = [
     "DiffusersWanAdapter",
     "FakeWanDiTAdapter",
     "ModelStructure",
+    "ModelVariant",
+    "OperatorCapability",
     "StructuralChange",
     "WanModelAdapter",
     "build_wan_adapter",
@@ -53,4 +57,3 @@ def __getattr__(name: str) -> Any:
 
         return DiffusersWanAdapter
     raise AttributeError(name)
-

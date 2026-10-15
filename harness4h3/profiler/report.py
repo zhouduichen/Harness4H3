@@ -24,6 +24,10 @@ class ProfileReport:
     channel_sensitivity: tuple[Mapping[str, Any], ...]
     timestep_sensitivity: Mapping[str, Mapping[str, Any]]
     provenance: Mapping[str, Any]
+    head_sensitivity: tuple[Mapping[str, Any], ...] = ()
+    attention_sensitivity: tuple[Mapping[str, Any], ...] = ()
+    token_sensitivity: tuple[Mapping[str, Any], ...] = ()
+    sampling_step_sensitivity: Mapping[str, Any] = field(default_factory=dict)
     hardware: Mapping[str, Any] = field(default_factory=dict)
     calibration: Mapping[str, Any] = field(default_factory=dict)
     relationships: Mapping[str, Any] = field(default_factory=dict)
@@ -64,6 +68,10 @@ class ProfileReport:
             channel_sensitivity=tuple(dict(item) for item in raw["channel_sensitivity"]),
             timestep_sensitivity={str(key): dict(value) for key, value in dict(raw["timestep_sensitivity"]).items()},
             provenance=dict(raw["provenance"]),
+            head_sensitivity=tuple(dict(item) for item in raw.get("head_sensitivity", [])),
+            attention_sensitivity=tuple(dict(item) for item in raw.get("attention_sensitivity", [])),
+            token_sensitivity=tuple(dict(item) for item in raw.get("token_sensitivity", [])),
+            sampling_step_sensitivity=dict(raw.get("sampling_step_sensitivity") or {}),
             hardware=dict(raw.get("hardware") or {}),
             calibration=dict(raw.get("calibration") or {}),
             relationships=dict(raw.get("relationships") or {}),

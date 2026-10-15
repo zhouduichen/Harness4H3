@@ -901,6 +901,11 @@ class WanVideoEvaluator:
                 dtype=text_dtype,
             )
         generator = torch.Generator(device=str(device)).manual_seed(int(seed))
+        requested_steps = int(self._wan_spec["num_inference_steps"])
+        transformer = getattr(pipeline, "transformer", None)
+        sampling_policy = getattr(getattr(transformer, "config", None), "harness4h3_sampling_step", None)
+        if isinstance(sampling_policy, Mapping):
+            requested_steps = min(requested_steps, int(sampling_policy.get("target_steps", requested_steps)))
         with torch.inference_mode():
             output = pipeline(
                 prompt=None,
@@ -909,7 +914,7 @@ class WanVideoEvaluator:
                 height=int(self._wan_spec["height"]),
                 width=int(self._wan_spec["width"]),
                 num_frames=int(self._wan_spec["num_frames"]),
-                num_inference_steps=int(self._wan_spec["num_inference_steps"]),
+                num_inference_steps=requested_steps,
                 guidance_scale=float(self._wan_spec["guidance_scale"]),
                 generator=generator,
                 output_type="latent",

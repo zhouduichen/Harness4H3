@@ -11,9 +11,9 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from ...adapters.wan.contracts import CheckpointArtifact, CompressionResult, WanModelAdapter
+from ...adapters.wan.contracts import CheckpointArtifact, CompressionResult, OperatorCapability, WanModelAdapter
 from ...sandbox import AlgorithmSandbox
-from .compression import FFNChannelPruningOperator, TimestepBlockGatingOperator, WanCompressionRegistry
+from .compression import AttentionHeadPruningOperator, FFNChannelPruningOperator, HeadPruningOperator, LayerPruningOperator, SamplingStepSkipOperator, SparseRuntimeOperator, TimestepBlockGatingOperator, TokenPruningOperator, WanCompressionRegistry
 
 
 def _jsonable(value: Any) -> Any:
@@ -34,12 +34,16 @@ class OperatorSpec:
     limitations: tuple[str, ...] = ()
     trusted_factory_key: str = ""
     implementation_source: str = ""
+    execution_domain: str = "structural"
+    implementation_ref: str = ""
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.version.strip() or not self.granularity.strip():
             raise ValueError("operator specification requires name, version, and granularity")
         if not isinstance(self.argument_schema, Mapping):
             raise ValueError("operator argument_schema must be a mapping")
+        if self.execution_domain not in {"structural", "runtime", "sampler", "composite"}:
+            raise ValueError("unsupported operator execution domain")
 
     def to_dict(self) -> dict[str, Any]:
         return _jsonable(asdict(self))
@@ -55,6 +59,22 @@ class OperatorSpec:
             limitations=tuple(str(item) for item in raw.get("limitations", [])),
             trusted_factory_key=str(raw.get("trusted_factory_key", "")),
             implementation_source=str(raw.get("implementation_source", "")),
+            execution_domain=str(raw.get("execution_domain", "structural")),
+            implementation_ref=str(raw.get("implementation_ref", "")),
+        )
+
+    def capability(self) -> OperatorCapability:
+        """Return the execution metadata consumed by registry/worker code."""
+
+        implementation_ref = self.implementation_ref or self.trusted_factory_key or self.name
+        return OperatorCapability(
+            name=self.name,
+            version=self.version,
+            granularity=self.granularity,
+            execution_domain=self.execution_domain,
+            argument_schema=self.argument_schema,
+            implementation_ref=implementation_ref,
+            constraints=self.constraints,
         )
 
 
@@ -83,6 +103,11 @@ class SearchSpaceVersion:
             if item.name == name:
                 return item
         raise ValueError("operator_not_in_search_space: %s" % name)
+
+    def capabilities(self) -> tuple[OperatorCapability, ...]:
+        """Expose execution-domain metadata without exposing factory internals."""
+
+        return tuple(item.capability() for item in self.operators)
 
     def to_dict(self) -> dict[str, Any]:
         return _jsonable(asdict(self))
@@ -225,7 +250,13 @@ def default_search_space() -> SearchSpaceVersion:
         operators=(
             OperatorSpec("prune_blocks", "1", {"block_ids": "list[str]"}, "block", ("cannot_remove_all_blocks",), (), ""),
             OperatorSpec("prune_ffn_channels", "1", {"block_ids": "list[str]", "retained_indices": "list[int]"}, "channel", ("wan_ffn_width_aligned",), ("explicit_indices_only",), ""),
-            OperatorSpec("compose", "1", {"steps": "list[2..3]"}, "composite", ("no_nested_compose",), (), ""),
+            OperatorSpec("compose", "1", {"steps": "list[2..6]"}, "composite", ("no_nested_compose",), (), "", execution_domain="composite", implementation_ref="harness4h3.operators.wan.compression.CompositeCompressionOperator"),
+            OperatorSpec("prune_layers", "1", {"block_ids": "list[str]"}, "layer", ("cannot_remove_all_layers",), (), "prune_layers", implementation_ref="harness4h3.operators.wan.compression.LayerPruningOperator"),
+            OperatorSpec("prune_attention_heads", "1", {"head_indices": "list[int]", "attention_names": "list[str]"}, "attention_head", ("retain_at_least_one_head",), (), "prune_attention_heads", implementation_ref="harness4h3.operators.wan.compression.AttentionHeadPruningOperator"),
+            OperatorSpec("prune_heads", "1", {"head_indices": "list[int]", "attention_names": "list[str]"}, "head", ("retain_at_least_one_head",), (), "prune_heads", implementation_ref="harness4h3.operators.wan.compression.HeadPruningOperator"),
+            OperatorSpec("prune_tokens", "1", {"keep_ratio": "float"}, "token", ("keep_at_least_one_token",), ("dynamic_policy",), "prune_tokens", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.TokenPruningOperator"),
+            OperatorSpec("sparse_runtime", "1", {"keep_ratio": "float", "attention": "str"}, "sparse_runtime", ("self_attention_top_k",), ("dynamic_policy",), "sparse_runtime", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.SparseRuntimeOperator"),
+            OperatorSpec("sampling_step_skip", "1", {"target_steps": "int"}, "sampling_step", ("preserve_endpoints",), ("dynamic_policy",), "sampling_step_skip", execution_domain="sampler", implementation_ref="harness4h3.operators.wan.compression.SamplingStepSkipOperator"),
         ),
         constraints={"wan_channel_pruning_requires_all_blocks": True},
         status="validated",
@@ -312,6 +343,14 @@ class SearchSpaceManager:
                     }],
                     "policy": "skip_when_in_range",
                 }
+            elif proposal.spec.trusted_factory_key in {"prune_attention_heads", "prune_heads"}:
+                plan_args = {"head_indices": [0], "attention_names": ["attn1", "attn2"]}
+            elif proposal.spec.trusted_factory_key == "prune_tokens":
+                plan_args = {"keep_ratio": 0.75}
+            elif proposal.spec.trusted_factory_key == "sparse_runtime":
+                plan_args = {"keep_ratio": 0.75, "attention": "attn1"}
+            elif proposal.spec.trusted_factory_key == "sampling_step_skip":
+                plan_args = {"target_steps": 8}
             if proposal.spec.implementation_source:
                 # An authored implementation is still untrusted.  Execute it
                 # only to derive the validation plan, with the proposed spec
@@ -547,6 +586,12 @@ _TRUSTED_FACTORIES: dict[str, Callable[[], Any]] = {
         str(getattr(spec, "name", "generated_channel_rule")),
         str(getattr(spec, "implementation_source", "")),
     ),
+    "prune_layers": LayerPruningOperator,
+    "prune_attention_heads": AttentionHeadPruningOperator,
+    "prune_heads": HeadPruningOperator,
+    "prune_tokens": TokenPruningOperator,
+    "sparse_runtime": SparseRuntimeOperator,
+    "sampling_step_skip": SamplingStepSkipOperator,
 }
 
 

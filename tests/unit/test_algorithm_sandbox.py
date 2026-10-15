@@ -99,13 +99,16 @@ def test_sandbox_rejects_nested_composite_plan(tmp_path):
     assert "compose" in result.message
 
 
-def test_sandbox_rejects_composite_plan_longer_than_three_steps(tmp_path):
+def test_sandbox_rejects_composite_plan_longer_than_six_steps(tmp_path):
     source = """def propose(profile, history):
     return {'operator': 'compose', 'args': {'steps': [
         {'operator': 'prune_blocks', 'args': {'block_ids': ['block.1']}},
         {'operator': 'prune_blocks', 'args': {'block_ids': ['block.2']}},
         {'operator': 'prune_blocks', 'args': {'block_ids': ['block.3']}},
         {'operator': 'prune_blocks', 'args': {'block_ids': ['block.4']}},
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.5']}},
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.6']}},
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.7']}},
     ]}}
 """
 
@@ -113,7 +116,7 @@ def test_sandbox_rejects_composite_plan_longer_than_three_steps(tmp_path):
 
     assert result.status == "failed"
     assert result.failure_type == "algorithm_output_invalid"
-    assert "3" in result.message
+    assert "6" in result.message
 
 
 def test_sandbox_rejects_unsafe_composite_step_keys(tmp_path):

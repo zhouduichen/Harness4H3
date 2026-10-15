@@ -6,6 +6,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, ChannelPruningConfig, CompressionResult, WanModelAdapter
 from .runtime_gating import validate_timestep_gate_plan
+from .runtime_policy import SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy
 
 
 class CompressionOperator(Protocol):
@@ -61,6 +62,122 @@ class FFNChannelPruningOperator:
             return CompressionResult("success", parent.sha256, child, {"kind": change.kind, **dict(change.details)}, wall_time_s=time.monotonic() - started)
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
             return _failed(parent, _failure_type(exc, "channel_pruning_failed"), str(exc), started)
+
+
+class LayerPruningOperator(BlockPruningOperator):
+    """Layer-granularity spelling of the block operator.
+
+    Wan's transformer layers are exposed as blocks by both supported adapters;
+    keeping a distinct name lets the Agent search at the layer level without
+    duplicating structural mutation logic.
+    """
+
+    name = "prune_layers"
+
+
+class AttentionHeadPruningOperator:
+    """Structurally remove attention heads from every selected Wan module."""
+
+    name = "prune_attention_heads"
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        started = time.monotonic()
+        try:
+            raw = plan.get("head_indices")
+            if not isinstance(raw, (list, tuple)) or not raw or not all(isinstance(item, int) and not isinstance(item, bool) for item in raw):
+                return _failed(parent, "invalid_attention_head_selection", "head_indices must be a non-empty list of integers", started)
+            attention_names = plan.get("attention_names", ["attn1", "attn2"])
+            if not isinstance(attention_names, (list, tuple)) or not attention_names or not all(isinstance(item, str) for item in attention_names):
+                return _failed(parent, "invalid_attention_selection", "attention_names must be a list of strings", started)
+            model = adapter.reload_model(parent)
+            change = adapter.prune_attention_heads(model, tuple(raw), tuple(attention_names))
+            child = adapter.save_model(model, Path(output_dir))
+            if child.sha256 == parent.sha256:
+                return _failed(parent, "checkpoint_not_changed", "attention head pruning did not change checkpoint", started)
+            return CompressionResult("success", parent.sha256, child, {"kind": change.kind, **dict(change.details), "granularity": "attention_head"}, wall_time_s=time.monotonic() - started)
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            return _failed(parent, _failure_type(exc, "attention_head_pruning_failed"), str(exc), started)
+
+
+class HeadPruningOperator(AttentionHeadPruningOperator):
+    """Short alias kept for Agent-authored head-level plans."""
+
+    name = "prune_heads"
+
+
+def _execute_runtime_policy(
+    adapter: WanModelAdapter,
+    parent: CheckpointArtifact,
+    plan: Mapping[str, Any],
+    output_dir: Path,
+    *,
+    policy_name: str,
+    parser: Callable[[Mapping[str, Any]], Any],
+    adapter_method: str,
+    failure_type: str,
+) -> CompressionResult:
+    started = time.monotonic()
+    try:
+        policy = parser(plan)
+        model = adapter.reload_model(parent)
+        method = getattr(adapter, adapter_method, None)
+        if not callable(method):
+            return _failed(parent, "unsupported_model_layout", "%s is not implemented by this Wan adapter" % adapter_method, started)
+        change = method(model, policy.to_dict())
+        child = adapter.save_model(model, Path(output_dir))
+        if child.sha256 == parent.sha256:
+            return _failed(parent, "checkpoint_not_changed", "%s did not change runtime policy" % policy_name, started)
+        reloaded = adapter.reload_model(child)
+        restored = getattr(reloaded, "_harness4h3_%s_policy" % policy_name, None)
+        if restored is None:
+            transformer = getattr(reloaded, "transformer", reloaded)
+            restored = getattr(getattr(transformer, "config", None), "harness4h3_%s" % policy_name, None)
+        if restored is None:
+            return _failed(parent, "%s_reload_failed" % policy_name, "%s policy was not restored" % policy_name, started)
+        return CompressionResult(
+            "success",
+            parent.sha256,
+            child,
+            {
+                "kind": "runtime_%s" % policy_name,
+                "runtime_operator": policy_name,
+                "policy": policy.to_dict(),
+                "parameter_reduction_ratio": 0.0,
+                "dynamic_compute": True,
+                "child_reload_verified": True,
+                **dict(change.details),
+            },
+            wall_time_s=time.monotonic() - started,
+        )
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        return _failed(parent, _failure_type(exc, failure_type), str(exc), started)
+
+
+class TokenPruningOperator:
+    """Dynamic token sparsity at transformer-layer input, with reloadable policy."""
+
+    name = "prune_tokens"
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        return _execute_runtime_policy(adapter, parent, plan, output_dir, policy_name="token_sparsity", parser=TokenSparsityPolicy.from_mapping, adapter_method="apply_token_sparsity", failure_type="token_pruning_failed")
+
+
+class SparseRuntimeOperator:
+    """Dynamic sparse self-attention policy with top-k key selection."""
+
+    name = "sparse_runtime"
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        return _execute_runtime_policy(adapter, parent, plan, output_dir, policy_name="sparse_runtime", parser=SparseRuntimePolicy.from_mapping, adapter_method="apply_sparse_runtime", failure_type="sparse_runtime_failed")
+
+
+class SamplingStepSkipOperator:
+    """Persist and execute a reduced denoising schedule policy."""
+
+    name = "sampling_step_skip"
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        return _execute_runtime_policy(adapter, parent, plan, output_dir, policy_name="sampling_step", parser=SamplingStepPolicy.from_mapping, adapter_method="apply_sampling_step_policy", failure_type="sampling_step_policy_failed")
 
 
 class TimestepBlockGatingOperator:
@@ -161,14 +278,21 @@ class CompositeCompressionOperator:
     name = "compose"
     _BASE_OPERATORS = {
         "prune_blocks": BlockPruningOperator,
+        "prune_layers": LayerPruningOperator,
         "prune_ffn_channels": FFNChannelPruningOperator,
+        "prune_attention_heads": AttentionHeadPruningOperator,
+        "prune_heads": HeadPruningOperator,
+        "prune_tokens": TokenPruningOperator,
+        "sparse_runtime": SparseRuntimeOperator,
+        "sampling_step_skip": SamplingStepSkipOperator,
+        "timestep_block_gate": TimestepBlockGatingOperator,
     }
 
     def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
         started = time.monotonic()
         steps = plan.get("steps")
-        if not isinstance(steps, (list, tuple)) or not 2 <= len(steps) <= 3:
-            return _failed(parent, "invalid_composite_plan", "compose requires 2 to 3 steps", started)
+        if not isinstance(steps, (list, tuple)) or not 2 <= len(steps) <= 6:
+            return _failed(parent, "invalid_composite_plan", "compose requires 2 to 6 steps", started)
         current = parent
         changes: list[Mapping[str, Any]] = []
         for index, raw_step in enumerate(steps):
@@ -271,8 +395,21 @@ class WanCompressionRegistry:
         return view
 
 
-def build_wan_compression_registry(*, include_tica: bool = False) -> WanCompressionRegistry:
+def build_wan_compression_registry(*, include_tica: bool = False, include_multigranular: bool = False) -> WanCompressionRegistry:
     operators: list[CompressionOperator] = [BlockPruningOperator(), FFNChannelPruningOperator(), CompositeCompressionOperator()]
+    if include_multigranular:
+        operators[2] = CompositeCompressionOperator()
+        operators.extend(
+            [
+                LayerPruningOperator(),
+                AttentionHeadPruningOperator(),
+                HeadPruningOperator(),
+                TokenPruningOperator(),
+                SparseRuntimeOperator(),
+                SamplingStepSkipOperator(),
+                TimestepBlockGatingOperator(),
+            ]
+        )
     if include_tica:
         operators.append(TICAPruningOperator())
     return WanCompressionRegistry(tuple(operators))

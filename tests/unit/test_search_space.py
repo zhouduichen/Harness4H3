@@ -200,3 +200,30 @@ def test_agent_timestep_gate_extension_is_validated_and_enters_active_registry(t
     registry = manager.registry_for(version, build_wan_compression_registry())
     assert isinstance(registry.get("timestep_block_gate"), TimestepBlockGatingOperator)
     assert "timestep_block_gate" in registry.names()
+
+    # The next Algorithm Program reads the activated version, generates the
+    # newly reachable operator, and passes it through the same plan validator.
+    profile = {
+        "model": {"ffn_width": 16},
+        "layers": [{"block_id": "block.0"}, {"block_id": "block.1"}],
+        "block_sensitivity": [{"block_id": "block.0", "importance_score": 0.1}],
+    }
+    candidate = AlgorithmAgent().generate("A0002", parent_id=None, profile=profile, history=[])
+    from harness4h3.sandbox import AlgorithmSandbox
+    from harness4h3.sandbox.runner import CompressionPlan
+
+    sandbox = AlgorithmSandbox(tmp_path / "next-generation-sandbox", operator_specs=version.operators)
+    program = sandbox.run_program(
+        candidate.source,
+        entrypoint="search",
+        payload={
+            "profile": profile,
+            "history": [],
+            "state": {"depth": 1, "proposed_plan": None},
+            "search_space": version.to_dict(),
+        },
+    )
+    assert program.status == "success"
+    gate_plan = next(item for item in program.value["candidates"] if item["operator"] == "timestep_block_gate")
+    normalized = CompressionPlan.from_mapping(gate_plan, operator_specs={item.name: item.to_dict() for item in version.operators})
+    assert normalized.operator == "timestep_block_gate"

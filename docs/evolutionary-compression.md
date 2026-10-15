@@ -305,6 +305,17 @@ candidate screening；Agent 的 `search()` 源码会实际控制候选生成、�
 新的 timestep Block gate 只有在 SearchSpaceManager 完成 Sandbox、保存/重载和
 结构验证后才进入 active registry。
 
+当前 Wan registry 的可执行粒度包括 `prune_layers`/`prune_blocks`、
+`prune_ffn_channels`、`prune_attention_heads`/`prune_heads`、动态
+`prune_tokens`、`sparse_runtime`、`timestep_block_gate` 和
+`sampling_step_skip`。前两组是可重载的结构变换，后四组把经过验证的运行时
+策略写入子 checkpoint，并在 Diffusers Wan 前向或采样 schedule 中执行；
+`compose` 可在同一候选中联合这些步骤。Profile 会分别保存
+`head_sensitivity`、`attention_sensitivity`、`token_sensitivity`、
+`timestep_sensitivity` 和 `sampling_step_sensitivity`，供 Agent 的候选生成与
+递归改进使用。真实 GPU 运行仍必须检查 `evidence.offline_simulation` 和
+adapter 的运行时 measurement 字段，CPU Fake 证据不能冒充真实 Wan 画质或硬件收益。
+
 替换模板中的本地 checkpoint、Calibration/Validation/Test manifest、Wan 配置、
 CLIP 模型和 controller 后，运行 10--20 轮，例如：
 

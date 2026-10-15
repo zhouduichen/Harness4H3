@@ -50,6 +50,50 @@ def test_evolution_loop_keeps_failed_algorithm_as_experience(tmp_path):
     assert record.decision["search_policy"]["exploit_ratio"] == 0.6
 
 
+def test_standard_loop_executes_algorithm_search_program(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+
+    source = """def propose(profile, history):
+    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}
+
+def search(profile, history, state, search_space):
+    return {
+        'candidates': [
+            {'operator': 'prune_blocks', 'args': {'block_ids': ['block.1']}},
+            {'operator': 'prune_blocks', 'args': {'block_ids': ['block.2']}},
+        ],
+        'rank': [1, 0],
+        'stop': True,
+    }
+"""
+
+    def provider(payload):
+        return {
+            "source": source,
+            "hypothesis": "the search program selects the second candidate",
+            "parent_id": payload["parent_id"],
+        }
+
+    from harness4h3.evolution.agent import AlgorithmAgent
+
+    loop = EvolutionLoop(
+        adapter=adapter,
+        parent=parent,
+        output_root=tmp_path / "run",
+        agent=AlgorithmAgent(provider=provider),
+    )
+    outcome = loop.run_round()
+
+    assert outcome.status == "promoted"
+    round_dir = tmp_path / "run" / "rounds" / outcome.round_id
+    trace = json.loads((round_dir / "algorithm-program-trace.json").read_text(encoding="utf-8"))
+    assert trace["decision"]["rank"] == [1, 0]
+    assert trace["selected_plan"]["args"]["block_ids"] == ["block.2"]
+    decision = json.loads((round_dir / "decision.json").read_text(encoding="utf-8"))
+    assert decision["operator_args"]["block_ids"] == ["block.2"]
+
+
 def test_evolution_loop_restarts_from_persisted_parent_and_search_policy(tmp_path):
     adapter = FakeWanDiTAdapter(block_count=5, hidden_size=8, ffn_width=16)
     parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")

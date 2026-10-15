@@ -17,6 +17,8 @@ from .contracts import (
     checkpoint_content_sha256,
 )
 from ...operators.wan.runtime_gating import TimestepGateRule, normalized_timestep, rule_matches, validate_timestep_gate_plan
+from ...operators.wan.runtime_policy import SamplingStepPolicy, SparseRuntimePolicy, TokenSparsityPolicy, select_sampling_steps
+from .attention import prune_attention_module_heads
 
 
 def _torch() -> Any:
@@ -43,8 +45,52 @@ class FakeWanBlock:
         return self._module
 
 
-def _fake_block_module(hidden_size: int, width: int) -> Any:
-    _, nn = _torch()
+def _fake_attention_module(hidden_size: int, heads: int, head_dim: int | None = None) -> Any:
+    """Return a deepcopy-safe Wan-shaped attention module."""
+
+    torch, nn = _torch()
+    effective_head_dim = int(head_dim or (hidden_size // heads))
+    if effective_head_dim <= 0:
+        raise ValueError("fake attention head dimension is invalid")
+
+    class Attention(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.heads = int(heads)
+            self.inner_dim = int(effective_head_dim * heads)
+            self.kv_inner_dim = int(effective_head_dim * heads)
+            self.to_q = nn.Linear(hidden_size, self.inner_dim)
+            self.to_k = nn.Linear(hidden_size, self.inner_dim)
+            self.to_v = nn.Linear(hidden_size, self.inner_dim)
+            self.to_out = nn.ModuleList([nn.Linear(self.inner_dim, hidden_size), nn.Dropout(0.0)])
+
+        def forward(self, value: Any, encoder_hidden_states: Any = None, **kwargs: Any) -> Any:
+            squeeze = value.ndim == 2
+            hidden = value.unsqueeze(1) if squeeze else value
+            context = hidden if encoder_hidden_states is None else encoder_hidden_states
+            policy = getattr(self, "_harness4h3_sparse_policy", None)
+            if policy and context.ndim >= 3 and context.shape[1] > 1 and encoder_hidden_states is None:
+                keep = max(1, min(int(context.shape[1]), int(round(float(context.shape[1]) * float(policy["keep_ratio"])))) )
+                scores = context.detach().float().pow(2).mean(dim=-1)
+                indices = scores.topk(keep, dim=1).indices
+                context = context.gather(1, indices.unsqueeze(-1).expand(-1, -1, context.shape[-1]))
+                self._harness4h3_sparse_stats = {"full_tokens": int(hidden.shape[1]), "selected_tokens": int(keep)}
+            heads_now = int(self.heads)
+            dim = int(self.inner_dim) // heads_now
+            query = self.to_q(hidden).reshape(hidden.shape[0], hidden.shape[1], heads_now, dim).transpose(1, 2)
+            key = self.to_k(context).reshape(context.shape[0], context.shape[1], heads_now, dim).transpose(1, 2)
+            val = self.to_v(context).reshape(context.shape[0], context.shape[1], heads_now, dim).transpose(1, 2)
+            scores = torch.matmul(query, key.transpose(-2, -1)) / max(dim, 1) ** 0.5
+            weights = torch.softmax(scores, dim=-1)
+            result = torch.matmul(weights, val).transpose(1, 2).reshape(hidden.shape[0], hidden.shape[1], heads_now * dim)
+            result = self.to_out[0](result)
+            return result.squeeze(1) if squeeze else result
+
+    return Attention()
+
+
+def _fake_block_module(hidden_size: int, width: int, heads: int, head_dim: int | None = None) -> Any:
+    torch, nn = _torch()
 
     class Block(nn.Module):
         def __init__(self) -> None:
@@ -52,9 +98,27 @@ def _fake_block_module(hidden_size: int, width: int) -> Any:
             self.up_proj = nn.Linear(hidden_size, width)
             self.down_proj = nn.Linear(width, hidden_size)
             self.activation = nn.GELU()
+            # Preserve the historical fake's FFN initialization stream. The
+            # new attention modules are contract infrastructure and must not
+            # perturb old TICA CPU evidence merely by consuming RNG draws.
+            rng_state = torch.get_rng_state()
+            self.attn1 = _fake_attention_module(hidden_size, heads, head_dim)
+            self.attn2 = _fake_attention_module(hidden_size, heads, head_dim)
+            torch.set_rng_state(rng_state)
 
         def forward(self, value: Any) -> Any:
-            return self.down_proj(self.activation(self.up_proj(value)))
+            squeeze = value.ndim == 2
+            current = value.unsqueeze(1) if squeeze else value
+            # The CPU fake keeps the attention branch observationally
+            # neutral so historical TICA thresholds remain comparable to the
+            # pre-attention fake.  The Q/K/V modules still execute, expose
+            # real head geometry, and are mutated by the head/sparse tests;
+            # real Wan uses the unmodified attention residual path.
+            attention_probe = self.attn1(current)
+            attention_probe = self.attn2(current)
+            current = self.down_proj(self.activation(self.up_proj(current)))
+            current = current + 0.0 * attention_probe
+            return current.squeeze(1) if squeeze else current
 
     return Block()
 
@@ -66,26 +130,37 @@ def _copy_module(module: Any) -> Any:
 class FakeWanDiT:
     """Small Torch module kept separate so the adapter owns structure policy."""
 
-    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None, runtime_gate_rules: Sequence[Mapping[str, Any]] | None = None) -> None:
+    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None, num_heads: int = 4, attention_head_dim: int | None = None, runtime_gate_rules: Sequence[Mapping[str, Any]] | None = None, token_sparsity_policy: Mapping[str, Any] | None = None, sparse_runtime_policy: Mapping[str, Any] | None = None, sampling_step_policy: Mapping[str, Any] | None = None) -> None:
         _, nn = _torch()
         widths = list(ffn_widths or [ffn_width] * block_count)
         if len(widths) != block_count:
             raise ValueError("ffn_widths length must match block_count")
         self.hidden_size = int(hidden_size)
+        self.num_heads = int(num_heads)
+        self.attention_head_dim = int(attention_head_dim or (self.hidden_size // self.num_heads))
+        if self.num_heads < 1 or self.attention_head_dim <= 0:
+            raise ValueError("fake attention head geometry is invalid")
         self.block_ids = list(block_ids or ["block.%d" % index for index in range(block_count)])
         if len(self.block_ids) != block_count:
             raise ValueError("block_ids length must match block_count")
         self.ffn_widths = [int(width) for width in widths]
         self.blocks = nn.ModuleList()
         for width in self.ffn_widths:
-            self.blocks.append(_fake_block_module(self.hidden_size, width))
+            self.blocks.append(_fake_block_module(self.hidden_size, width, self.num_heads, self.attention_head_dim))
         self.output = nn.Linear(self.hidden_size, self.hidden_size)
         self._artifact_sha256 = "0" * 64
         self.runtime_gate_rules = [dict(item) for item in (runtime_gate_rules or [])]
+        self._harness4h3_token_sparsity_policy = dict(token_sparsity_policy or {})
+        self._harness4h3_sparse_runtime_policy = dict(sparse_runtime_policy or {})
+        self._harness4h3_sampling_step_policy = dict(sampling_step_policy or {})
+        if self._harness4h3_sparse_runtime_policy:
+            for block in self.blocks:
+                block.attn1._harness4h3_sparse_policy = dict(self._harness4h3_sparse_runtime_policy)
         self.runtime_gate_stats = {
             str(block_id): {"executed": 0, "skipped": 0}
             for block_id in self.block_ids
         }
+        self.runtime_token_stats = {str(block_id): {"selected": 0, "skipped": 0} for block_id in self.block_ids}
 
     def __call__(self, value: Any, timestep: Any = None) -> Any:
         return self.forward(value, timestep=timestep)
@@ -93,13 +168,25 @@ class FakeWanDiT:
     def forward(self, value: Any, timestep: Any = None) -> Any:
         current_timestep = 0.5 if timestep is None else normalized_timestep(timestep)
         rules = {str(item["block_id"]): TimestepGateRule.from_mapping(item) for item in self.runtime_gate_rules}
+        token_policy = TokenSparsityPolicy.from_mapping(self._harness4h3_token_sparsity_policy) if self._harness4h3_token_sparsity_policy else None
         for block_id, block in zip(self.block_ids, self.blocks):
             rule = rules.get(str(block_id))
             if rule is not None and rule_matches(rule, current_timestep):
                 self.runtime_gate_stats[str(block_id)]["skipped"] += 1
                 continue
             self.runtime_gate_stats[str(block_id)]["executed"] += 1
-            value = value + block(value)
+            if token_policy is not None and (not token_policy.block_ids or block_id in token_policy.block_ids) and value.ndim >= 3 and value.shape[1] > 1:
+                count = max(1, min(int(value.shape[1]), int(round(float(value.shape[1]) * token_policy.keep_ratio))))
+                scores = value.detach().float().pow(2).mean(dim=-1)
+                indices = scores.topk(count, dim=1).indices
+                selected = value.gather(1, indices.unsqueeze(-1).expand(-1, -1, value.shape[-1]))
+                updated = selected + block(selected)
+                value = value.clone()
+                value.scatter_(1, indices.unsqueeze(-1).expand_as(updated), updated)
+                self.runtime_token_stats[str(block_id)]["selected"] += int(count)
+                self.runtime_token_stats[str(block_id)]["skipped"] += int(value.shape[1] - count)
+            else:
+                value = value + block(value)
         return self.output(value)
 
     def parameters(self) -> Iterable[Any]:
@@ -155,7 +242,7 @@ class FakeWanDiTAdapter:
         torch, _ = _torch()
         if str(checkpoint).startswith("fake://"):
             torch.manual_seed(self.seed)
-            model = FakeWanDiT(self.block_count, self.hidden_size, self.ffn_width)
+            model = FakeWanDiT(self.block_count, self.hidden_size, self.ffn_width, num_heads=4)
         else:
             root = Path(checkpoint)
             config = json.loads((root / "config.json").read_text(encoding="utf-8"))
@@ -165,7 +252,12 @@ class FakeWanDiTAdapter:
                 int(config["ffn_width"]),
                 block_ids=config["block_ids"],
                 ffn_widths=config["ffn_widths"],
+                num_heads=int(config.get("num_heads", 4)),
+                attention_head_dim=int(config.get("attention_head_dim", int(config["hidden_size"]) // int(config.get("num_heads", 4)))),
                 runtime_gate_rules=config.get("runtime_gate_rules", []),
+                token_sparsity_policy=config.get("token_sparsity_policy", {}),
+                sparse_runtime_policy=config.get("sparse_runtime_policy", {}),
+                sampling_step_policy=config.get("sampling_step_policy", {}),
             )
             model.load_state_dict(torch.load(root / "model.pt", map_location="cpu", weights_only=True))
             model._artifact_sha256 = checkpoint_content_sha256(root)
@@ -193,6 +285,11 @@ class FakeWanDiTAdapter:
                 "ffn_widths": list(model.ffn_widths),
                 "offline_simulation": True,
                 "runtime_operator": "timestep_block_gate" if model.runtime_gate_rules else None,
+                "num_attention_heads": int(model.blocks[0].attn1.heads),
+                "attention_head_dim": int(model.blocks[0].attn1.inner_dim // model.blocks[0].attn1.heads),
+                "token_sparsity_policy": dict(model._harness4h3_token_sparsity_policy),
+                "sparse_runtime_policy": dict(model._harness4h3_sparse_runtime_policy),
+                "sampling_step_policy": dict(model._harness4h3_sampling_step_policy),
             },
         )
 
@@ -272,6 +369,50 @@ class FakeWanDiTAdapter:
             model.ffn_widths[index] = len(retained)
         return StructuralChange("ffn_channel_pruning", {"block_ids": list(config.block_ids), "retained_indices": list(config.retained_indices), "original_widths": original_widths, "retained_width": len(config.retained_indices)})
 
+    def prune_attention_heads(self, model: FakeWanDiT, removed_heads: Sequence[int], attention_names: Sequence[str] = ("attn1", "attn2")) -> StructuralChange:
+        names = tuple(str(item) for item in attention_names)
+        if not names:
+            raise ValueError("invalid_attention_selection")
+        available_names = tuple(name for name in ("attn1", "attn2") if hasattr(model.blocks[0], name))
+        if set(names) != set(available_names):
+            raise ValueError("global_attention_alignment_required")
+        before = int(self.inspect(model).parameter_count)
+        changes = []
+        for block_id, block in zip(model.block_ids, model.blocks):
+            for name in names:
+                attention = getattr(block, name, None)
+                if attention is None:
+                    raise ValueError("unsupported_attention_layout: %s" % name)
+                changes.append({"block_id": block_id, "attention": name, **prune_attention_module_heads(attention, removed_heads)})
+        after = int(self.inspect(model).parameter_count)
+        return StructuralChange("attention_head_pruning", {"attention_names": list(names), "head_indices": list(removed_heads), "changes": changes, "parameter_reduction_ratio": 1.0 - float(after) / max(float(before), 1.0), "remaining_heads": int(model.blocks[0].attn1.heads)})
+
+    def apply_token_sparsity(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
+        parsed = TokenSparsityPolicy.from_mapping(policy)
+        unknown = sorted(set(parsed.block_ids) - set(model.block_ids))
+        if unknown:
+            raise ValueError("invalid_token_selection: unknown block %s" % unknown[0])
+        model._harness4h3_token_sparsity_policy = parsed.to_dict()
+        model.runtime_token_stats = {str(block_id): {"selected": 0, "skipped": 0} for block_id in model.block_ids}
+        return StructuralChange("runtime_token_sparsity", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
+
+    def apply_sparse_runtime(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
+        parsed = SparseRuntimePolicy.from_mapping(policy)
+        for block in model.blocks:
+            if parsed.attention in {"attn1", "self", "all"}:
+                block.attn1._harness4h3_sparse_policy = parsed.to_dict()
+        model._harness4h3_sparse_runtime_policy = parsed.to_dict()
+        return StructuralChange("runtime_sparse_attention", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
+
+    def apply_sampling_step_policy(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
+        parsed = SamplingStepPolicy.from_mapping(policy)
+        model._harness4h3_sampling_step_policy = parsed.to_dict()
+        return StructuralChange("runtime_sampling_step_skip", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
+
+    def sampling_steps(self, model: FakeWanDiT, timesteps: Sequence[Any]) -> tuple[Any, ...]:
+        policy = model._harness4h3_sampling_step_policy
+        return select_sampling_steps(timesteps, policy) if policy else tuple(timesteps)
+
     def save_model(self, model: FakeWanDiT, output_dir: Path) -> CheckpointArtifact:
         torch, _ = _torch()
         target = Path(output_dir)
@@ -288,7 +429,12 @@ class FakeWanDiTAdapter:
             "ffn_width": max(model.ffn_widths),
             "ffn_widths": list(model.ffn_widths),
             "block_ids": list(model.block_ids),
+            "num_heads": int(model.blocks[0].attn1.heads),
+            "attention_head_dim": int(model.blocks[0].attn1.inner_dim // model.blocks[0].attn1.heads),
             "runtime_gate_rules": list(model.runtime_gate_rules),
+            "token_sparsity_policy": dict(model._harness4h3_token_sparsity_policy),
+            "sparse_runtime_policy": dict(model._harness4h3_sparse_runtime_policy),
+            "sampling_step_policy": dict(model._harness4h3_sampling_step_policy),
         }
         config_path.write_text(json.dumps(config, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         digest = checkpoint_content_sha256(target)
@@ -329,7 +475,21 @@ class FakeWanDiTAdapter:
         hidden = int(model.hidden_size)
         output = 2 * hidden * hidden
         blocks = sum(4 * hidden * int(width) for width in model.ffn_widths)
-        return int(output + blocks)
+        attention = sum(
+            2 * int(block.attn1.inner_dim) * hidden + 2 * int(block.attn2.inner_dim) * hidden
+            for block in model.blocks
+        )
+        estimate = float(output + blocks + attention)
+        token_policy = getattr(model, "_harness4h3_token_sparsity_policy", {})
+        sparse_policy = getattr(model, "_harness4h3_sparse_runtime_policy", {})
+        sampling_policy = getattr(model, "_harness4h3_sampling_step_policy", {})
+        if token_policy:
+            estimate *= float(token_policy.get("keep_ratio", 1.0))
+        if sparse_policy:
+            estimate *= float(sparse_policy.get("keep_ratio", 1.0))
+        if sampling_policy:
+            estimate *= float(sampling_policy.get("target_steps", 16)) / 16.0
+        return int(round(estimate))
 
     def tica_calibration_inputs(self, model: FakeWanDiT, manifest: Any) -> tuple[Any, ...]:
         """Create deterministic CPU transformer inputs for TICA replay."""

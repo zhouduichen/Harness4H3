@@ -37,9 +37,30 @@ class CompressionPlan:
     operator: str
     args: Mapping[str, Any]
 
-    ALLOWED_OPERATORS = frozenset({"prune_blocks", "prune_ffn_channels", "compose"})
-    BASE_OPERATORS = frozenset({"prune_blocks", "prune_ffn_channels"})
-    MAX_COMPOSITE_STEPS = 3
+    ALLOWED_OPERATORS = frozenset({
+        "prune_blocks",
+        "prune_layers",
+        "prune_ffn_channels",
+        "prune_attention_heads",
+        "prune_heads",
+        "prune_tokens",
+        "sparse_runtime",
+        "sampling_step_skip",
+        "timestep_block_gate",
+        "compose",
+    })
+    BASE_OPERATORS = frozenset({
+        "prune_blocks",
+        "prune_layers",
+        "prune_ffn_channels",
+        "prune_attention_heads",
+        "prune_heads",
+        "prune_tokens",
+        "sparse_runtime",
+        "sampling_step_skip",
+        "timestep_block_gate",
+    })
+    MAX_COMPOSITE_STEPS = 6
 
     @classmethod
     def from_mapping(cls, raw: Any, *, operator_specs: Optional[Mapping[str, Mapping[str, Any]]] = None) -> "CompressionPlan":
@@ -92,9 +113,9 @@ class CompressionPlan:
         if operator not in cls.BASE_OPERATORS or not isinstance(args, Mapping):
             raise ValueError("algorithm_output_invalid: composite steps must use base operators")
         _reject_unsafe_keys(args)
-        if operator == "prune_blocks":
+        if operator in {"prune_blocks", "prune_layers"}:
             if set(args) != {"block_ids"} or not isinstance(args["block_ids"], list) or not all(isinstance(item, str) for item in args["block_ids"]):
-                raise ValueError("algorithm_output_invalid: prune_blocks requires block_ids")
+                raise ValueError("algorithm_output_invalid: %s requires block_ids" % operator)
         if operator == "prune_ffn_channels":
             required = {"block_ids", "retained_indices"}
             if set(args) - required or set(args) != required or not isinstance(args["block_ids"], list) or not isinstance(args["retained_indices"], list):
@@ -103,6 +124,37 @@ class CompressionPlan:
                 raise ValueError("algorithm_output_invalid: block_ids must contain strings")
             if not all(isinstance(item, int) and not isinstance(item, bool) for item in args["retained_indices"]):
                 raise ValueError("algorithm_output_invalid: retained_indices must contain integers")
+        if operator in {"prune_attention_heads", "prune_heads"}:
+            if set(args) not in ({"head_indices"}, {"head_indices", "attention_names"}):
+                raise ValueError("algorithm_output_invalid: %s requires head_indices" % operator)
+            if not isinstance(args["head_indices"], list) or not args["head_indices"] or not all(isinstance(item, int) and not isinstance(item, bool) for item in args["head_indices"]):
+                raise ValueError("algorithm_output_invalid: head_indices must contain integers")
+            if "attention_names" in args and (not isinstance(args["attention_names"], list) or not args["attention_names"] or not all(isinstance(item, str) for item in args["attention_names"])):
+                raise ValueError("algorithm_output_invalid: attention_names must contain strings")
+        if operator in {"prune_tokens", "sparse_runtime"}:
+            if set(args) not in ({"keep_ratio"}, {"keep_ratio", "block_ids"}, {"keep_ratio", "attention"}):
+                raise ValueError("algorithm_output_invalid: %s has unsupported arguments" % operator)
+            if not isinstance(args["keep_ratio"], (int, float)) or isinstance(args["keep_ratio"], bool) or not 0.0 < float(args["keep_ratio"]) <= 1.0:
+                raise ValueError("algorithm_output_invalid: keep_ratio must be in (0, 1]")
+            if "block_ids" in args and (not isinstance(args["block_ids"], list) or not all(isinstance(item, str) for item in args["block_ids"])):
+                raise ValueError("algorithm_output_invalid: block_ids must contain strings")
+            if "attention" in args and not isinstance(args["attention"], str):
+                raise ValueError("algorithm_output_invalid: attention must be a string")
+        if operator == "sampling_step_skip":
+            if set(args) not in ({"target_steps"}, {"target_steps", "strategy"}, {"target_steps", "strategy", "min_steps"}):
+                raise ValueError("algorithm_output_invalid: sampling_step_skip has unsupported arguments")
+            if not isinstance(args["target_steps"], int) or isinstance(args["target_steps"], bool) or not 1 <= int(args["target_steps"]) <= 256:
+                raise ValueError("algorithm_output_invalid: target_steps must be in [1, 256]")
+            if "strategy" in args and not isinstance(args["strategy"], str):
+                raise ValueError("algorithm_output_invalid: strategy must be a string")
+            if "min_steps" in args and (not isinstance(args["min_steps"], int) or isinstance(args["min_steps"], bool)):
+                raise ValueError("algorithm_output_invalid: min_steps must be an integer")
+        if operator == "timestep_block_gate":
+            required = {"rules", "policy"}
+            if set(args) != required or not isinstance(args["rules"], list) or not isinstance(args["policy"], str):
+                raise ValueError("algorithm_output_invalid: timestep_block_gate requires rules and policy")
+            if not all(isinstance(item, Mapping) for item in args["rules"]):
+                raise ValueError("algorithm_output_invalid: timestep rules must contain objects")
         return cls(str(operator), {str(key): value for key, value in args.items()})
 
     @classmethod

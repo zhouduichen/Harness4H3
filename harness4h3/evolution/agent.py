@@ -121,13 +121,34 @@ def _search_program_suffix(algorithm_id: str, *, exploration: bool = False) -> s
         "        records = [(0.0, str(item.get('block_id'))) for item in profile.get('layers', []) if isinstance(item, dict) and item.get('block_id')]\n"
         "    ordered = [item[1] for item in sorted(records)]\n"
         "    candidates = []\n"
+        "    def add(candidate):\n"
+        "        if candidate not in candidates:\n"
+        "            candidates.append(candidate)\n"
+        "    proposed = state.get('proposed_plan') if isinstance(state, dict) else None\n"
+        "    if isinstance(proposed, dict) and proposed.get('operator') and isinstance(proposed.get('args'), dict):\n"
+        "        add(proposed)\n"
         "    if ordered:\n"
-        "        candidates.append({'operator': 'prune_blocks', 'args': {'block_ids': [ordered[0]]}})\n"
+        "        add({'operator': 'prune_blocks', 'args': {'block_ids': [ordered[0]]}})\n"
         "    if len(ordered) > 1:\n"
-        "        candidates.append({'operator': 'prune_blocks', 'args': {'block_ids': [ordered[1]]}})\n"
+        "        add({'operator': 'prune_blocks', 'args': {'block_ids': [ordered[1]]}})\n"
         "    names = [str(item.get('name')) for item in search_space.get('operators', []) if isinstance(item, dict)]\n"
         "    if 'timestep_block_gate' in names and ordered:\n"
-        "        candidates.append({'operator': 'timestep_block_gate', 'args': {'rules': [{'block_id': ordered[0], 'min_timestep': 0.0, 'max_timestep': 0.3}], 'policy': 'skip_when_in_range'}})\n"
+        "        add({'operator': 'timestep_block_gate', 'args': {'rules': [{'block_id': ordered[0], 'min_timestep': 0.0, 'max_timestep': 0.3}], 'policy': 'skip_when_in_range'}})\n"
+        "    head_rows = [item for item in profile.get('head_sensitivity', []) if isinstance(item, dict) and item.get('head') is not None]\n"
+        "    if 'prune_attention_heads' in names and head_rows:\n"
+        "        add({'operator': 'prune_attention_heads', 'args': {'head_indices': [int(sorted(head_rows, key=lambda item: float(item.get('importance_score', 0.0) or 0.0))[0]['head'])]}})\n"
+        "    if 'prune_tokens' in names:\n"
+        "        add({'operator': 'prune_tokens', 'args': {'keep_ratio': 0.75}})\n"
+        "    if 'sparse_runtime' in names:\n"
+        "        add({'operator': 'sparse_runtime', 'args': {'keep_ratio': 0.75, 'attention': 'attn1'}})\n"
+        "    if 'sampling_step_skip' in names:\n"
+        "        add({'operator': 'sampling_step_skip', 'args': {'target_steps': 8}})\n"
+        "    if ordered and 'prune_attention_heads' in names and 'prune_tokens' in names and 'sparse_runtime' in names:\n"
+        "        add({'operator': 'compose', 'args': {'steps': [\n"
+        "            {'operator': 'prune_blocks', 'args': {'block_ids': [ordered[0]]}},\n"
+        "            {'operator': 'prune_attention_heads', 'args': {'head_indices': [0]}},\n"
+        "            {'operator': 'prune_tokens', 'args': {'keep_ratio': 0.75}},\n"
+        "        ]}})\n"
         "    if not candidates:\n"
         "        fallback = 'block.' + str(int(state.get('depth', 0)))\n"
         "        return {'candidates': [{'operator': 'prune_blocks', 'args': {'block_ids': [fallback]}}], 'rank': [0], 'stop': True}\n"
@@ -691,7 +712,7 @@ def _compact_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
     """Keep provider prompts bounded while retaining compression evidence."""
 
     compact: dict[str, Any] = {}
-    for key in ("model", "provenance", "schema_version", "timestep_sensitivity"):
+    for key in ("model", "provenance", "schema_version", "timestep_sensitivity", "sampling_step_sensitivity"):
         if key in profile:
             compact[key] = profile[key]
     compact["layers"] = [
@@ -724,6 +745,21 @@ def _compact_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
         )[:4]
         channel_records.append(record)
     compact["channel_sensitivity"] = channel_records
+    compact["head_sensitivity"] = [
+        {field: item[field] for field in ("block_id", "attention", "head", "importance_score", "available", "method") if field in item}
+        for item in profile.get("head_sensitivity", [])
+        if isinstance(item, Mapping)
+    ][:32]
+    compact["attention_sensitivity"] = [
+        {field: item[field] for field in ("block_id", "attention", "head", "importance_score", "available", "method") if field in item}
+        for item in profile.get("attention_sensitivity", [])
+        if isinstance(item, Mapping)
+    ][:64]
+    compact["token_sensitivity"] = [
+        {field: item[field] for field in ("keep_ratio", "token_count", "selected_count", "importance_score", "available", "method") if field in item}
+        for item in profile.get("token_sensitivity", [])
+        if isinstance(item, Mapping)
+    ]
     return compact
 
 

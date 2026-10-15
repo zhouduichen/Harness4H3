@@ -260,3 +260,146 @@ def measure_timestep_sensitivity(
         except (RuntimeError, TypeError, ValueError, AttributeError):
             records[name] = {"timestep": value, "importance_score": None, "available": False, "method": "structural_timestep_delta", "reference_block_id": reference_block, "score_semantics": "removed_block_output_difference"}
     return records
+
+
+def _attention_module(block: Any, name: str) -> Any:
+    value = getattr(block, str(name), None)
+    if value is None:
+        raise AttributeError("attention module unavailable: %s" % name)
+    return value
+
+
+def measure_head_sensitivity(
+    adapter: WanModelAdapter,
+    model: Any,
+    *,
+    attention_name: str = "attn1",
+) -> tuple[Mapping[str, Any], ...]:
+    """Rank heads from their paired Q/K/V contribution, without fake zeros.
+
+    A real Wan checkpoint cannot be deep-copied safely at 1.3B scale.  The
+    projection contribution is therefore a measured structural proxy and is
+    labelled as such; the execution operator later validates the selected
+    heads by real reload and evaluation.
+    """
+
+    offline = bool(adapter.inspect(model).metadata.get("offline_simulation", False))
+    records: list[Mapping[str, Any]] = []
+    for block in adapter.get_blocks(model):
+        try:
+            module = _resolve(model, block.module_path)
+            attention = _attention_module(module, attention_name)
+            heads = int(getattr(attention, "heads"))
+            inner = int(getattr(attention, "inner_dim"))
+            if heads <= 0 or inner % heads:
+                raise ValueError("head geometry unavailable")
+            width = inner // heads
+            q = attention.to_q.weight.detach().float()
+            k = attention.to_k.weight.detach().float()
+            v = attention.to_v.weight.detach().float()
+            for head in range(heads):
+                rows = slice(head * width, (head + 1) * width)
+                score = float(q[rows].abs().mean().item() + k[rows].abs().mean().item() + v[rows].abs().mean().item())
+                records.append({
+                    "block_id": block.block_id,
+                    "attention": attention_name,
+                    "head": head,
+                    "importance_score": score,
+                    "available": True,
+                    "method": "qkv_projection_contribution",
+                    "approximation": True,
+                    "evidence": _evidence("estimated", "qkv_projection_contribution", offline),
+                    "score_semantics": "mean_absolute_qkv_projection_weight",
+                })
+        except (AttributeError, IndexError, RuntimeError, TypeError, ValueError) as exc:
+            records.append({
+                "block_id": block.block_id,
+                "attention": attention_name,
+                "head": None,
+                "importance_score": None,
+                "available": False,
+                "method": "qkv_projection_contribution",
+                "approximation": True,
+                "evidence": _evidence("unavailable", "qkv_projection_contribution", offline, str(exc)),
+                "score_semantics": "unavailable",
+            })
+    return tuple(records)
+
+
+def measure_attention_sensitivity(adapter: WanModelAdapter, model: Any, *, attention_names: Sequence[str] = ("attn1", "attn2")) -> tuple[Mapping[str, Any], ...]:
+    records: list[Mapping[str, Any]] = []
+    for name in attention_names:
+        rows = measure_head_sensitivity(adapter, model, attention_name=str(name))
+        records.extend(rows)
+    return tuple(records)
+
+
+def measure_token_sensitivity(
+    adapter: WanModelAdapter,
+    model: Any,
+    *,
+    sample: Any = None,
+    keep_ratios: Sequence[float] = (0.75, 0.5, 0.25),
+) -> tuple[Mapping[str, Any], ...]:
+    """Measure token energy concentration for dynamic token selection."""
+
+    offline = bool(adapter.inspect(model).metadata.get("offline_simulation", False))
+    token_sample = sample
+    layout = "sequence"
+    if isinstance(sample, Mapping):
+        token_sample = sample.get("hidden_states")
+        layout = "wan_latent_grid"
+    try:
+        # Diffusers Wan profiles begin as [B, C, T, H, W].  Flatten the
+        # actual spatiotemporal patch grid into [B, N, C] for importance
+        # estimation; this is only a profiler view and does not alter the
+        # model or claim that the external latent itself is tokenized.
+        if token_sample is not None and int(token_sample.ndim) == 5:
+            token_sample = token_sample.permute(0, 2, 3, 4, 1).reshape(token_sample.shape[0], -1, token_sample.shape[1])
+        elif token_sample is not None and int(token_sample.ndim) == 4:
+            token_sample = token_sample.permute(0, 2, 3, 1).reshape(token_sample.shape[0], -1, token_sample.shape[1])
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        token_sample = None
+    if token_sample is None or not hasattr(token_sample, "ndim") or int(token_sample.ndim) < 3:
+        return tuple({"keep_ratio": float(ratio), "available": False, "method": "token_energy_concentration", "evidence": _evidence("unavailable", "token_energy_concentration", offline, "profile sample has no sequence dimension"), "score_semantics": "unavailable"} for ratio in keep_ratios)
+    try:
+        scores = token_sample.detach().float().pow(2).mean(dim=tuple(index for index in range(token_sample.ndim) if index != 1))
+        ordered = scores.sort(dim=1, descending=True).values
+        total = ordered.sum(dim=1).clamp_min(1e-12)
+        return tuple({
+            "keep_ratio": float(ratio),
+            "token_count": int(token_sample.shape[1]),
+            "selected_count": max(1, int(round(int(token_sample.shape[1]) * float(ratio)))),
+            "importance_score": float((ordered[:, :max(1, int(round(int(token_sample.shape[1]) * float(ratio))))].sum(dim=1) / total).mean().item()),
+            "available": True,
+            "method": "token_energy_concentration",
+            "approximation": True,
+            "layout": layout,
+            "evidence": _evidence("estimated", "token_energy_concentration", offline),
+            "score_semantics": "fraction_of_input_energy_retained_by_top_tokens",
+        } for ratio in keep_ratios)
+    except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+        return tuple({"keep_ratio": float(ratio), "available": False, "method": "token_energy_concentration", "evidence": _evidence("unavailable", "token_energy_concentration", offline, str(exc)), "score_semantics": "unavailable"} for ratio in keep_ratios)
+
+
+def measure_sampling_step_sensitivity(
+    adapter: WanModelAdapter,
+    model: Any,
+    *,
+    baseline_steps: int = 16,
+    candidate_steps: Sequence[int] = (12, 8, 4),
+) -> Mapping[str, Any]:
+    """Expose the adapter's actual schedule selector as measured capability."""
+
+    selector = getattr(adapter, "sampling_steps", None)
+    if not callable(selector):
+        return {"available": False, "method": "adapter_sampling_schedule", "reason": "adapter_sampling_steps_unavailable"}
+    timesteps = tuple(range(int(baseline_steps), 0, -1))
+    records = []
+    for count in candidate_steps:
+        try:
+            selected = selector(model, tuple(timesteps[: int(count)]))
+            records.append({"target_steps": int(count), "actual_steps": len(selected), "available": True})
+        except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+            records.append({"target_steps": int(count), "actual_steps": None, "available": False, "reason": str(exc)})
+    return {"available": all(item["available"] for item in records), "method": "adapter_sampling_schedule", "baseline_steps": int(baseline_steps), "candidates": records, "evidence": _evidence("measured", "adapter_sampling_schedule", bool(adapter.inspect(model).metadata.get("offline_simulation", False)))}

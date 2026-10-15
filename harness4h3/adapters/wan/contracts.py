@@ -163,6 +163,178 @@ class CompressionResult:
         return _jsonable(asdict(self))
 
 
+@dataclass(frozen=True)
+class OperatorCapability:
+    """Persisted capability metadata for an executable Wan operator.
+
+    ``OperatorSpec`` is the search-space-facing schema.  This smaller
+    contract is useful at the execution boundary where callers need to know
+    whether an operator changes weights, runtime execution, or the sampler.
+    """
+
+    name: str
+    version: str
+    granularity: str
+    execution_domain: str
+    argument_schema: Mapping[str, Any]
+    implementation_ref: str
+    constraints: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.name.strip() or not self.version.strip() or not self.granularity.strip():
+            raise ValueError("operator capability requires name, version, and granularity")
+        if self.execution_domain not in {"structural", "runtime", "sampler", "composite"}:
+            raise ValueError("unsupported operator execution domain")
+        if not self.implementation_ref.strip():
+            raise ValueError("operator capability requires an implementation reference")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _jsonable(asdict(self))
+
+
+@dataclass(frozen=True)
+class ModelVariant:
+    """Minimal, restartable identity for structural/runtime/sampler variants.
+
+    A runtime-only variant deliberately keeps ``structural_checkpoint`` null:
+    it records behavior layered on the immutable base checkpoint and never
+    converts a zero-parameter-change policy into a claimed weight reduction.
+    The manifest is a sidecar so adding it cannot mutate checkpoint bytes or
+    invalidate the checkpoint artifact digest.
+    """
+
+    variant_id: str
+    base_checkpoint: str
+    structural_checkpoint: Optional[str]
+    ordered_operations: tuple[Mapping[str, Any], ...] = ()
+    runtime_policy: Mapping[str, Any] = field(default_factory=dict)
+    sampler_policy: Mapping[str, Any] = field(default_factory=dict)
+    algorithm_id: Optional[str] = None
+    search_space_version: Optional[str] = None
+    source_revision: str = ""
+    runtime_revision: str = ""
+    base_checkpoint_sha256: Optional[str] = None
+    structural_checkpoint_sha256: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not self.variant_id.startswith("M") or not self.base_checkpoint.strip():
+            raise ValueError("model variant requires an ID and base checkpoint")
+        if self.algorithm_id is not None and not str(self.algorithm_id).startswith("A"):
+            raise ValueError("model variant algorithm_id must be an algorithm ID")
+        if self.search_space_version is not None and not str(self.search_space_version).startswith("S"):
+            raise ValueError("model variant search_space_version must be a search-space ID")
+        for operation in self.ordered_operations:
+            if not isinstance(operation, Mapping) or not isinstance(operation.get("operator"), str) or not isinstance(operation.get("args", {}), Mapping):
+                raise ValueError("model variant operations must contain operator and args")
+        if self.structural_checkpoint is None and self.structural_checkpoint_sha256 is not None:
+            raise ValueError("runtime-only model variants cannot have a structural checkpoint digest")
+
+    @property
+    def runtime_only(self) -> bool:
+        return self.structural_checkpoint is None
+
+    def identity_payload(self) -> dict[str, Any]:
+        return {
+            "base_checkpoint": self.base_checkpoint,
+            "base_checkpoint_sha256": self.base_checkpoint_sha256,
+            "structural_checkpoint": self.structural_checkpoint,
+            "structural_checkpoint_sha256": self.structural_checkpoint_sha256,
+            "ordered_operations": list(self.ordered_operations),
+            "runtime_policy": dict(self.runtime_policy),
+            "sampler_policy": dict(self.sampler_policy),
+            "algorithm_id": self.algorithm_id,
+            "search_space_version": self.search_space_version,
+            "source_revision": self.source_revision,
+            "runtime_revision": self.runtime_revision,
+        }
+
+    @property
+    def variant_digest(self) -> str:
+        return stable_digest(self.identity_payload())
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**_jsonable(asdict(self)), "runtime_only": self.runtime_only, "variant_digest": self.variant_digest}
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "ModelVariant":
+        return cls(
+            variant_id=str(raw["variant_id"]),
+            base_checkpoint=str(raw["base_checkpoint"]),
+            structural_checkpoint=str(raw["structural_checkpoint"]) if raw.get("structural_checkpoint") else None,
+            ordered_operations=tuple(dict(item) for item in raw.get("ordered_operations", [])),
+            runtime_policy=dict(raw.get("runtime_policy") or {}),
+            sampler_policy=dict(raw.get("sampler_policy") or {}),
+            algorithm_id=str(raw["algorithm_id"]) if raw.get("algorithm_id") else None,
+            search_space_version=str(raw["search_space_version"]) if raw.get("search_space_version") else None,
+            source_revision=str(raw.get("source_revision", "")),
+            runtime_revision=str(raw.get("runtime_revision", "")),
+            base_checkpoint_sha256=str(raw["base_checkpoint_sha256"]) if raw.get("base_checkpoint_sha256") else None,
+            structural_checkpoint_sha256=str(raw["structural_checkpoint_sha256"]) if raw.get("structural_checkpoint_sha256") else None,
+        )
+
+    def write_manifest(self, path: str | Path) -> Path:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return target
+
+    @classmethod
+    def read_manifest(cls, path: str | Path) -> "ModelVariant":
+        return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+
+    @classmethod
+    def from_compression(
+        cls,
+        variant_id: str,
+        parent: CheckpointArtifact,
+        child: CompressionResult,
+        plan: Mapping[str, Any],
+        *,
+        algorithm_id: Optional[str] = None,
+        search_space_version: Optional[str] = None,
+        source_revision: str = "",
+        runtime_revision: str = "",
+    ) -> "ModelVariant":
+        if child.status != "success" or child.child_checkpoint is None:
+            raise ValueError("model variant requires a successful compression result")
+
+        def operations(raw: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+            if str(raw.get("operator")) != "compose":
+                return [{"operator": str(raw.get("operator")), "args": dict(raw.get("args") or {})}]
+            steps = raw.get("args", {}).get("steps", []) if isinstance(raw.get("args"), Mapping) else []
+            return [dict(step) for step in steps if isinstance(step, Mapping)]
+
+        ordered = tuple(operations(plan))
+        structural_names = {"prune_blocks", "prune_layers", "prune_ffn_channels", "prune_attention_heads", "prune_heads", "tica_prune"}
+        runtime_names = {"timestep_block_gate", "prune_tokens", "sparse_runtime"}
+        sampler_names = {"sampling_step_skip"}
+        structural = any(str(item.get("operator")) in structural_names for item in ordered)
+        runtime_policy = {
+            str(item["operator"]): dict(item.get("args") or {})
+            for item in ordered
+            if str(item.get("operator")) in runtime_names
+        }
+        sampler_policy = {
+            str(item["operator"]): dict(item.get("args") or {})
+            for item in ordered
+            if str(item.get("operator")) in sampler_names
+        }
+        return cls(
+            variant_id=str(variant_id),
+            base_checkpoint=parent.path,
+            structural_checkpoint=child.child_checkpoint.path if structural else None,
+            ordered_operations=ordered,
+            runtime_policy=runtime_policy,
+            sampler_policy=sampler_policy,
+            algorithm_id=algorithm_id,
+            search_space_version=search_space_version,
+            source_revision=source_revision,
+            runtime_revision=runtime_revision,
+            base_checkpoint_sha256=parent.sha256,
+            structural_checkpoint_sha256=child.child_checkpoint.sha256 if structural else None,
+        )
+
+
 class WanModelAdapter(Protocol):
     architecture_name: str
 
@@ -179,6 +351,9 @@ class WanModelAdapter(Protocol):
         ...
 
     def prune_channels(self, model: Any, config: ChannelPruningConfig) -> StructuralChange:
+        ...
+
+    def prune_attention_heads(self, model: Any, removed_heads: Sequence[int], attention_names: Sequence[str] = ("attn1", "attn2")) -> StructuralChange:
         ...
 
     def save_model(self, model: Any, output_dir: Path) -> CheckpointArtifact:
@@ -207,4 +382,16 @@ class WanModelAdapter(Protocol):
         ...
 
     def apply_timestep_block_gating(self, model: Any, rules: Sequence[Mapping[str, Any]]) -> StructuralChange:
+        ...
+
+    def apply_token_sparsity(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
+        ...
+
+    def apply_sparse_runtime(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
+        ...
+
+    def apply_sampling_step_policy(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
+        ...
+
+    def sampling_steps(self, model: Any, timesteps: Sequence[Any]) -> tuple[Any, ...]:
         ...

@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from ..adapters.wan.contracts import CheckpointArtifact, CompressionResult, ModelStructure, WanModelAdapter, stable_digest
+from ..adapters.wan.contracts import CheckpointArtifact, CompressionResult, ModelStructure, ModelVariant, WanModelAdapter, stable_digest
 from ..archive.model_candidate import ModelCandidate
 from ..archive.model_store import ModelStore
 from ..h3.state import ModelState
@@ -16,6 +16,7 @@ from ..memory.design_gene import DesignGene
 from ..memory.experience import ExperienceRecord, ExperienceStore
 from ..profiler import CalibrationCorpus, CalibrationSampleSpec, FakeWanCalibrationProvider, ProfileReport, profile_model
 from ..operators.wan import OperatorSpec, SearchSpaceManager, default_search_space
+from ..sandbox.policy import SourcePolicyError, validate_source
 from ..sandbox.runner import AlgorithmSandbox, CompressionPlan as SandboxCompressionPlan, SandboxResult
 from .agent import AlgorithmAgent
 from .algorithm_evaluation import AlgorithmModelEvaluator
@@ -29,7 +30,7 @@ from .skill_hub import SkillHub
 from .store import AlgorithmStore
 from .taxonomy import classify_algorithm_change, classify_search_space_proposal
 from .tica_calibration import TICACalibrationManifest, TICAEvaluationSplits
-from .tica_prune import TICARecipe, TICAPruner, build_human_tica_source, collect_tica_profile, tica_operator_spec, tica_score
+from .tica_prune import TICARecipe, TICAPruner, _run_algorithm_search_program, build_human_tica_source, collect_tica_profile, tica_operator_spec, tica_score
 from ..operators.wan import WanCompressionRegistry, build_wan_compression_registry
 
 
@@ -122,7 +123,7 @@ class EvolutionLoop:
             _write_json(self.output_root / "tica-splits.json", split_payload)
         self.tica_recipe = TICARecipe.from_mapping(tica_recipe)
         self._custom_evaluator = evaluator is not None
-        self.registry = registry or build_wan_compression_registry(include_tica=self.tica_prune)
+        self.registry = registry or build_wan_compression_registry(include_tica=self.tica_prune, include_multigranular=True)
         self.evaluator = evaluator or self._default_evaluator
         self.search_policy = search_policy or self._load_search_policy()
         self.memory_enabled = bool(memory_enabled)
@@ -372,6 +373,114 @@ class EvolutionLoop:
         if sandbox_result.status != "success" or sandbox_result.plan is None:
             return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "sandbox", sandbox_result.failure_type or "sandbox_failed", sandbox_result.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path)})
 
+        # Non-TICA algorithms use the same Algorithm Program contract.  A
+        # source-defined ``search`` entrypoint is executed against the active
+        # operator registry before model mutation; the first ranked plan is
+        # the actual plan sent to compression/evaluation.  TICA keeps its
+        # deeper calibration-budgeted path below.
+        if not self.tica_prune:
+            try:
+                validated_source = validate_source(algorithm.source)
+            except SourcePolicyError as exc:
+                return self._finish_failure(
+                    round_id,
+                    round_dir,
+                    parent_candidate,
+                    algorithm,
+                    search_choice,
+                    "algorithm_search",
+                    "algorithm_search_source_invalid",
+                    str(exc),
+                    {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path)},
+                )
+            if "search" in validated_source.functions:
+                search_space_payload = (
+                    self.search_space_version.to_dict()
+                    if self.search_space_version is not None
+                    else default_search_space().to_dict()
+                )
+                cached_trace = self._read_json(algorithm_trace_path) if algorithm_trace_path.exists() else None
+                selected_plan: Optional[SandboxCompressionPlan] = None
+                trace_payload: Mapping[str, Any] | None = None
+                if (
+                    isinstance(cached_trace, Mapping)
+                    and cached_trace.get("algorithm_source_sha256") == algorithm.source_sha256
+                    and isinstance(cached_trace.get("selected_plan"), Mapping)
+                ):
+                    try:
+                        selected_plan = SandboxCompressionPlan.from_mapping(
+                            cached_trace["selected_plan"],
+                            operator_specs=self.sandbox.operator_specs,
+                        )
+                        trace_payload = cached_trace
+                    except (TypeError, ValueError):
+                        selected_plan = None
+                if selected_plan is None:
+                    try:
+                        decision = _run_algorithm_search_program(
+                            algorithm.source,
+                            self.sandbox,
+                            profile_payload,
+                            agent_history,
+                            {
+                                "depth": 1,
+                                "parent_state_id": "uncompressed",
+                                "proposed_plan": sandbox_result.plan.to_dict(),
+                                "budget": {"max_candidates": 8},
+                                "measured_candidates": [],
+                                "frontier": [],
+                            },
+                            search_space_payload,
+                        )
+                        selected_raw = decision.plans[decision.rank[0]]
+                        selected_plan = SandboxCompressionPlan.from_mapping(
+                            selected_raw,
+                            operator_specs=self.sandbox.operator_specs,
+                        )
+                        trace_payload = {
+                            "algorithm_id": algorithm.algorithm_id,
+                            "algorithm_source_sha256": algorithm.source_sha256,
+                            "trace": [{
+                                "depth": 1,
+                                "source_sha256": decision.source_sha256,
+                                "payload_sha256": decision.payload_sha256,
+                                "plan_digests": [stable_digest(item) for item in decision.plans],
+                                "rank": list(decision.rank),
+                                "stop": decision.stop,
+                                "search_space_version": search_space_payload.get("version_id"),
+                                "search_space_operator_names": sorted(self.sandbox.operator_specs),
+                            }],
+                            "decision": decision.to_dict(),
+                            "selected_plan": selected_plan.to_dict(),
+                            "selected_rank_index": int(decision.rank[0]),
+                            "search_space_version": search_space_payload.get("version_id"),
+                        }
+                        _write_json(algorithm_trace_path, trace_payload)
+                    except (RuntimeError, TypeError, ValueError) as exc:
+                        return self._finish_failure(
+                            round_id,
+                            round_dir,
+                            parent_candidate,
+                            algorithm,
+                            search_choice,
+                            "algorithm_search",
+                            "algorithm_search_failed",
+                            str(exc),
+                            {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "algorithm_program_trace": str(algorithm_trace_path)},
+                        )
+                sandbox_result = SandboxResult(
+                    "success",
+                    sandbox_result.source_sha256,
+                    selected_plan,
+                    metadata={
+                        **dict(sandbox_result.metadata),
+                        "algorithm_program_search": True,
+                        "algorithm_program_trace": str(algorithm_trace_path),
+                        "algorithm_program_selected_plan_digest": stable_digest(selected_plan.to_dict()),
+                    },
+                )
+                _write_json(sandbox_path, _sandbox_dict(sandbox_result))
+
         tica_search_payload: Mapping[str, Any] | None = None
         active_tica_recipe: Optional[TICARecipe] = None
         tica_agent_rule_digest: Optional[str] = None
@@ -507,7 +616,13 @@ class EvolutionLoop:
                         "tica_search_budget": (active_tica_recipe or self.tica_recipe).budget() if self.tica_prune else None,
                     },
                     profiles=validation_profiles,
-                    complete_search=measurement_evaluator if self.tica_prune else None,
+                    # Both TICA and standard Algorithm Programs may define a
+                    # source-controlled ``search`` entrypoint.  The
+                    # validation callback reruns that search for parent and
+                    # child under identical conditions, so an improvement is
+                    # never accepted merely because its first ``propose``
+                    # result looked better.
+                    complete_search=measurement_evaluator,
                     algorithm_profile=profile_payload if self.tica_prune else None,
                 )
                 _write_json(validation_path, validation.to_dict())
@@ -581,6 +696,25 @@ class EvolutionLoop:
             _write_json(compression_path, compression.to_dict())
         if compression.status != "success" or compression.child_checkpoint is None:
             return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "compression", compression.failure_type or "compression_failed", compression.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "design": str(design_path), "compression": str(compression_path)}, design=design)
+
+        # Keep Model evolution (the compressed checkpoint) separate from the
+        # runtime/sampler policy identity.  The sidecar is written outside
+        # the checkpoint directory so it cannot change the artifact digest;
+        # resuming a round therefore restores the same variant description
+        # without re-saving or re-counting the model.
+        variant_path = round_dir / "variant_manifest.json"
+        if not variant_path.exists():
+            variant = ModelVariant.from_compression(
+                "M-" + round_id,
+                parent_artifact,
+                compression,
+                sandbox_result.plan.to_dict(),
+                algorithm_id=algorithm.algorithm_id,
+                search_space_version=self.search_space_version.version_id if self.search_space_version is not None else None,
+                source_revision=algorithm.source_sha256,
+                runtime_revision=self.adapter.__class__.__name__,
+            )
+            variant.write_manifest(variant_path)
 
         change_taxonomy = classify_algorithm_change(
             parent_source_for_taxonomy,
@@ -713,6 +847,7 @@ class EvolutionLoop:
             "algorithm_source_diff": algorithm.source_diff,
             "operator": sandbox_result.plan.operator,
             "operator_args": dict(sandbox_result.plan.args),
+            "variant_manifest": str(variant_path),
             "algorithm_plan": sandbox_result.plan.to_dict(),
             "design": design,
             "design_fingerprint": design.get("fingerprint"),
@@ -774,10 +909,11 @@ class EvolutionLoop:
         if feasible:
             self._update_pareto_front(child_candidate.id, evaluation)
             self.model_store.set_active(child_candidate.id)
-        paths = {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "design": str(design_path), "compression": str(compression_path), "evaluation": str(evaluation_path), "decision": str(decision_path)}
+        paths = {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "design": str(design_path), "compression": str(compression_path), "variant_manifest": str(variant_path), "evaluation": str(evaluation_path), "decision": str(decision_path)}
         if self.tica_prune:
             paths["tica_profile"] = str(tica_profile_path)
             paths["tica_search"] = str(tica_search_path)
+        if algorithm_trace_path.exists():
             paths["algorithm_program_trace"] = str(algorithm_trace_path)
         if self.search_space_version is not None:
             paths["search_space"] = str(search_space_path)
@@ -1333,6 +1469,7 @@ class EvolutionLoop:
 
         evaluators: dict[str, AlgorithmModelEvaluator] = {}
         evaluator_recipe = recipe or self.tica_recipe
+        algorithm_search_cache: dict[str, tuple[SandboxResult, Mapping[str, Any]]] = {}
 
         def evaluate(result: SandboxResult, scenario_profile: Mapping[str, Any]) -> Mapping[str, Any]:
             split = str(scenario_profile.get("evaluation_split", "validation")).lower()
@@ -1352,6 +1489,63 @@ class EvolutionLoop:
                     output_root / ("algorithm-" + result.source_sha256[:16]) / digest,
                     evaluator_recipe=evaluator_recipe,
                 )
+            effective_result = result
+            algorithm_search: Mapping[str, Any] | None = None
+            source = (algorithm_sources or {}).get(result.source_sha256)
+            if source is not None:
+                validated = validate_source(source)
+                if "search" in validated.functions:
+                    search_space_payload = (
+                        self.search_space_version.to_dict()
+                        if self.search_space_version is not None
+                        else default_search_space().to_dict()
+                    )
+                    search_key = stable_digest({
+                        "source_sha256": result.source_sha256,
+                        "profile": scenario_profile,
+                        "search_space": search_space_payload,
+                    })
+                    cached = algorithm_search_cache.get(search_key)
+                    if cached is None:
+                        decision = _run_algorithm_search_program(
+                            source,
+                            self.sandbox,
+                            scenario_profile,
+                            algorithm_history,
+                            {
+                                "depth": 1,
+                                "parent_state_id": "uncompressed",
+                                "proposed_plan": result.plan.to_dict() if result.plan is not None else None,
+                                "budget": {"max_candidates": 8},
+                                "measured_candidates": [],
+                                "frontier": [],
+                            },
+                            search_space_payload,
+                        )
+                        selected = SandboxCompressionPlan.from_mapping(
+                            decision.plans[decision.rank[0]],
+                            operator_specs=self.sandbox.operator_specs,
+                        )
+                        effective_result = SandboxResult(
+                            "success",
+                            result.source_sha256,
+                            selected,
+                            metadata={**dict(result.metadata), "algorithm_program_search": True},
+                        )
+                        algorithm_search = {
+                            "complete": True,
+                            "source_sha256": decision.source_sha256,
+                            "payload_sha256": decision.payload_sha256,
+                            "candidate_count": len(decision.plans),
+                            "candidate_plans": list(decision.plans),
+                            "rank": list(decision.rank),
+                            "selected_plan_digest": stable_digest(selected.to_dict()),
+                            "stop": decision.stop,
+                            "search_space_version": search_space_payload.get("version_id"),
+                        }
+                        algorithm_search_cache[search_key] = (effective_result, algorithm_search)
+                    else:
+                        effective_result, algorithm_search = cached
             evaluator_key = (digest, result.source_sha256)
             evaluator = evaluators.get(evaluator_key)
             if evaluator is None:
@@ -1367,7 +1561,10 @@ class EvolutionLoop:
                     search_budget=evaluator_recipe.budget() if self.tica_prune else {"max_fast_evals": 8, "max_full_evals": 4, "max_interaction_evals": 2},
                 )
                 evaluators[evaluator_key] = evaluator
-            return evaluator.evaluate(result)
+            measured = dict(evaluator.evaluate(effective_result))
+            if algorithm_search is not None:
+                measured["algorithm_search"] = dict(algorithm_search)
+            return measured
 
         return evaluate
 

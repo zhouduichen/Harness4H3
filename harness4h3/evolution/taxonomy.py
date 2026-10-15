@@ -16,7 +16,12 @@ RULE_FACTORIES = {"prune_ffn_by_weight_threshold", "generated_channel_rule"}
 def _logic_digest(source: str) -> str:
     try:
         tree = ast.parse(str(source), mode="exec")
-        target = next((item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == "propose"), tree)
+        targets = [
+            item
+            for item in tree.body
+            if isinstance(item, ast.FunctionDef) and item.name in {"propose", "search"}
+        ]
+        target = targets or [tree]
         return hashlib.sha256(ast.dump(target, include_attributes=False).encode("utf-8")).hexdigest()
     except (SyntaxError, TypeError, ValueError):
         return hashlib.sha256(str(source).encode("utf-8")).hexdigest()
