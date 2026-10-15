@@ -77,11 +77,32 @@ def _output_metrics(parent_output: Any, child_output: Any) -> Optional[dict[str,
         return None
 
 
-def _checkpoint_bytes(path: str) -> int:
+def _logical_bytes(path: str | Path) -> int:
+    """Count logical checkpoint bytes once per inode.
+
+    Wan children share VAE/text-encoder files with hard links or symlinks;
+    counting directory entries would turn unchanged components into fake
+    compression gains.
+    """
+
     root = Path(path)
-    if root.is_file():
-        return int(root.stat().st_size)
-    return int(sum(item.stat().st_size for item in root.rglob("*") if item.is_file()))
+    if not root.exists() and not root.is_symlink():
+        return 0
+    items = [root] if root.is_file() or root.is_symlink() else [item for item in root.rglob("*") if item.is_file() or item.is_symlink()]
+    seen: set[tuple[int, int]] = set()
+    total = 0
+    for item in items:
+        stat = item.stat()
+        identity = (int(stat.st_dev), int(stat.st_ino))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        total += int(stat.st_size)
+    return total
+
+
+def _checkpoint_bytes(path: str) -> int:
+    return _logical_bytes(path)
 
 
 @dataclass
@@ -105,6 +126,7 @@ class AlgorithmModelEvaluator:
         self._parent_output = self.adapter.forward_profile(self._parent_model, self._sample)
         self._parent_flops = self._estimate_flops(self._parent_model)
         self._parent_bytes = _checkpoint_bytes(self.parent.path)
+        self._parent_transformer_bytes = _logical_bytes(Path(self.parent.path) / "transformer")
         self._invocations = 0
         self._tica_samples: tuple[Any, ...] = ()
         self._parent_tica_outputs: dict[tuple[str, float], Any] = {}
@@ -164,6 +186,7 @@ class AlgorithmModelEvaluator:
             }
             quality = max(-1.0, min(1.0, float(output["quality_score"]))) if "quality_score" in output else max(-1.0, min(1.0, float(output["cosine_similarity"]) - float(output["normalized_mse"])))
             checkpoint_bytes = _checkpoint_bytes(compression.child_checkpoint.path)
+            transformer_bytes = _logical_bytes(Path(compression.child_checkpoint.path) / "transformer")
             reduction_score = max(0.0, min(1.0, float(parameter_reduction)))
             return {
                 "valid": True,
@@ -189,9 +212,20 @@ class AlgorithmModelEvaluator:
                 "checkpoint_size_bytes": checkpoint_bytes,
                 "parent_checkpoint_size_bytes": self._parent_bytes,
                 "checkpoint_size_reduction_ratio": 1.0 - checkpoint_bytes / max(self._parent_bytes, 1),
+                "pipeline_model_size_bytes": checkpoint_bytes,
+                "transformer_model_size_bytes": transformer_bytes,
+                "parent_transformer_model_size_bytes": self._parent_transformer_bytes,
+                "model_size_scope": "pipeline_logical_unique_files",
+                "transformer_model_size_scope": "transformer_logical_unique_files",
+                "parameter_count_scope": "transformer_only",
                 "hardware_metrics": {
                     "latency_s": None,
                     "peak_memory_gb": None,
+                    "model_size_gb": float(checkpoint_bytes) / float(1024**3),
+                    "pipeline_model_size_gb": float(checkpoint_bytes) / float(1024**3),
+                    "transformer_model_size_gb": float(transformer_bytes) / float(1024**3) if transformer_bytes else None,
+                    "model_size_scope": "pipeline_logical_unique_files",
+                    "transformer_model_size_scope": "transformer_logical_unique_files",
                     "available": False,
                     "unavailable_reason": "CPU Fake algorithm evaluator does not measure GPU hardware",
                 },

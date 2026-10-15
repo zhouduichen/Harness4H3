@@ -512,7 +512,7 @@ def _deterministic_improvement_source(
             "    selected = sorted(ranked)[0][1] if ranked else str(profile.get('layers', [{'block_id': 'block.0'}])[0]['block_id'])\n"
             "    width = int(profile.get('model', {}).get('ffn_width', 1))\n"
             "    target = max(1, min(width - 1, int(width * 0.75)))\n"
-            "    return {'operator': 'tica_prune', 'args': {'block_ids': [selected], 'retained_indices': list(range(target)), 'mode': 'block_plus_ffn', 'time_weight_formula': %r, 'risk_limit': 0.25, 'activation_weight': 0.5, 'interaction_weight': 0.5, 'beam_width': 2, 'max_fast_evals': 8, 'max_full_evals': 4, 'max_interaction_evals': 2}}\n"
+            "    return {'operator': 'tica_prune', 'args': {'block_ids': [selected], 'retained_indices': list(range(target)), 'mode': 'block_plus_ffn', 'time_weight_formula': %r, 'risk_limit': 0.25, 'activation_weight': 0.5, 'interaction_weight': 0.5, 'beam_width': 2, 'max_fast_evals': 8, 'max_full_evals': 4, 'max_interaction_evals': 2, 'strategy': 'greedy_beam', 'max_search_depth': 3}}\n"
         ) % (parent.algorithm_id, formula, formula)
         return (
             source,

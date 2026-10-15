@@ -214,9 +214,6 @@ class EvolutionLoop:
         if self.tica_prune:
             tica_profile = self._load_or_collect_tica_profile(tica_profile_path, parent_artifact)
             profile_payload = {**dict(profile_payload), **dict(tica_profile)}
-            if not tica_search_path.exists():
-                search = self._run_tica_search(parent_artifact, profile_payload, round_dir)
-                _write_json(tica_search_path, search.to_dict())
         search_space_path = round_dir / "search-space.json"
         if self.search_space_version is not None and not search_space_path.exists():
             _write_json(search_space_path, self.search_space_version.to_dict())
@@ -349,6 +346,69 @@ class EvolutionLoop:
             _write_json(sandbox_path, _sandbox_dict(sandbox_result))
         if sandbox_result.status != "success" or sandbox_result.plan is None:
             return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "sandbox", sandbox_result.failure_type or "sandbox_failed", sandbox_result.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path)})
+
+        tica_search_payload: Mapping[str, Any] | None = None
+        if self.tica_prune:
+            # The Agent source is a bounded algorithm-rule proposal.  Its
+            # returned recipe fields configure the actual search; the Agent
+            # does not get to bypass trusted operators or execute a model.
+            tica_recipe = self._tica_recipe_from_plan(sandbox_result.plan.args)
+            if tica_search_path.exists():
+                cached_search = self._read_json(tica_search_path)
+                if (
+                    cached_search.get("recipe") == tica_recipe.to_dict()
+                    and cached_search.get("selected_candidate_id")
+                    and cached_search.get("selected_plan_digest")
+                ):
+                    tica_search_payload = cached_search
+            if tica_search_payload is None:
+                search = self._run_tica_search(parent_artifact, profile_payload, round_dir, recipe=tica_recipe)
+                tica_search_payload = search.to_dict()
+                _write_json(tica_search_path, tica_search_payload)
+            selected_id = str(tica_search_payload.get("selected_candidate_id", ""))
+            selected_digest = str(tica_search_payload.get("selected_plan_digest", ""))
+            candidates = tica_search_payload.get("candidates")
+            selected = next(
+                (item for item in candidates if isinstance(item, Mapping) and str(item.get("candidate_id", "")) == selected_id),
+                None,
+            ) if isinstance(candidates, list) else None
+            selected_plan = selected.get("plan") if isinstance(selected, Mapping) else None
+            if not isinstance(selected_plan, Mapping) or not selected_digest:
+                return self._finish_failure(
+                    round_id,
+                    round_dir,
+                    parent_candidate,
+                    algorithm,
+                    search_choice,
+                    "tica_search",
+                    "tica_no_feasible_selected_candidate",
+                    "TICA search produced no measured feasible compression plan",
+                    {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "tica_search": str(tica_search_path)},
+                )
+            computed_digest = TICAPruner._plan_digest(selected_plan)
+            if computed_digest != selected_digest:
+                return self._finish_failure(
+                    round_id,
+                    round_dir,
+                    parent_candidate,
+                    algorithm,
+                    search_choice,
+                    "tica_search",
+                    "tica_selected_plan_digest_mismatch",
+                    "selected TICA plan digest does not match its candidate record",
+                    {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "tica_search": str(tica_search_path)},
+                )
+            sandbox_result = SandboxResult(
+                "success",
+                sandbox_result.source_sha256,
+                SandboxCompressionPlan("tica_prune", dict(selected_plan)),
+                metadata={
+                    **dict(sandbox_result.metadata),
+                    "tica_selected_candidate_id": selected_id,
+                    "tica_selected_plan_digest": selected_digest,
+                    "tica_agent_rule_digest": stable_digest(dict(sandbox_result.plan.args)),
+                },
+            )
 
         validation_path = round_dir / "algorithm-validation.json"
         validation_profiles_path = round_dir / "algorithm-validation-profiles.json"
@@ -515,7 +575,20 @@ class EvolutionLoop:
                 "failure_type": "child_integrity_failed",
                 "failure_message": integrity_error or "child checkpoint is identical to parent",
             }
-        if not evaluation_path.exists() or not child_integrity:
+        plan_digest_mismatch = False
+        if tica_search_payload is not None:
+            final_plan_digest = TICAPruner._plan_digest(sandbox_result.plan.args)
+            measured_plan_digest = evaluation.get("plan_digest")
+            if measured_plan_digest is not None and str(measured_plan_digest) != final_plan_digest:
+                plan_digest_mismatch = True
+                evaluation = {
+                    **evaluation,
+                    "valid": False,
+                    "evaluation_status": "plan_digest_mismatch",
+                    "failure_type": "tica_plan_digest_mismatch",
+                    "failure_message": "measured evaluation plan digest does not match final execution plan",
+                }
+        if not evaluation_path.exists() or not child_integrity or plan_digest_mismatch:
             _write_json(evaluation_path, evaluation)
         if self.candidate_screening:
             screening = CandidateScreeningPipeline(screening_path)
@@ -586,6 +659,11 @@ class EvolutionLoop:
         if self.search_space_version is not None:
             decision["search_space_version"] = self.search_space_version.version_id
         decision["change_taxonomy"] = change_taxonomy
+        if tica_search_payload is not None:
+            decision["selected_candidate_id"] = tica_search_payload.get("selected_candidate_id")
+            decision["selected_plan_digest"] = tica_search_payload.get("selected_plan_digest")
+            decision["final_plan_digest"] = TICAPruner._plan_digest(sandbox_result.plan.args)
+            decision["tica_plan_digest_match"] = decision["selected_plan_digest"] == decision["final_plan_digest"]
         if self.candidate_screening:
             decision["screening"] = [item.to_dict() for item in CandidateScreeningPipeline(screening_path).load()]
         decision_path = round_dir / "decision.json"
@@ -981,18 +1059,46 @@ class EvolutionLoop:
             cached = self._read_json(path)
             tica = cached.get("tica") if isinstance(cached.get("tica"), Mapping) else {}
             if tica.get("calibration_digest") == expected_digest and cached.get("parent_checkpoint_sha256") == parent.sha256:
+                if "evaluation_split" not in tica:
+                    cached["tica"] = {**dict(tica), "evaluation_split": "calibration"}
                 return cached
         model = self.adapter.reload_model(parent)
         if self.tica_manifest is None:
             raise ValueError("TICA calibration manifest is unavailable")
         collected = dict(collect_tica_profile(self.adapter, model, self.tica_manifest))
+        tica_metadata = dict(collected.get("tica") or {})
+        tica_metadata["evaluation_split"] = "calibration"
+        collected["tica"] = tica_metadata
         collected["parent_checkpoint_sha256"] = parent.sha256
         collected["source_revision"] = "tica-prune-v1"
         _write_json(path, collected)
         return collected
 
-    def _run_tica_search(self, parent: CheckpointArtifact, profile: Mapping[str, Any], round_dir: Path) -> Any:
-        """Run the four named human baselines under one bounded budget.
+    def _tica_recipe_from_plan(self, plan: Mapping[str, Any]) -> TICARecipe:
+        """Bind sandbox-approved Agent rule fields to the TICA search recipe."""
+
+        raw = self.tica_recipe.to_dict()
+        for name in (
+            "time_weight_formula",
+            "risk_limit",
+            "activation_weight",
+            "interaction_weight",
+            "beam_width",
+            "max_fast_evals",
+            "max_full_evals",
+            "max_interaction_evals",
+            "strategy",
+            "max_search_depth",
+        ):
+            if name in plan:
+                raw[name] = plan[name]
+        # A plan emitted by an Agent remains one algorithm-rule proposal; the
+        # fair ablation suite is controlled by the outer recipe and is not
+        # silently changed by a structural plan field.
+        return TICARecipe.from_mapping(raw)
+
+    def _run_tica_search(self, parent: CheckpointArtifact, profile: Mapping[str, Any], round_dir: Path, *, recipe: Optional[TICARecipe] = None) -> Any:
+        """Run stateful TICA search under one bounded, shared budget.
 
         Fast measurements come from the already executed local sensitivity
         probes. Full and interaction measurements execute actual structural
@@ -1002,7 +1108,8 @@ class EvolutionLoop:
 
         if self.tica_manifest is None:
             raise ValueError("TICA search requires calibration manifest")
-        score = tica_score(profile, time_weight_formula=self.tica_recipe.time_weight_formula)
+        recipe = recipe or self.tica_recipe
+        score = tica_score(profile, time_weight_formula=recipe.time_weight_formula, time_weights=recipe.time_weights or None)
         evaluator = AlgorithmModelEvaluator(
             self.adapter,
             self.registry,
@@ -1011,7 +1118,7 @@ class EvolutionLoop:
             round_dir / "tica-search-measurements",
             seed=int(profile.get("provenance", {}).get("seed", 7)) if isinstance(profile.get("provenance"), Mapping) else 7,
             calibration_manifest=self.tica_manifest,
-            search_budget=self.tica_recipe.budget(),
+            search_budget=recipe.budget(),
         )
 
         def measure(plan: Mapping[str, Any], full: bool, stage: str) -> Mapping[str, Any]:
@@ -1024,7 +1131,7 @@ class EvolutionLoop:
                     "evaluation_status": "local_output_screen",
                     "quality_error": sum(risks) / max(len(risks), 1) if risks else None,
                     "selected_blocks": selected,
-                    "time_weight_formula": self.tica_recipe.time_weight_formula,
+                    "time_weight_formula": recipe.time_weight_formula,
                     "stage": stage,
                 }
             return evaluator.evaluate(
@@ -1041,7 +1148,7 @@ class EvolutionLoop:
             parent,
             self.tica_manifest,
             profile,
-            self.tica_recipe,
+            recipe,
             evaluate_candidate=measure,
         )
 
@@ -1254,6 +1361,8 @@ class EvolutionLoop:
             tica = dict(collect_tica_profile(self.adapter, model, self.tica_manifest)) if self.tica_manifest is not None else {}
             base = {**dict(base), **tica}
             alternate = {**dict(alternate), **tica}
+            base["evaluation_split"] = "validation"
+            alternate["evaluation_split"] = "validation"
         alternate_provenance = dict(alternate.get("provenance") or {})
         alternate_provenance["validation_scenario"] = "alternate_seed"
         alternate["provenance"] = alternate_provenance

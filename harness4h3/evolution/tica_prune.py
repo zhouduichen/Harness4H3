@@ -43,6 +43,8 @@ def tica_operator_spec() -> dict[str, Any]:
             "max_fast_evals": "int",
             "max_full_evals": "int",
             "max_interaction_evals": "int",
+            "strategy": "str",
+            "max_search_depth": "int",
         },
         "granularity": "algorithm_rule",
         "constraints": ["wan_ffn_width_aligned", "block_and_ffn_use_trusted_mutations"],
@@ -74,6 +76,8 @@ class TICARecipe:
     max_interaction_evals: int = 2
     strategy: str = "greedy_beam"
     time_weights: tuple[float, ...] = ()
+    include_baseline_suite: bool = True
+    max_search_depth: int = 3
 
     def __post_init__(self) -> None:
         if self.baseline_name not in BASELINE_NAMES:
@@ -86,7 +90,7 @@ class TICARecipe:
             raise ValueError("TICA activation_weight must be in [0, 1]")
         if not 0.0 <= float(self.interaction_weight) <= 1.0:
             raise ValueError("TICA interaction_weight must be in [0, 1]")
-        for name in ("beam_width", "max_fast_evals", "max_full_evals", "max_interaction_evals"):
+        for name in ("beam_width", "max_fast_evals", "max_full_evals", "max_interaction_evals", "max_search_depth"):
             if int(getattr(self, name)) <= 0:
                 raise ValueError("TICA %s must be positive" % name)
         if self.strategy not in {"greedy", "greedy_beam"}:
@@ -143,6 +147,11 @@ class TICACandidate:
     interaction_metrics: Mapping[str, Any] = field(default_factory=dict)
     budget_cost: Mapping[str, int] = field(default_factory=dict)
     status: str = "generated"
+    state_id: str = ""
+    plan_digest: str = ""
+    risk: Optional[float] = None
+    feasible: bool = False
+    cache_hit: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return _jsonable(asdict(self))
@@ -157,6 +166,10 @@ class TICASearchResult:
     calibration_digest: str
     evidence_level: str
     score: Mapping[str, Any] = field(default_factory=dict)
+    selected_candidate_id: Optional[str] = None
+    selected_plan_digest: Optional[str] = None
+    search_states: tuple[Mapping[str, Any], ...] = ()
+    budget_audit: tuple[Mapping[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -167,7 +180,174 @@ class TICASearchResult:
             "calibration_digest": self.calibration_digest,
             "evidence_level": self.evidence_level,
             "score": _jsonable(self.score),
+            "selected_candidate_id": self.selected_candidate_id,
+            "selected_plan_digest": self.selected_plan_digest,
+            "search_states": [_jsonable(item) for item in self.search_states],
+            "budget_audit": [_jsonable(item) for item in self.budget_audit],
         }
+
+
+@dataclass
+class TICABudgetManager:
+    """One auditable budget ledger for the TICA search.
+
+    An interaction analysis can use cached independent measurements, but a
+    new independent model execution always consumes the same full-evaluation
+    budget as an ordinary candidate.  Cache hits are recorded separately and
+    are never reported as independent measurements.
+    """
+
+    limits: Mapping[str, int]
+    used: dict[str, int] = field(default_factory=lambda: {"fast_evals": 0, "full_evals": 0, "interaction_evals": 0})
+    audit: list[Mapping[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.limits = {
+            "max_fast_evals": max(0, int(self.limits.get("max_fast_evals", 0))),
+            "max_full_evals": max(0, int(self.limits.get("max_full_evals", 0))),
+            "max_interaction_evals": max(0, int(self.limits.get("max_interaction_evals", 0))),
+        }
+        self.used = {
+            "fast_evals": int(self.used.get("fast_evals", 0)),
+            "full_evals": int(self.used.get("full_evals", 0)),
+            "interaction_evals": int(self.used.get("interaction_evals", 0)),
+        }
+
+    def can_consume(self, stage: str, *, cache_hit: bool = False) -> bool:
+        if stage == "fast":
+            return cache_hit or self.used["fast_evals"] < self.limits["max_fast_evals"]
+        if stage == "full":
+            return cache_hit or self.used["full_evals"] < self.limits["max_full_evals"]
+        if stage == "interaction":
+            if self.used["interaction_evals"] >= self.limits["max_interaction_evals"]:
+                return False
+            return cache_hit or self.used["full_evals"] < self.limits["max_full_evals"]
+        raise ValueError("unsupported TICA budget stage: %s" % stage)
+
+    def consume(self, stage: str, *, plan_digest: str = "", cache_hit: bool = False) -> None:
+        if not self.can_consume(stage, cache_hit=cache_hit):
+            raise RuntimeError("tica_budget_exhausted:%s" % stage)
+        if stage == "fast":
+            if not cache_hit:
+                self.used["fast_evals"] += 1
+        elif stage == "full":
+            if not cache_hit:
+                self.used["full_evals"] += 1
+        else:
+            self.used["interaction_evals"] += 1
+            if not cache_hit:
+                self.used["full_evals"] += 1
+        self.audit.append(
+            {
+                "stage": stage,
+                "plan_digest": plan_digest or None,
+                "cache_hit": bool(cache_hit),
+                "fast_evals": self.used["fast_evals"],
+                "full_evals": self.used["full_evals"],
+                "interaction_evals": self.used["interaction_evals"],
+            }
+        )
+
+    def record_interaction(self, *, plan_digest: str = "", cache_hit: bool = False) -> None:
+        """Record one interaction analysis without hiding its dependencies."""
+
+        if self.used["interaction_evals"] >= self.limits["max_interaction_evals"]:
+            raise RuntimeError("tica_budget_exhausted:interaction")
+        self.used["interaction_evals"] += 1
+        self.audit.append(
+            {
+                "stage": "interaction",
+                "plan_digest": plan_digest or None,
+                "cache_hit": bool(cache_hit),
+                "dependencies_consumed_separately": True,
+                "fast_evals": self.used["fast_evals"],
+                "full_evals": self.used["full_evals"],
+                "interaction_evals": self.used["interaction_evals"],
+            }
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            **dict(self.used),
+            "limits": dict(self.limits),
+            "audit_entries": len(self.audit),
+            "cache_hits": sum(1 for item in self.audit if item.get("cache_hit")),
+        }
+
+
+@dataclass(frozen=True)
+class TICASearchState:
+    """Canonical state in the compression search graph."""
+
+    state_id: str
+    baseline_model_id: str
+    block_ids: tuple[str, ...] = ()
+    retained_indices: tuple[int, ...] = ()
+    mode: str = "block"
+    baseline_name: str = "tica_block_ffn"
+    algorithm_id: Optional[str] = None
+    search_space_version: Optional[str] = None
+    parent_state_id: Optional[str] = None
+    depth: int = 0
+    measured_metrics: Mapping[str, Any] = field(default_factory=dict)
+    budget_cost: Mapping[str, int] = field(default_factory=dict)
+    status: str = "generated"
+
+    def plan(self, recipe: TICARecipe) -> dict[str, Any]:
+        return {
+            "block_ids": list(self.block_ids),
+            "retained_indices": list(self.retained_indices),
+            "mode": self.mode,
+            "time_weight_formula": recipe.time_weight_formula,
+            "risk_limit": float(recipe.risk_limit),
+            "activation_weight": float(recipe.activation_weight),
+            "interaction_weight": float(recipe.interaction_weight),
+            "beam_width": int(recipe.beam_width),
+            "max_fast_evals": int(recipe.max_fast_evals),
+            "max_full_evals": int(recipe.max_full_evals),
+            "max_interaction_evals": int(recipe.max_interaction_evals),
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return _jsonable(asdict(self))
+
+
+def replace_state(state: TICASearchState, **changes: Any) -> TICASearchState:
+    """Create a canonical child state without mutating a search branch."""
+
+    values = asdict(state)
+    values.update(changes)
+    values["block_ids"] = tuple(sorted(set(str(item) for item in values["block_ids"])))
+    values["retained_indices"] = tuple(sorted(set(int(item) for item in values["retained_indices"])))
+    digest = stable_digest(
+        {
+            "baseline_model_id": values["baseline_model_id"],
+            "baseline_name": values["baseline_name"],
+            "block_ids": tuple(values["block_ids"]),
+            "retained_indices": tuple(values["retained_indices"]),
+            "mode": values["mode"],
+        }
+    )
+    values["state_id"] = "TICA-S-" + digest[:16]
+    return TICASearchState(**values)
+
+
+def replace_candidate(candidate: TICACandidate, **changes: Any) -> TICACandidate:
+    values = asdict(candidate)
+    values.update(changes)
+    return TICACandidate(**values)
+
+
+def _candidate_rank(candidate: TICACandidate) -> tuple[float, float, float, str]:
+    metrics = candidate.full_metrics or candidate.fast_metrics
+    quality = metrics.get("quality_score")
+    reduction = metrics.get("parameter_reduction_ratio")
+    quality_value = float(quality) if isinstance(quality, (int, float)) and math.isfinite(float(quality)) else -1.0
+    reduction_value = float(reduction) if isinstance(reduction, (int, float)) and math.isfinite(float(reduction)) else 0.0
+    interaction_penalty = float(candidate.interaction_metrics.get("risk_penalty", 0.0) or 0.0)
+    # Prefer feasible measured states, then quality/cost.  Candidate IDs make
+    # ties deterministic without introducing a random search decision.
+    return (1.0 if candidate.feasible else 0.0, quality_value - interaction_penalty, reduction_value, candidate.plan_digest)
 
 
 def _timestep_names(profile: Mapping[str, Any]) -> tuple[str, ...]:
@@ -219,12 +399,12 @@ def normalized_time_weights(names: Sequence[str], formula: str) -> dict[str, flo
 def _record_error(record: Mapping[str, Any], name: str) -> float | None:
     for key in ("relative_error", "importance_score", "risk", "error"):
         value = record.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
             return float(value)
     per_timestep = record.get("per_timestep") or record.get("timesteps")
     if isinstance(per_timestep, Mapping):
         value = per_timestep.get(name)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
             return float(value)
     return None
 
@@ -232,7 +412,7 @@ def _record_error(record: Mapping[str, Any], name: str) -> float | None:
 def _channel_value(record: Mapping[str, Any]) -> float | None:
     for key in ("contribution", "activation_contribution", "importance_score"):
         value = record.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
             return float(value)
     return None
 
@@ -242,15 +422,26 @@ def tica_score(
     *,
     time_weight_formula: str = "early_log",
     timesteps: Sequence[str] | None = None,
+    time_weights: Sequence[float] | None = None,
 ) -> TICAScore:
     """Compute profile-derived TICA scores without executing a model."""
 
     names = tuple(str(item) for item in (timesteps or _timestep_names(profile)))
-    weights = normalized_time_weights(names, time_weight_formula)
+    if time_weights is not None:
+        if len(time_weights) != len(names) or any(not math.isfinite(float(value)) or float(value) < 0.0 for value in time_weights):
+            raise ValueError("TICA time_weights must match timesteps and contain finite non-negative values")
+        total = sum(float(value) for value in time_weights)
+        if total <= 0.0:
+            raise ValueError("TICA time_weights must contain a positive value")
+        weights = {name: float(value) / total for name, value in zip(names, time_weights)}
+    else:
+        weights = normalized_time_weights(names, time_weight_formula)
     block_risk: dict[str, float] = {}
     block_records = profile.get("tica_block_sensitivity") or profile.get("block_sensitivity") or ()
     for item in block_records:
         if not isinstance(item, Mapping) or not item.get("block_id"):
+            continue
+        if item.get("available") is False:
             continue
         values = [_record_error(item, name) for name in names]
         usable = [weights[name] * value for name, value in zip(names, values) if value is not None]
@@ -260,6 +451,8 @@ def tica_score(
     channel_records = profile.get("tica_channel_sensitivity") or profile.get("channel_sensitivity") or ()
     for item in channel_records:
         if not isinstance(item, Mapping):
+            continue
+        if item.get("available") is False:
             continue
         for channel in item.get("channels", ()):
             if not isinstance(channel, Mapping) or not isinstance(channel.get("channel"), int):
@@ -286,11 +479,20 @@ def _profile_block_ids(profile: Mapping[str, Any], score: TICAScore) -> list[str
     ]
 
 
-def _retained_indices(profile: Mapping[str, Any], score: TICAScore) -> list[int]:
+def _retained_indices(profile: Mapping[str, Any], score: TICAScore, *, activation_weight: float = 1.0) -> list[int]:
     width = int((profile.get("model") or {}).get("ffn_width", 0) or 0)
     if width <= 1:
         return [0]
-    ordered = sorted(score.channel_contribution, key=lambda channel: (-score.channel_contribution[channel], channel))
+    activation_weight = max(0.0, min(1.0, float(activation_weight)))
+    # ``channel_contribution`` is the activation-times-down-weight signal.
+    # Blend it with a deterministic structural prior so activation_weight is
+    # a real decision variable even when a profile only exposes one signal.
+    weighted = {
+        int(channel): activation_weight * float(value)
+        + (1.0 - activation_weight) * (1.0 / (1.0 + float(channel)))
+        for channel, value in score.channel_contribution.items()
+    }
+    ordered = sorted(weighted, key=lambda channel: (-weighted[channel], channel))
     target = max(1, min(width - 1, int(width * 0.75)))
     if ordered:
         return sorted(int(item) for item in ordered[:target])
@@ -298,17 +500,19 @@ def _retained_indices(profile: Mapping[str, Any], score: TICAScore) -> list[int]
 
 
 def recipe_plan(profile: Mapping[str, Any], recipe: TICARecipe) -> dict[str, Any]:
-    score = tica_score(profile, time_weight_formula=recipe.time_weight_formula)
+    score = tica_score(profile, time_weight_formula=recipe.time_weight_formula, time_weights=recipe.time_weights or None)
     blocks = _profile_block_ids(profile, score)
     if not blocks:
         raise ValueError("TICA profile has no block candidates")
+    if recipe.baseline_name == "tica_block_ffn" and not score.channel_contribution:
+        raise ValueError("TICA FFN activation evidence is unavailable")
     selected = blocks[:2] if recipe.baseline_name == "interaction_block" else blocks[:1]
     mode = "block"
     if recipe.baseline_name == "tica_block_ffn":
         mode = "block_plus_ffn"
     return {
         "block_ids": selected,
-        "retained_indices": _retained_indices(profile, score),
+        "retained_indices": _retained_indices(profile, score, activation_weight=recipe.activation_weight),
         "mode": mode,
         "time_weight_formula": recipe.time_weight_formula,
         "risk_limit": float(recipe.risk_limit),
@@ -318,6 +522,8 @@ def recipe_plan(profile: Mapping[str, Any], recipe: TICARecipe) -> dict[str, Any
         "max_fast_evals": int(recipe.max_fast_evals),
         "max_full_evals": int(recipe.max_full_evals),
         "max_interaction_evals": int(recipe.max_interaction_evals),
+        "strategy": recipe.strategy,
+        "max_search_depth": int(recipe.max_search_depth),
     }
 
 
@@ -356,14 +562,16 @@ def propose(profile, history):
             if contribution is not None:
                 channels.append((float(contribution), int(channel.get('channel'))))
     target = max(1, min(width - 1, int(width * 0.75)))
-    retained = sorted(set(item[1] for item in sorted(channels, reverse=True)[:target])) if channels else list(range(target))
+    retained = sorted(set(item[1] for item in sorted(channels, reverse=True)[:target])) if channels else []
+    mode = 'block_plus_ffn' if channels else 'block'
     return {'operator': 'tica_prune', 'args': {
         'block_ids': [selected], 'retained_indices': retained,
-        'mode': 'block_plus_ffn', 'time_weight_formula': 'early_log',
+        'mode': mode, 'time_weight_formula': 'early_log',
         'risk_limit': 0.25, 'activation_weight': 0.5,
         'interaction_weight': 0.5, 'beam_width': 2,
         'max_fast_evals': 8, 'max_full_evals': 4,
         'max_interaction_evals': 2,
+        'strategy': 'greedy_beam', 'max_search_depth': 3,
     }}
 """ % str(algorithm_id)
 
@@ -431,17 +639,35 @@ def _activation_contribution(adapter: Any, model: Any, samples: Sequence[Any], f
     blocks = adapter.get_blocks(model)
     totals: dict[str, Any] = {}
     counts: dict[str, int] = {}
+    down_modules: dict[str, Any] = {}
     handles = []
     for block in blocks:
         try:
             module = _module_at(model, block.module_path)
-            activation = next((getattr(module, name) for name in ("activation", "act") if hasattr(module, name)), None)
-            down = getattr(module, "down_proj", None)
+            components = getattr(adapter, "ffn_components", None)
+            parts = components(module) if callable(components) else None
+            if parts is None:
+                candidates = (
+                    ("up_proj", "activation", "down_proj"),
+                    ("ffn.up_proj", "ffn.activation", "ffn.down_proj"),
+                    ("ffn.net.0", "ffn.net.1", "ffn.net.2"),
+                    ("ffn.net.0.proj", "ffn.net.1", "ffn.net.2"),
+                )
+                for up_path, activation_path, down_path in candidates:
+                    try:
+                        parts = (_module_at(module, up_path), _module_at(module, activation_path), _module_at(module, down_path))
+                        break
+                    except (AttributeError, IndexError, TypeError):
+                        continue
+            if parts is None:
+                raise ValueError("ffn_activation_path_unavailable")
+            _up, activation, down = parts
             if activation is None or down is None or not hasattr(down, "weight"):
                 continue
             width = int(down.weight.shape[1])
             totals[block.block_id] = torch.zeros(width, device=down.weight.device, dtype=torch.float32)
             counts[block.block_id] = 0
+            down_modules[block.block_id] = down
 
             def hook(_module: Any, _inputs: Any, output: Any, block_id: str = block.block_id) -> None:
                 tensor = _first_tensor(output)
@@ -469,8 +695,10 @@ def _activation_contribution(adapter: Any, model: Any, samples: Sequence[Any], f
         if block.block_id not in totals or not counts.get(block.block_id):
             rows.append({"block_id": block.block_id, "channels": [], "available": False, "method": "activation_contribution", "reason": "activation_hook_unavailable"})
             continue
-        module = _module_at(model, block.module_path)
-        down = getattr(module, "down_proj", None)
+        down = down_modules.get(block.block_id)
+        if down is None or not hasattr(down, "weight"):
+            rows.append({"block_id": block.block_id, "channels": [], "available": False, "method": "activation_contribution", "reason": "down_projection_unavailable"})
+            continue
         weight = down.weight.detach().float().abs().mean(dim=0).cpu()
         activation_mean = (totals[block.block_id] / float(counts[block.block_id])).detach().cpu()
         channels = [
@@ -503,11 +731,21 @@ def collect_tica_profile(adapter: Any, model: Any, manifest: Any, *, max_block_p
                 modified = _probe_block(adapter, model, block.block_id, sample, float(timestep), forward)
                 error = _relative_error(reference[(str(sample.spec.sample_id), float(timestep))], modified)
                 per_timestep.setdefault(str(timestep), []).append(error if error is not None else float("nan"))
-        averaged = {
-            name: sum(value for value in values if math.isfinite(value)) / max(len([value for value in values if math.isfinite(value)]), 1)
-            for name, values in per_timestep.items()
-        }
-        block_rows.append({"block_id": block.block_id, "per_timestep": averaged, "available": bool(averaged), "method": "local_denoising_relative_error", "sample_count": len(samples)})
+        averaged: dict[str, float] = {}
+        for name, values in per_timestep.items():
+            usable = [value for value in values if math.isfinite(value)]
+            if usable:
+                averaged[name] = sum(usable) / len(usable)
+        block_rows.append(
+            {
+                "block_id": block.block_id,
+                "per_timestep": averaged,
+                "available": bool(averaged) and len(averaged) == len(per_timestep),
+                "method": "local_denoising_relative_error",
+                "sample_count": len(samples),
+                "unavailable_reason": None if averaged else "no_finite_output_measurements",
+            }
+        )
     channel_rows = _activation_contribution(adapter, model, samples, forward)
     return {
         "tica": {
@@ -530,7 +768,285 @@ EvaluateCandidate = Callable[[Mapping[str, Any], bool, str], Mapping[str, Any]]
 
 
 class TICAPruner:
-    """Generate bounded TICA candidates and optionally measure them."""
+    """Generate candidates with a bounded, stateful Greedy/Beam search."""
+
+    @staticmethod
+    def _plan_digest(plan: Mapping[str, Any]) -> str:
+        return stable_digest({"operator": "tica_prune", "args": dict(plan)})
+
+    @staticmethod
+    def _structure_digest(plan: Mapping[str, Any]) -> str:
+        """Digest only executable structure for cross-rule measurement reuse."""
+
+        return stable_digest(
+            {
+                "operator": "tica_prune",
+                "mode": str(plan.get("mode", "block")),
+                "block_ids": sorted(str(item) for item in plan.get("block_ids", ())),
+                "retained_indices": sorted(int(item) for item in plan.get("retained_indices", ())),
+            }
+        )
+
+    @staticmethod
+    def _baseline_score(profile: Mapping[str, Any], baseline: str, recipe: TICARecipe) -> TICAScore:
+        formula = "uniform" if baseline == "independent_block" else recipe.time_weight_formula
+        weights = None if baseline == "independent_block" else recipe.time_weights or None
+        return tica_score(profile, time_weight_formula=formula, time_weights=weights)
+
+    @staticmethod
+    def _parent_model_id(parent: Any, profile: Mapping[str, Any]) -> str:
+        value = getattr(parent, "sha256", None) or profile.get("parent_checkpoint_sha256")
+        if not value and isinstance(profile.get("tica"), Mapping):
+            value = profile["tica"].get("parent_checkpoint_sha256")
+        return str(value or "profile-parent")
+
+    def _root_states(
+        self,
+        parent: Any,
+        profile: Mapping[str, Any],
+        recipe: TICARecipe,
+        *,
+        parent_state_id: Optional[str] = None,
+    ) -> tuple[TICASearchState, ...]:
+        names = BASELINE_NAMES if recipe.include_baseline_suite else (recipe.baseline_name,)
+        roots: list[TICASearchState] = []
+        parent_id = self._parent_model_id(parent, profile)
+        for baseline in names:
+            score = self._baseline_score(profile, baseline, recipe)
+            blocks = _profile_block_ids(profile, score)
+            if not blocks:
+                continue
+            if baseline == "interaction_block":
+                selected = tuple(blocks[:2])
+                mode = "block"
+                retained: tuple[int, ...] = ()
+            elif baseline == "tica_block_ffn":
+                selected = tuple(blocks[:1])
+                mode = "block_plus_ffn"
+                retained = tuple(_retained_indices(profile, score, activation_weight=recipe.activation_weight))
+            else:
+                selected = tuple(blocks[:1])
+                mode = "block"
+                retained = ()
+            if len(selected) >= len(blocks) and len(blocks) > 1:
+                selected = tuple(blocks[: max(1, len(blocks) - 1)])
+            key = stable_digest(
+                {
+                    "parent": parent_id,
+                    "baseline": baseline,
+                    "blocks": selected,
+                    "retained": retained,
+                    "mode": mode,
+                }
+            )
+            roots.append(
+                TICASearchState(
+                    state_id="TICA-S-" + key[:16],
+                    baseline_model_id=parent_id,
+                    block_ids=selected,
+                    retained_indices=retained,
+                    mode=mode,
+                    baseline_name=baseline,
+                    parent_state_id=parent_state_id,
+                    depth=1,
+                )
+            )
+        return tuple(roots)
+
+    @staticmethod
+    def _expand_state(state: TICASearchState, profile: Mapping[str, Any], recipe: TICARecipe) -> tuple[TICASearchState, ...]:
+        score = tica_score(profile, time_weight_formula=recipe.time_weight_formula, time_weights=recipe.time_weights or None)
+        blocks = _profile_block_ids(profile, score)
+        candidates: list[TICASearchState] = []
+        remaining = [item for item in blocks if item not in state.block_ids]
+        allow_more_blocks = state.baseline_name in {"interaction_block", "tica_block_ffn"}
+        if allow_more_blocks and remaining and state.mode in {"block", "block_plus_ffn"}:
+            for next_block in remaining:
+                selected = tuple([*state.block_ids, next_block])
+                candidates.append(
+                    replace_state(
+                        state,
+                        block_ids=selected,
+                        depth=state.depth + 1,
+                        parent_state_id=state.state_id,
+                    )
+                )
+        if state.baseline_name == "tica_block_ffn" and state.mode == "block":
+            retained = tuple(_retained_indices(profile, score, activation_weight=recipe.activation_weight))
+            candidates.append(
+                replace_state(
+                    state,
+                    mode="block_plus_ffn",
+                    retained_indices=retained,
+                    depth=state.depth + 1,
+                    parent_state_id=state.state_id,
+                )
+            )
+        return tuple(candidates)
+
+    @staticmethod
+    def _risk(state: TICASearchState, score: TICAScore, profile: Mapping[str, Any], recipe: TICARecipe) -> Optional[float]:
+        block_values = [score.block_risk.get(item) for item in state.block_ids]
+        if any(value is None or not math.isfinite(float(value)) for value in block_values):
+            return None
+        risk = sum(float(value) for value in block_values)
+        if state.mode in {"ffn", "block_plus_ffn"}:
+            width = int((profile.get("model") or {}).get("ffn_width", 0) or 0)
+            contributions = dict(score.channel_contribution)
+            if width <= 1 or len(contributions) < width:
+                return None
+            total = sum(max(float(value), 0.0) for value in contributions.values())
+            removed = sum(
+                max(float(value), 0.0)
+                for channel, value in contributions.items()
+                if int(channel) not in set(state.retained_indices)
+            )
+            ffn_risk = removed / max(total, 1.0e-12)
+            risk += float(recipe.activation_weight) * ffn_risk
+        return float(risk)
+
+    @staticmethod
+    def _synthetic_metrics(state: TICASearchState, profile: Mapping[str, Any], risk: Optional[float]) -> dict[str, Any]:
+        block_count = max(int((profile.get("model") or {}).get("block_count", len(profile.get("layers", ()))) or 1), 1)
+        width = max(int((profile.get("model") or {}).get("ffn_width", 1) or 1), 1)
+        removed_blocks = len(state.block_ids)
+        retained_ratio = len(state.retained_indices) / float(width) if state.mode in {"ffn", "block_plus_ffn"} else 1.0
+        reduction = min(0.95, removed_blocks / float(block_count) + (1.0 - retained_ratio) * 0.5)
+        return {
+            "valid": risk is not None,
+            "quality_error": risk,
+            "quality_score": 1.0 - risk if risk is not None else None,
+            "parameter_reduction_ratio": reduction,
+            "selected_blocks": list(state.block_ids),
+            "mode": state.mode,
+            "evaluation_status": "profile_fast_screen",
+        }
+
+    def _interaction_plans(self, state: TICASearchState, recipe: TICARecipe) -> tuple[Mapping[str, Any], ...]:
+        base = state.plan(recipe)
+        plans: list[Mapping[str, Any]] = []
+        if len(state.block_ids) > 1:
+            for block_id in state.block_ids:
+                plans.append({**base, "mode": "block", "block_ids": [block_id], "retained_indices": []})
+        if state.mode == "block_plus_ffn":
+            plans.append({**base, "mode": "block", "block_ids": list(state.block_ids), "retained_indices": []})
+            plans.append({**base, "mode": "ffn", "block_ids": [], "retained_indices": list(state.retained_indices)})
+        return tuple(plans)
+
+    def _measure_state(
+        self,
+        state: TICASearchState,
+        profile: Mapping[str, Any],
+        recipe: TICARecipe,
+        score: TICAScore,
+        budget: TICABudgetManager,
+        evaluate_candidate: Optional[EvaluateCandidate],
+        cache: dict[str, dict[str, Mapping[str, Any]]],
+        full_cache: dict[str, Mapping[str, Any]],
+    ) -> TICACandidate:
+        plan = state.plan(recipe)
+        digest = self._plan_digest(plan)
+        structure_digest = self._structure_digest(plan)
+        risk = self._risk(state, score, profile, recipe)
+        entry = cache.setdefault(digest, {})
+        cache_hit = False
+        fast_metrics: Mapping[str, Any] = entry.get("fast", {})
+        full_metrics: Mapping[str, Any] = full_cache.get(structure_digest, entry.get("full", {}))
+        if not fast_metrics:
+            if not budget.can_consume("fast"):
+                return TICACandidate("", state.baseline_name, plan, status="budget_exhausted:fast", state_id=state.state_id, plan_digest=digest, risk=risk)
+            budget.consume("fast", plan_digest=digest)
+            fast_metrics = dict(evaluate_candidate(plan, False, "fast") if evaluate_candidate else self._synthetic_metrics(state, profile, risk))
+            entry["fast"] = fast_metrics
+        else:
+            cache_hit = True
+            budget.consume("fast", plan_digest=digest, cache_hit=True)
+        observed_risk = fast_metrics.get("quality_error")
+        if not isinstance(observed_risk, (int, float)) or not math.isfinite(float(observed_risk)):
+            observed_risk = risk
+        # A real fast screen is the authoritative risk measurement for this
+        # state.  The profile risk is only a pre-execution estimate and is
+        # still required when no measured screen is available.
+        effective_risk = float(observed_risk) if isinstance(observed_risk, (int, float)) else risk
+        evidence_required = state.mode not in {"ffn", "block_plus_ffn"} or risk is not None
+        feasible = evidence_required and effective_risk is not None and float(effective_risk) <= float(recipe.risk_limit)
+        if effective_risk is None:
+            feasible = False
+        elif float(effective_risk) > float(recipe.risk_limit):
+            feasible = False
+        status = "screened"
+        if not feasible:
+            status = "risk_rejected" if observed_risk is not None else "risk_unknown"
+        elif not full_metrics:
+            if not budget.can_consume("full"):
+                status = "budget_exhausted:full"
+                feasible = False
+            else:
+                budget.consume("full", plan_digest=digest)
+                full_metrics = dict(evaluate_candidate(plan, True, "full") if evaluate_candidate else self._synthetic_metrics(state, profile, risk))
+                entry["full"] = full_metrics
+                full_cache[structure_digest] = full_metrics
+        else:
+            cache_hit = True
+            budget.consume("full", plan_digest=digest, cache_hit=True)
+        interaction: Mapping[str, Any] = {}
+        if feasible and full_metrics and state.baseline_name in {"interaction_block", "tica_block_ffn"}:
+            if not budget.can_consume("interaction", cache_hit=True):
+                interaction = {"available": False, "reason": "interaction_budget_exhausted"}
+                feasible = False
+            else:
+                independent: list[Mapping[str, Any]] = []
+                missing = False
+                for independent_plan in self._interaction_plans(state, recipe):
+                    independent_digest = self._plan_digest(independent_plan)
+                    independent_structure_digest = self._structure_digest(independent_plan)
+                    independent_entry = cache.setdefault(independent_digest, {})
+                    metrics = full_cache.get(independent_structure_digest, independent_entry.get("full"))
+                    if not metrics:
+                        missing = True
+                        if not budget.can_consume("full"):
+                            break
+                        budget.consume("full", plan_digest=independent_digest)
+                        metrics = dict(evaluate_candidate(independent_plan, True, "interaction_independent") if evaluate_candidate else {})
+                        independent_entry["full"] = metrics
+                        full_cache[independent_structure_digest] = metrics
+                    independent.append(metrics)
+                if len(independent) != len(self._interaction_plans(state, recipe)):
+                    interaction = {"available": False, "reason": "missing_independent_measurement", "independent_count": len(independent)}
+                    feasible = False
+                else:
+                    budget.record_interaction(plan_digest=digest, cache_hit=not missing)
+                    interaction = self.measure_interaction(independent, full_metrics)
+                    interaction["kind"] = "block_block" if len(state.block_ids) > 1 else "block_ffn"
+                    if not interaction.get("available"):
+                        feasible = False
+                    elif float(interaction.get("interaction_delta", 0.0)) > 0.0:
+                        penalty = float(recipe.interaction_weight) * float(interaction["interaction_delta"])
+                        interaction = {**dict(interaction), "risk_penalty": penalty}
+                        if float(observed_risk or 0.0) + penalty > float(recipe.risk_limit):
+                            feasible = False
+                            status = "interaction_risk_rejected"
+        if full_metrics and "valid" in full_metrics and full_metrics.get("valid") is not True:
+            feasible = False
+            status = "full_measurement_invalid"
+        if feasible and status == "screened":
+            status = "measured"
+        return TICACandidate(
+            candidate_id="",
+            kind=state.baseline_name,
+            plan=plan,
+            parent_candidate_ids=(state.parent_state_id,) if state.parent_state_id else (),
+            fast_metrics=dict(fast_metrics),
+            full_metrics=dict(full_metrics),
+            interaction_metrics=dict(interaction),
+            budget_cost=dict(budget.used),
+            status=status if evaluate_candidate else (status if status != "measured" else "generated"),
+            state_id=state.state_id,
+            plan_digest=digest,
+            risk=risk,
+            feasible=feasible,
+            cache_hit=cache_hit,
+        )
 
     def search(
         self,
@@ -542,84 +1058,77 @@ class TICAPruner:
         *,
         evaluate_candidate: Optional[EvaluateCandidate] = None,
     ) -> TICASearchResult:
-        del adapter, parent
+        del adapter
+        split = profile.get("evaluation_split")
+        if split is None and isinstance(profile.get("tica"), Mapping):
+            split = profile["tica"].get("evaluation_split")
+        if str(split or "").lower() == "test":
+            raise ValueError("TICA search cannot consume Test split measurements")
         started = time.perf_counter()
-        score = tica_score(profile, time_weight_formula=recipe.time_weight_formula)
+        score = tica_score(profile, time_weight_formula=recipe.time_weight_formula, time_weights=recipe.time_weights or None)
+        budget = TICABudgetManager(recipe.budget())
+        cache: dict[str, dict[str, Mapping[str, Any]]] = {}
+        full_cache: dict[str, Mapping[str, Any]] = {}
         candidates: list[TICACandidate] = []
-        used = {"fast_evals": 0, "full_evals": 0, "interaction_evals": 0}
-        baseline_recipes = (
-            TICARecipe.from_mapping({**recipe.to_dict(), "baseline_name": name})
-            for name in BASELINE_NAMES
+        states: list[Mapping[str, Any]] = []
+        parent_id = self._parent_model_id(parent, profile)
+        root_digest = stable_digest({"parent": parent_id, "state": "uncompressed"})
+        root_state = TICASearchState(
+            state_id="TICA-S-" + root_digest[:16],
+            baseline_model_id=parent_id,
+            baseline_name="uncompressed",
+            depth=0,
+            status="baseline",
         )
-        measured_full: dict[str, Mapping[str, Any]] = {}
-        for index, baseline in enumerate(baseline_recipes):
-            if used["full_evals"] >= recipe.max_full_evals:
+        states.append({**root_state.to_dict(), "feasible": True, "status": "baseline"})
+        frontier = list(self._root_states(parent, profile, recipe, parent_state_id=root_state.state_id))
+        seen_states: set[str] = set()
+        seen_plans: set[str] = set()
+        while frontier:
+            next_frontier: list[TICASearchState] = []
+            generation: list[TICACandidate] = []
+            for state in frontier:
+                if state.state_id in seen_states or state.depth > int(recipe.max_search_depth):
+                    continue
+                seen_states.add(state.state_id)
+                candidate = self._measure_state(state, profile, recipe, score, budget, evaluate_candidate, cache, full_cache)
+                candidate_id = "TICA-C%04d" % (len(candidates) + 1)
+                candidate = replace_candidate(candidate, candidate_id=candidate_id)
+                candidates.append(candidate)
+                generation.append(candidate)
+                states.append({**state.to_dict(), "plan_digest": candidate.plan_digest, "feasible": candidate.feasible, "status": candidate.status})
+                structure_digest = self._structure_digest(candidate.plan)
+                if structure_digest not in seen_plans:
+                    seen_plans.add(structure_digest)
+                    if candidate.feasible and state.depth < int(recipe.max_search_depth):
+                        next_frontier.extend(self._expand_state(state, profile, recipe))
+            if not next_frontier or budget.used["full_evals"] >= budget.limits["max_full_evals"]:
                 break
-            plan = recipe_plan(profile, baseline)
-            fast_metrics = dict(evaluate_candidate(plan, False, "fast") if evaluate_candidate else {})
-            used["fast_evals"] += 1
-            full_metrics = dict(evaluate_candidate(plan, True, "full") if evaluate_candidate else {})
-            used["full_evals"] += 1
-            measured_full[baseline.baseline_name] = full_metrics
-            interaction_metrics: Mapping[str, Any] = {}
-            if baseline.baseline_name in {"interaction_block", "tica_block_ffn"} and used["interaction_evals"] < recipe.max_interaction_evals:
-                independent: list[Mapping[str, Any]] = []
-                if baseline.baseline_name == "interaction_block":
-                    for block_id in list(plan.get("block_ids", [])):
-                        existing = measured_full.get("independent_block")
-                        if existing is not None and block_id == plan.get("block_ids", [None])[0]:
-                            independent.append(existing)
-                            continue
-                        if used["interaction_evals"] >= recipe.max_interaction_evals:
-                            break
-                        single_plan = dict(plan)
-                        single_plan["mode"] = "block"
-                        single_plan["block_ids"] = [block_id]
-                        independent.append(dict(evaluate_candidate(single_plan, True, "interaction_independent") if evaluate_candidate else {}))
-                        used["interaction_evals"] += 1
-                else:
-                    block_metrics = measured_full.get("tica_block")
-                    if block_metrics is not None:
-                        independent.append(block_metrics)
-                    if used["interaction_evals"] < recipe.max_interaction_evals:
-                        ffn_plan = dict(plan)
-                        ffn_plan["mode"] = "ffn"
-                        ffn_plan["block_ids"] = []
-                        independent.append(dict(evaluate_candidate(ffn_plan, True, "interaction_independent") if evaluate_candidate else {}))
-                        used["interaction_evals"] += 1
-                interaction_metrics = {
-                    "available": bool(independent) and isinstance(full_metrics.get("quality_error"), (int, float)),
-                    "independent_count": len(independent),
-                    "joint_quality_error": full_metrics.get("quality_error"),
-                    "independent_quality_errors": [item.get("quality_error") for item in independent],
-                }
-                errors = [item.get("quality_error") for item in independent]
-                if interaction_metrics["available"] and all(isinstance(value, (int, float)) for value in errors):
-                    interaction_metrics["interaction_delta"] = float(full_metrics["quality_error"]) - sum(float(value) for value in errors)
-                else:
-                    interaction_metrics["available"] = False
-                    interaction_metrics["reason"] = "missing_measured_quality_error"
-            candidates.append(
-                TICACandidate(
-                    candidate_id="TICA-C%04d" % (index + 1),
-                    kind=baseline.baseline_name,
-                    plan=plan,
-                    fast_metrics=fast_metrics,
-                    full_metrics=full_metrics,
-                    interaction_metrics=interaction_metrics,
-                    budget_cost=dict(used),
-                    status="measured" if evaluate_candidate else "generated",
-                )
-            )
+            next_frontier = [item for item in next_frontier if item.state_id not in seen_states]
+            if recipe.strategy == "greedy":
+                ranked = sorted(generation, key=lambda item: _candidate_rank(item), reverse=True)
+                keep = {item.state_id for item in ranked[:1] if item.feasible}
+            else:
+                ranked = sorted(generation, key=lambda item: _candidate_rank(item), reverse=True)
+                keep = {item.state_id for item in ranked[: max(1, int(recipe.beam_width))] if item.feasible}
+            frontier = [item for item in next_frontier if item.parent_state_id in keep or not keep]
+            if not frontier:
+                break
         pareto = _pareto_front(candidates)
+        feasible = [item for item in candidates if item.feasible and item.full_metrics]
+        selected = max(feasible, key=_candidate_rank, default=None)
         return TICASearchResult(
             recipe=recipe,
             candidates=tuple(candidates),
             pareto_front=tuple(pareto),
-            budget={**used, "elapsed_s": time.perf_counter() - started},
+            budget={**budget.snapshot(), "elapsed_s": time.perf_counter() - started},
             calibration_digest=str(manifest.digest()),
             evidence_level="cpu_fake_quality_proxy" if getattr(manifest, "provider_name", "") == "fake_wan_cpu" else "real_wan_structure",
             score=score.to_dict(),
+            selected_candidate_id=selected.candidate_id if selected else None,
+            selected_plan_digest=selected.plan_digest if selected else None,
+            search_states=tuple(states),
+            budget_audit=tuple(budget.audit),
         )
 
     def measure_interaction(self, independent: Sequence[Mapping[str, Any]], joint: Mapping[str, Any]) -> dict[str, Any]:
@@ -641,6 +1150,8 @@ class TICAPruner:
 def _pareto_front(candidates: Sequence[TICACandidate]) -> list[Mapping[str, Any]]:
     rows: list[Mapping[str, Any]] = []
     for candidate in candidates:
+        if not candidate.feasible:
+            continue
         metrics = candidate.full_metrics
         quality = metrics.get("quality_error")
         reduction = metrics.get("parameter_reduction_ratio")
@@ -665,10 +1176,12 @@ def _pareto_front(candidates: Sequence[TICACandidate]) -> list[Mapping[str, Any]
 
 __all__ = [
     "BASELINE_NAMES",
+    "TICABudgetManager",
     "TICACandidate",
     "TICAPruner",
     "TICARecipe",
     "TICAScore",
+    "TICASearchState",
     "TICASearchResult",
     "build_human_tica_source",
     "normalized_time_weights",

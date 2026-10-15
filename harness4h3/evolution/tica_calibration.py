@@ -199,4 +199,51 @@ class TICACalibrationManifest:
         return tuple(loader(model, self))
 
 
-__all__ = ["TICACalibrationInput", "TICACalibrationManifest", "TICACalibrationSpec"]
+@dataclass(frozen=True)
+class TICAEvaluationSplits:
+    """Fixed Calibration/Validation/Test manifests with leakage checks."""
+
+    calibration: TICACalibrationManifest
+    validation: TICACalibrationManifest
+    test: TICACalibrationManifest
+
+    def __post_init__(self) -> None:
+        manifests = {
+            "calibration": self.calibration,
+            "validation": self.validation,
+            "test": self.test,
+        }
+        seen: dict[str, str] = {}
+        for role, manifest in manifests.items():
+            if not isinstance(manifest, TICACalibrationManifest):
+                raise TypeError("TICA %s split must be a TICACalibrationManifest" % role)
+            for spec in manifest.specs:
+                sample_id = str(spec.sample_id)
+                if sample_id in seen:
+                    raise ValueError("TICA evaluation split leakage: %s appears in %s and %s" % (sample_id, seen[sample_id], role))
+                seen[sample_id] = role
+
+    def digest(self) -> str:
+        return stable_digest(
+            {
+                "calibration": self.calibration.digest(),
+                "validation": self.validation.digest(),
+                "test": self.test.digest(),
+            }
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "calibration": self.calibration.to_dict(),
+            "validation": self.validation.to_dict(),
+            "test": self.test.to_dict(),
+            "digest": self.digest(),
+        }
+
+    def manifest(self, role: str) -> TICACalibrationManifest:
+        if role not in {"calibration", "validation", "test"}:
+            raise ValueError("unsupported TICA evaluation split: %s" % role)
+        return getattr(self, role)
+
+
+__all__ = ["TICACalibrationInput", "TICACalibrationManifest", "TICACalibrationSpec", "TICAEvaluationSplits"]

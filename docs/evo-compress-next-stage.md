@@ -23,6 +23,10 @@ candidate_screening: true
 - `search-space-feedback.json`：由已完成轮次的失败、重复计划和 Pareto 停滞推导出的触发证据；初始化不会预注册扩展。
 - `search-space/proposals/`、`search-space/versions/` 和 `search-space/active.json`：搜索空间提案、拒绝原因、不可变版本及当前 Active 指针。只有触发证据达到阈值后才会尝试提案；`prune_ffn_by_weight_threshold` 和 Agent 生成规则默认归类为 `algorithm_rule_evolution`，不能仅凭新名称声称基础搜索空间扩展。
 - `rounds/Rxxxx/algorithm-validation-measurements/`：父子算法在相同参考 Checkpoint 和固定 Probe 下的真实 Fake 模型级压缩、重载、输出和成本测量。
+- `rounds/Rxxxx/tica-search.json`：TICA-Prune v2 的规范化 SearchState、候选计划摘要、选中候选、Pareto 前沿、预算账本和缓存命中记录。交互分析的独立模型执行同时计入 `full_evals`。
+- TICA 指标口径固定为：`parameter_count`/Transformer 权重大小只描述压缩目标 Transformer；`pipeline_model_size` 描述包含文本编码器、VAE 和配置的完整 Pipeline 逻辑大小，并按 inode 去重硬链接/软链接；CUDA 峰值显存只接受实际执行 Device 上的正数监控值，不可用时写 `null`。
+- TICA 的校准输入只能用于敏感度和候选搜索；算法比较使用固定 Validation 场景，Test split 不会进入搜索或反馈。`TICAEvaluationSplits` 会拒绝复用 sample ID 的划分。
+- TICA 搜索结果是最终执行计划的唯一来源。`decision.json` 同时记录 `selected_candidate_id`、`selected_plan_digest` 和 `final_plan_digest`，摘要不一致时不会进入压缩和晋升流程。
 - `rounds/Rxxxx/screening/screening.json`：静态、诊断、完整评测三阶段及每阶段成本/证据等级。
 - `design-genes.jsonl` 与 `algorithm-skills.jsonl`：可供下一轮 SkillHub 检索的算法、源码哈希、改动理由、验证状态和搜索空间经验。
 

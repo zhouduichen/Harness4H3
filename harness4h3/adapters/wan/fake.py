@@ -190,6 +190,14 @@ class FakeWanDiTAdapter:
             for index, block_id in enumerate(model.block_ids)
         )
 
+    @staticmethod
+    def ffn_components(block: Any) -> tuple[Any, Any, Any] | None:
+        """Return the paired up/activation/down modules for profiling."""
+
+        if all(hasattr(block, name) for name in ("up_proj", "activation", "down_proj")):
+            return block.up_proj, block.activation, block.down_proj
+        return None
+
     def remove_blocks(self, model: FakeWanDiT, block_ids: Sequence[str]) -> StructuralChange:
         selected = tuple(str(item) for item in block_ids)
         known = set(model.block_ids)

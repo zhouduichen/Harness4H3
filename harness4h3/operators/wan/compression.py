@@ -110,7 +110,7 @@ class TICAPruningOperator:
                     "block_ids": list(raw_block_ids),
                     "retained_indices": list(retained or []),
                     "steps": changes,
-                    "recipe": {key: plan[key] for key in ("time_weight_formula", "risk_limit", "activation_weight", "interaction_weight", "beam_width", "max_fast_evals", "max_full_evals", "max_interaction_evals") if key in plan},
+                    "recipe": {key: plan[key] for key in ("time_weight_formula", "risk_limit", "activation_weight", "interaction_weight", "beam_width", "max_fast_evals", "max_full_evals", "max_interaction_evals", "strategy", "max_search_depth") if key in plan},
                 },
                 wall_time_s=time.monotonic() - started,
             )

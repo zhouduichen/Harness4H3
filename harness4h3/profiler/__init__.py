@@ -4,7 +4,7 @@ from .calibration import CalibrationCorpus, CalibrationSample, CalibrationSample
 from .layer_profiler import profile_model, profile_layers
 from .report import ProfileReport
 from .sensitivity import ChannelImportanceMethod, measure_block_sensitivity, measure_channel_sensitivity, measure_timestep_sensitivity
-from ..evolution.tica_calibration import TICACalibrationInput, TICACalibrationManifest, TICACalibrationSpec
+from ..evolution.tica_calibration import TICACalibrationInput, TICACalibrationManifest, TICACalibrationSpec, TICAEvaluationSplits
 
 __all__ = [
     "ProfileReport",
@@ -19,6 +19,7 @@ __all__ = [
     "TICACalibrationInput",
     "TICACalibrationManifest",
     "TICACalibrationSpec",
+    "TICAEvaluationSplits",
     "profile_layers",
     "profile_model",
 ]

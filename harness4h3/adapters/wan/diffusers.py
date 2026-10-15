@@ -196,6 +196,28 @@ class DiffusersWanAdapter:
         return tuple(BlockRef("block.%d" % index, index, _param_count(block), "%s%s.%d" % (prefix, path, index)) for index, block in enumerate(blocks))
 
     @staticmethod
+    def ffn_components(block: Any) -> tuple[Any, Any, Any] | None:
+        """Resolve the actual Wan FFN activation between paired projections."""
+
+        candidates = (
+            ("up_proj", "activation", "down_proj"),
+            ("ffn.up_proj", "ffn.activation", "ffn.down_proj"),
+            ("ffn.net.0", "ffn.net.1", "ffn.net.2"),
+            ("ffn.net.0.proj", "ffn.net.1", "ffn.net.2"),
+            ("ffn.proj_in", "ffn.activation", "ffn.proj_out"),
+        )
+        for up_path, activation_path, down_path in candidates:
+            try:
+                up = _module_at(block, up_path)
+                activation = _module_at(block, activation_path)
+                down = _module_at(block, down_path)
+            except (AttributeError, IndexError, TypeError):
+                continue
+            if all(hasattr(item, attribute) for item in (up, down) for attribute in ("in_features", "out_features")):
+                return up, activation, down
+        return None
+
+    @staticmethod
     def _ffn_pair(block: Any) -> tuple[Any, Any] | None:
         candidates = (("up_proj", "down_proj"), ("ffn.up_proj", "ffn.down_proj"), ("ffn.net.0", "ffn.net.2"), ("ffn.net.0.proj", "ffn.net.2"), ("ffn.proj_in", "ffn.proj_out"))
         for up_path, down_path in candidates:

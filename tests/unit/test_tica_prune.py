@@ -72,6 +72,8 @@ def test_human_source_is_profile_dependent_and_auditable(tmp_path):
                     "max_fast_evals": "number",
                     "max_full_evals": "number",
                     "max_interaction_evals": "number",
+                    "strategy": "string",
+                    "max_search_depth": "number",
                 },
             }
         ],
