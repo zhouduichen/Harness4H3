@@ -80,6 +80,19 @@ def _register_config(module: Any, key: str, value: Any) -> None:
         setattr(getattr(module, "config", module), key, value)
 
 
+def _record_runtime_operation(module: Any, operator: str, args: Mapping[str, Any]) -> None:
+    """Persist the exact runtime/sampler application order in the transformer config."""
+
+    entry = {"operator": str(operator), "args": dict(args)}
+    existing = getattr(module, "_harness4h3_runtime_operations", None)
+    if not isinstance(existing, list):
+        config_value = getattr(getattr(module, "config", module), "harness4h3_runtime_operations", None)
+        existing = list(config_value) if isinstance(config_value, list) else []
+    existing.append(entry)
+    module._harness4h3_runtime_operations = existing
+    _register_config(module, "harness4h3_runtime_operations", existing)
+
+
 def _slice_rotary(rotary: Any, indices: Any, sequence_length: int) -> Any:
     """Select matching positions from Wan's (cos, sin) rotary tuple."""
 
@@ -263,18 +276,43 @@ class DiffusersWanAdapter:
         self._dtype = str(dtype)
         pipe._harness4h3_checkpoint_root = str(checkpoint)
         pipe._harness4h3_checkpoint_sha256 = _transformer_checkpoint_sha256(checkpoint)
-        runtime_rules = getattr(getattr(pipe.transformer, "config", None), "harness4h3_timestep_block_gating", None)
-        if runtime_rules:
-            self.apply_timestep_block_gating(pipe, runtime_rules)
-        token_policy = getattr(getattr(pipe.transformer, "config", None), "harness4h3_token_sparsity", None)
-        if token_policy:
-            self.apply_token_sparsity(pipe, token_policy)
-        sparse_policy = getattr(getattr(pipe.transformer, "config", None), "harness4h3_sparse_runtime", None)
-        if sparse_policy:
-            self.apply_sparse_runtime(pipe, sparse_policy)
-        sampling_policy = getattr(getattr(pipe.transformer, "config", None), "harness4h3_sampling_step", None)
-        if sampling_policy:
-            self.apply_sampling_step_policy(pipe, sampling_policy)
+        config = getattr(pipe.transformer, "config", None)
+        runtime_operations = getattr(config, "harness4h3_runtime_operations", None)
+        if isinstance(runtime_operations, list):
+            # Rebuild the in-memory record while replaying so loading does not
+            # append a second copy of the persisted operation sequence.
+            pipe.transformer._harness4h3_runtime_operations = []
+            _register_config(pipe.transformer, "harness4h3_runtime_operations", [])
+            for item in runtime_operations:
+                if not isinstance(item, Mapping) or not isinstance(item.get("args", {}), Mapping):
+                    raise ValueError("invalid_runtime_operation_manifest")
+                operator = str(item.get("operator", ""))
+                args = dict(item.get("args") or {})
+                if operator == "timestep_block_gate":
+                    self.apply_timestep_block_gating(pipe, args.get("rules", []))
+                elif operator == "prune_tokens":
+                    self.apply_token_sparsity(pipe, args)
+                elif operator == "sparse_runtime":
+                    self.apply_sparse_runtime(pipe, args)
+                elif operator == "sampling_step_skip":
+                    self.apply_sampling_step_policy(pipe, args)
+                else:
+                    raise ValueError("unsupported_runtime_operation: %s" % operator)
+        else:
+            # Legacy checkpoints predate the ordered manifest.  Their
+            # individual config fields are replayed in the historical order.
+            runtime_rules = getattr(config, "harness4h3_timestep_block_gating", None)
+            if runtime_rules:
+                self.apply_timestep_block_gating(pipe, runtime_rules)
+            token_policy = getattr(config, "harness4h3_token_sparsity", None)
+            if token_policy:
+                self.apply_token_sparsity(pipe, token_policy)
+            sparse_policy = getattr(config, "harness4h3_sparse_runtime", None)
+            if sparse_policy:
+                self.apply_sparse_runtime(pipe, sparse_policy)
+            sampling_policy = getattr(config, "harness4h3_sampling_step", None)
+            if sampling_policy:
+                self.apply_sampling_step_policy(pipe, sampling_policy)
         return pipe
 
     @classmethod
@@ -453,6 +491,7 @@ class DiffusersWanAdapter:
 
             block._harness4h3_token_base_forward = base
             block.forward = MethodType(token_forward, block)
+        _record_runtime_operation(transformer, "prune_tokens", parsed.to_dict())
         return StructuralChange("runtime_token_sparsity", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
 
     def apply_sparse_runtime(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
@@ -488,6 +527,7 @@ class DiffusersWanAdapter:
 
             attention._harness4h3_sparse_base_forward = base
             attention.forward = MethodType(sparse_forward, attention)
+        _record_runtime_operation(transformer, "sparse_runtime", parsed.to_dict())
         return StructuralChange("runtime_sparse_attention", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
 
     def apply_sampling_step_policy(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
@@ -496,6 +536,7 @@ class DiffusersWanAdapter:
         _register_config(transformer, "harness4h3_sampling_step", parsed.to_dict())
         transformer._harness4h3_sampling_step_policy = parsed.to_dict()
         setattr(model, "_harness4h3_sampling_step_policy", parsed.to_dict())
+        _record_runtime_operation(transformer, "sampling_step_skip", parsed.to_dict())
         return StructuralChange("runtime_sampling_step_skip", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
 
     def sampling_steps(self, model: Any, timesteps: Sequence[Any]) -> tuple[Any, ...]:
@@ -661,6 +702,7 @@ class DiffusersWanAdapter:
         transformer._harness4h3_gate_stats = {
             block_id: {"executed": 0, "skipped": 0} for block_id in block_ids
         }
+        _record_runtime_operation(transformer, "timestep_block_gate", {"rules": rules_to_dict(validated), "policy": "skip_when_in_range"})
 
         if not hasattr(transformer, "_harness4h3_gate_base_forward"):
             base_transformer_forward = transformer.forward

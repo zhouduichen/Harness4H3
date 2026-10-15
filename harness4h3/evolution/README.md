@@ -55,7 +55,9 @@ the usual algorithm/model evidence. `tica_prune` is classified as an
 algorithm rule over the existing Block/FFN structural closure, not as a new
 primitive search-space operator.
 
-The current sparse-attention runtime interface is intentionally disabled. It
-records an interface-only proposal and cannot mutate weights or claim GPU
-speedup. Real Wan use requires an explicit cached-input manifest; a missing
-manifest is rejected rather than replaced by random probes.
+The legacy sparse-attention runtime boundary now delegates enabled requests to
+the adapter's executable top-k KV backend. It remains weight-neutral and does
+not claim an SVOO/SparseVideo CUDA implementation or GPU speedup without
+independent measurements. Real Wan use requires an explicit cached-input
+manifest; a missing manifest is rejected rather than replaced by random
+probes.

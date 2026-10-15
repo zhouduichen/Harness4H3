@@ -376,7 +376,7 @@ class WanCompressionRegistry:
 
         view = WanCompressionRegistry(tuple(self._operators.values()))
         for spec in getattr(version, "operators", ()):
-            factory_key = str(getattr(spec, "trusted_factory_key", ""))
+            factory_key = str(getattr(spec, "implementation_ref", "") or getattr(spec, "trusted_factory_key", ""))
             if not factory_key or str(getattr(spec, "name", "")) in view._operators:
                 continue
             factory = factories.get(factory_key)

@@ -48,7 +48,7 @@ SEARCH_SPACE_RESPONSE_SCHEMA = {
         "spec": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["name", "version", "argument_schema", "granularity", "trusted_factory_key"],
+            "required": ["name", "version", "argument_schema", "granularity"],
             "properties": {
                 "name": {"type": "string"},
                 "version": {"type": "string"},
@@ -58,6 +58,8 @@ SEARCH_SPACE_RESPONSE_SCHEMA = {
                 "limitations": {"type": "array", "items": {"type": "string"}},
                 "trusted_factory_key": {"type": "string"},
                 "implementation_source": {"type": "string"},
+                "implementation_ref": {"type": "string"},
+                "execution_domain": {"type": "string"},
             },
         },
         "rationale": {"type": "string"},

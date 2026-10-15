@@ -9,6 +9,7 @@ from harness4h3.evolution.agent import AlgorithmAgent
 from harness4h3.evolution.taxonomy import classify_search_space_proposal
 from harness4h3.operators.wan import (
     OperatorSpec,
+    SearchSpaceVersion,
     SearchSpaceManager,
     ThresholdFFNChannelOperator,
     TimestepBlockGatingOperator,
@@ -113,6 +114,42 @@ def test_search_space_active_pointer_can_roll_back_without_deleting_new_version(
     assert manager.active.version_id == "S0001"
     assert manager.store.latest().version_id == version.version_id
     assert (tmp_path / "space" / "active.json").is_file()
+
+
+def test_versioned_implementation_ref_loads_and_validates_without_factory_key(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    manager = SearchSpaceManager(tmp_path / "space")
+    spec = OperatorSpec(
+        name="timestep_block_gate",
+        version="1",
+        argument_schema={"rules": "list[object]", "policy": "str"},
+        granularity="runtime_timestep",
+        constraints=("normalized_timestep",),
+        limitations=("runtime_only",),
+        implementation_ref="harness4h3.operators.wan.compression.TimestepBlockGatingOperator",
+        execution_domain="runtime",
+    )
+    proposal = manager.propose(spec, "load the verified runtime implementation by reference", ["R0001"])
+    validated = manager.validate(proposal, adapter, parent, output_dir=tmp_path / "validation")
+    assert validated.status == "validated"
+
+    version = manager.register(validated)
+    registry = manager.registry_for(version, build_wan_compression_registry())
+    assert isinstance(registry.get("timestep_block_gate"), TimestepBlockGatingOperator)
+
+
+def test_search_space_version_round_trips_implementation_reference():
+    spec = OperatorSpec(
+        name="example_runtime",
+        version="1",
+        argument_schema={"keep_ratio": "float"},
+        granularity="runtime",
+        implementation_ref="harness4h3.operators.wan.compression.SparseRuntimeOperator",
+        execution_domain="runtime",
+    )
+    version = SearchSpaceVersion("S0099", "S0001", (spec,))
+    restored = SearchSpaceVersion.from_dict(version.to_dict())
+    assert restored.spec("example_runtime").implementation_ref == spec.implementation_ref
 
 
 def test_agent_generated_rule_is_sandboxed_validated_registered_and_reused(tmp_path):

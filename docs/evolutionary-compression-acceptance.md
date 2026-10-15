@@ -10,7 +10,7 @@
 - 有序 Hybrid：`Head + Sparse`、`Token + Sparse`、`Layer + Sampling Step` 已有组合执行测试；`compose` 保留步骤顺序并支持最多 6 步。
 - `ModelVariant`：通过 sidecar manifest 区分结构 checkpoint、runtime policy、sampler policy、算法版本和 SearchSpace 版本；runtime-only 变体不填写 structural checkpoint，参数减少固定为 0。
 - Algorithm Discovery：Sandbox 中执行 Agent 的 `search()`，轨迹记录候选集合、排序和选中计划；搜索源码纳入逻辑摘要，递归子代保留父子源码差异。
-- Search-Space Evolution：提案经过 Sandbox、真实 adapter 执行、保存/重载、finite 检查后注册；下一代 Program 读取新版本并能生成新算子计划。
+- Search-Space Evolution：提案经过 Sandbox、真实 adapter 执行、保存/重载、finite 检查后注册；下一代 Program 读取新版本并能生成新算子计划。执行器通过受限的 `implementation_ref` loader 恢复，不要求为每个新类修改管理器分支。
 
 ## 部分完成 / 有条件完成
 
@@ -22,8 +22,8 @@
 ## 测试证据
 
 ```text
-focused new/multi-granularity tests: 32 passed
-full regression: 1006 passed, 4 skipped
+focused new/multi-granularity tests: 27 passed
+full regression: 1013 passed, 4 skipped
 ```
 
 4 个 skip 分别是未设置真实 Wan checkpoint、CUDA 不可用或 CUDA RNG parity 条件，不是实现失败。

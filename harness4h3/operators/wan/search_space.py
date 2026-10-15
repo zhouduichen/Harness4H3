@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import importlib
 import os
 import tempfile
 import time
@@ -243,6 +244,55 @@ class SearchSpaceStore:
                 os.unlink(temporary)
 
 
+class OperatorImplementationRegistry:
+    """Resolve versioned Wan operator implementations without per-operator branches.
+
+    Search-space JSON is data, not executable Python.  A persisted
+    ``implementation_ref`` may point only into the repository's Wan operator
+    namespace, while tests and deployment code can register an explicit
+    factory under a stable reference.  The implementation is still activated
+    only after ``SearchSpaceManager.validate`` runs its real adapter/reload
+    checks.
+    """
+
+    _ALLOWED_MODULE_PREFIX = "harness4h3.operators.wan"
+
+    def __init__(self, factories: Optional[Mapping[str, Callable[..., Any]]] = None) -> None:
+        self._factories = dict(factories or {})
+
+    def register(self, implementation_ref: str, factory: Callable[..., Any]) -> None:
+        reference = str(implementation_ref).strip()
+        if not reference or not callable(factory):
+            raise ValueError("operator implementation registration is invalid")
+        self._factories[reference] = factory
+
+    def _resolve_factory(self, implementation_ref: str) -> Callable[..., Any]:
+        reference = str(implementation_ref).strip()
+        registered = self._factories.get(reference)
+        if registered is not None:
+            return registered
+        module_name, separator, attribute = reference.replace(":", ".").rpartition(".")
+        if not separator or not module_name.startswith(self._ALLOWED_MODULE_PREFIX + "."):
+            raise ValueError("unavailable_operator_implementation: %s" % reference)
+        module = importlib.import_module(module_name)
+        factory = getattr(module, attribute, None)
+        if not callable(factory):
+            raise ValueError("invalid_operator_implementation: %s" % reference)
+        self._factories[reference] = factory
+        return factory
+
+    def instantiate(self, spec: OperatorSpec) -> Any:
+        reference = str(spec.implementation_ref or spec.trusted_factory_key).strip()
+        if not reference:
+            raise ValueError("operator_implementation_ref_required")
+        factory = self._resolve_factory(reference)
+        try:
+            return factory(spec)
+        except TypeError:
+            # Built-in operator classes use a zero-argument constructor.
+            return factory()
+
+
 def default_search_space() -> SearchSpaceVersion:
     return SearchSpaceVersion(
         version_id="S0001",
@@ -266,6 +316,7 @@ def default_search_space() -> SearchSpaceVersion:
 class SearchSpaceManager:
     def __init__(self, root: Path) -> None:
         self.store = SearchSpaceStore(Path(root))
+        self.implementation_registry = OperatorImplementationRegistry(_TRUSTED_FACTORIES)
         if self.store.latest() is None:
             self.store.write_version(default_search_space())
         if self.store.read_active_id() is None:
@@ -317,22 +368,22 @@ class SearchSpaceManager:
         self.store.write_proposal(base)
         started = time.monotonic()
         try:
-            factory = _TRUSTED_FACTORIES[proposal.spec.trusted_factory_key]
-            operator = _make_trusted_operator(proposal.spec, factory)
+            operator = self.implementation_registry.instantiate(proposal.spec)
             if operator.name != proposal.spec.name:
-                raise ValueError("trusted_factory_name_mismatch")
+                raise ValueError("operator_implementation_name_mismatch")
             parent_model = adapter.reload_model(parent)
             block_ids = [item.block_id for item in adapter.get_blocks(parent_model)]
             threshold = None
             plan_args: dict[str, Any] = {"block_ids": block_ids}
-            if proposal.spec.trusted_factory_key == "prune_ffn_by_weight_threshold":
+            implementation_key = proposal.spec.trusted_factory_key or proposal.spec.name
+            if implementation_key == "prune_ffn_by_weight_threshold":
                 scores = _channel_scores(adapter, parent_model, block_ids)
                 lower, upper = min(scores), max(scores)
                 if upper <= lower:
                     raise ValueError("threshold_validation_requires_nonuniform_channel_scores")
                 threshold = lower + (upper - lower) * 0.5
                 plan_args["threshold"] = threshold
-            elif proposal.spec.trusted_factory_key == "timestep_block_gate":
+            elif implementation_key == "timestep_block_gate" or proposal.spec.name == "timestep_block_gate":
                 if not block_ids:
                     raise ValueError("timestep_gate_requires_blocks")
                 plan_args = {
@@ -343,13 +394,13 @@ class SearchSpaceManager:
                     }],
                     "policy": "skip_when_in_range",
                 }
-            elif proposal.spec.trusted_factory_key in {"prune_attention_heads", "prune_heads"}:
+            elif implementation_key in {"prune_attention_heads", "prune_heads"}:
                 plan_args = {"head_indices": [0], "attention_names": ["attn1", "attn2"]}
-            elif proposal.spec.trusted_factory_key == "prune_tokens":
+            elif implementation_key == "prune_tokens":
                 plan_args = {"keep_ratio": 0.75}
-            elif proposal.spec.trusted_factory_key == "sparse_runtime":
+            elif implementation_key == "sparse_runtime":
                 plan_args = {"keep_ratio": 0.75, "attention": "attn1"}
-            elif proposal.spec.trusted_factory_key == "sampling_step_skip":
+            elif implementation_key == "sampling_step_skip":
                 plan_args = {"target_steps": 8}
             if proposal.spec.implementation_source:
                 # An authored implementation is still untrusted.  Execute it
@@ -365,7 +416,7 @@ class SearchSpaceManager:
                 )
                 if generated.status != "success" or generated.plan is None:
                     raise ValueError(generated.failure_type or "implementation_source_validation_failed")
-                if proposal.spec.trusted_factory_key == "timestep_block_gate" and generated.plan.operator != proposal.spec.name:
+                if proposal.spec.name == "timestep_block_gate" and generated.plan.operator != proposal.spec.name:
                     raise ValueError("timestep_gate_source_must_return_declared_operator")
                 plan_args = dict(generated.plan.args)
             result = operator.execute(
@@ -399,7 +450,7 @@ class SearchSpaceManager:
             }
             if threshold is not None:
                 validation["threshold"] = float(threshold)
-            if proposal.spec.trusted_factory_key == "timestep_block_gate":
+            if proposal.spec.name == "timestep_block_gate":
                 validation["structure_outside_active_closure"] = True
                 validation["structural_counterexample"] = {
                     "kind": "dynamic_timestep_block_execution",
@@ -457,6 +508,10 @@ class SearchSpaceManager:
     def registry_for(self, version: Optional[SearchSpaceVersion] = None, base: Optional[WanCompressionRegistry] = None) -> WanCompressionRegistry:
         target = version or self.active
         factories = {key: factory for key, factory in _TRUSTED_FACTORIES.items()}
+        for spec in target.operators:
+            reference = str(spec.implementation_ref or spec.trusted_factory_key).strip()
+            if reference and reference not in factories:
+                factories[reference] = lambda current_spec, registry=self.implementation_registry: registry.instantiate(current_spec)
         return (base or WanCompressionRegistry()).for_search_space(target, factories)
 
 
@@ -636,6 +691,7 @@ def _rule_profile(adapter: WanModelAdapter, model: Any, plan: Mapping[str, Any])
 
 __all__ = [
     "GeneratedChannelRuleOperator",
+    "OperatorImplementationRegistry",
     "OperatorSpec",
     "SearchSpaceManager",
     "SearchSpaceProposal",

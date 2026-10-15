@@ -64,6 +64,25 @@ def test_sampling_schedule_is_executed_by_adapter(tmp_path):
     assert selected[-1] == 1
 
 
+def test_runtime_operation_order_survives_fake_checkpoint_reload(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=3, hidden_size=8, ffn_width=12)
+    model = adapter.load_model("fake://baseline")
+    adapter.apply_sampling_step_policy(model, {"target_steps": 8, "strategy": "uniform"})
+    adapter.apply_sparse_runtime(model, {"keep_ratio": 0.5, "attention": "attn1"})
+    adapter.apply_token_sparsity(model, {"keep_ratio": 0.75, "block_ids": ["block.1"]})
+    artifact = adapter.save_model(model, tmp_path / "ordered-runtime")
+
+    reloaded = adapter.reload_model(artifact)
+    assert [item["operator"] for item in reloaded._harness4h3_runtime_operations] == [
+        "sampling_step_skip",
+        "sparse_runtime",
+        "prune_tokens",
+    ]
+    assert reloaded._harness4h3_sampling_step_policy["target_steps"] == 8
+    assert reloaded._harness4h3_sparse_runtime_policy["keep_ratio"] == 0.5
+    assert reloaded._harness4h3_token_sparsity_policy["block_ids"] == ["block.1"]
+
+
 def test_diffusers_wan_attention_contract_is_structurally_executable():
     diffusers = pytest.importorskip("diffusers")
     from types import SimpleNamespace
@@ -91,5 +110,9 @@ def test_diffusers_wan_attention_contract_is_structurally_executable():
     assert sum(int(item.numel()) for item in model.parameters()) < before
     adapter.apply_token_sparsity(model, {"keep_ratio": 0.5})
     adapter.apply_sparse_runtime(model, {"keep_ratio": 0.5, "attention": "attn1"})
+    assert [item["operator"] for item in model.config.harness4h3_runtime_operations] == [
+        "prune_tokens",
+        "sparse_runtime",
+    ]
     output = model(torch.randn(1, 5, 8), torch.tensor([500]), torch.randn(1, 4, 8))
     assert tuple(output.shape) == (1, 5, 8)

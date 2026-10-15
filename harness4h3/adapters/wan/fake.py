@@ -130,7 +130,7 @@ def _copy_module(module: Any) -> Any:
 class FakeWanDiT:
     """Small Torch module kept separate so the adapter owns structure policy."""
 
-    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None, num_heads: int = 4, attention_head_dim: int | None = None, runtime_gate_rules: Sequence[Mapping[str, Any]] | None = None, token_sparsity_policy: Mapping[str, Any] | None = None, sparse_runtime_policy: Mapping[str, Any] | None = None, sampling_step_policy: Mapping[str, Any] | None = None) -> None:
+    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None, num_heads: int = 4, attention_head_dim: int | None = None, runtime_gate_rules: Sequence[Mapping[str, Any]] | None = None, token_sparsity_policy: Mapping[str, Any] | None = None, sparse_runtime_policy: Mapping[str, Any] | None = None, sampling_step_policy: Mapping[str, Any] | None = None, runtime_operations: Sequence[Mapping[str, Any]] | None = None) -> None:
         _, nn = _torch()
         widths = list(ffn_widths or [ffn_width] * block_count)
         if len(widths) != block_count:
@@ -153,6 +153,7 @@ class FakeWanDiT:
         self._harness4h3_token_sparsity_policy = dict(token_sparsity_policy or {})
         self._harness4h3_sparse_runtime_policy = dict(sparse_runtime_policy or {})
         self._harness4h3_sampling_step_policy = dict(sampling_step_policy or {})
+        self._harness4h3_runtime_operations = [dict(item) for item in (runtime_operations or [])]
         if self._harness4h3_sparse_runtime_policy:
             for block in self.blocks:
                 block.attn1._harness4h3_sparse_policy = dict(self._harness4h3_sparse_runtime_policy)
@@ -258,6 +259,7 @@ class FakeWanDiTAdapter:
                 token_sparsity_policy=config.get("token_sparsity_policy", {}),
                 sparse_runtime_policy=config.get("sparse_runtime_policy", {}),
                 sampling_step_policy=config.get("sampling_step_policy", {}),
+                runtime_operations=config.get("runtime_operations", []),
             )
             model.load_state_dict(torch.load(root / "model.pt", map_location="cpu", weights_only=True))
             model._artifact_sha256 = checkpoint_content_sha256(root)
@@ -290,6 +292,7 @@ class FakeWanDiTAdapter:
                 "token_sparsity_policy": dict(model._harness4h3_token_sparsity_policy),
                 "sparse_runtime_policy": dict(model._harness4h3_sparse_runtime_policy),
                 "sampling_step_policy": dict(model._harness4h3_sampling_step_policy),
+                "runtime_operations": [dict(item) for item in model._harness4h3_runtime_operations],
             },
         )
 
@@ -394,6 +397,7 @@ class FakeWanDiTAdapter:
             raise ValueError("invalid_token_selection: unknown block %s" % unknown[0])
         model._harness4h3_token_sparsity_policy = parsed.to_dict()
         model.runtime_token_stats = {str(block_id): {"selected": 0, "skipped": 0} for block_id in model.block_ids}
+        model._harness4h3_runtime_operations.append({"operator": "prune_tokens", "args": parsed.to_dict()})
         return StructuralChange("runtime_token_sparsity", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
 
     def apply_sparse_runtime(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
@@ -402,11 +406,13 @@ class FakeWanDiTAdapter:
             if parsed.attention in {"attn1", "self", "all"}:
                 block.attn1._harness4h3_sparse_policy = parsed.to_dict()
         model._harness4h3_sparse_runtime_policy = parsed.to_dict()
+        model._harness4h3_runtime_operations.append({"operator": "sparse_runtime", "args": parsed.to_dict()})
         return StructuralChange("runtime_sparse_attention", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
 
     def apply_sampling_step_policy(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
         parsed = SamplingStepPolicy.from_mapping(policy)
         model._harness4h3_sampling_step_policy = parsed.to_dict()
+        model._harness4h3_runtime_operations.append({"operator": "sampling_step_skip", "args": parsed.to_dict()})
         return StructuralChange("runtime_sampling_step_skip", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
 
     def sampling_steps(self, model: FakeWanDiT, timesteps: Sequence[Any]) -> tuple[Any, ...]:
@@ -435,6 +441,7 @@ class FakeWanDiTAdapter:
             "token_sparsity_policy": dict(model._harness4h3_token_sparsity_policy),
             "sparse_runtime_policy": dict(model._harness4h3_sparse_runtime_policy),
             "sampling_step_policy": dict(model._harness4h3_sampling_step_policy),
+            "runtime_operations": [dict(item) for item in model._harness4h3_runtime_operations],
         }
         config_path.write_text(json.dumps(config, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         digest = checkpoint_content_sha256(target)
@@ -538,6 +545,7 @@ class FakeWanDiTAdapter:
         validated = validate_timestep_gate_plan({"rules": [dict(item) for item in rules], "policy": "skip_when_in_range"}, block_ids)
         model.runtime_gate_rules = [rule.to_dict() for rule in validated]
         model.runtime_gate_stats = {str(block_id): {"executed": 0, "skipped": 0} for block_id in block_ids}
+        model._harness4h3_runtime_operations.append({"operator": "timestep_block_gate", "args": {"rules": list(model.runtime_gate_rules), "policy": "skip_when_in_range"}})
         return StructuralChange(
             "runtime_timestep_gating",
             {
