@@ -152,6 +152,20 @@ class SandboxResult:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ProgramResult:
+    """Raw JSON result from one isolated Algorithm Program invocation."""
+
+    status: str
+    source_sha256: str
+    value: Optional[Any] = None
+    failure_type: Optional[str] = None
+    message: str = ""
+    stdout_path: Optional[str] = None
+    stderr_path: Optional[str] = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
 RUNNER_SOURCE = r'''
 import json
 import math
@@ -215,7 +229,7 @@ def _algorithm_audit(event, args):
 try:
     if resource is None:
         raise OSError("resource limits unavailable")
-    _cpu_seconds = max(1, int(math.ceil(float(sys.argv[5]))))
+    _cpu_seconds = max(1, int(math.ceil(float(sys.argv[4]))))
     resource.setrlimit(resource.RLIMIT_CPU, (_cpu_seconds, _cpu_seconds + 1))
     resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))
     resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
@@ -254,18 +268,19 @@ def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 ALLOWED["__import__"] = safe_import
 
-source_path, profile_path, history_path, output_path, _timeout_s = sys.argv[1:6]
+source_path, payload_path, output_path, _timeout_s, entrypoint = sys.argv[1:6]
 source = open(source_path, "r", encoding="utf-8").read()
-profile = json.loads(open(profile_path, "r", encoding="utf-8").read())
-history = json.loads(open(history_path, "r", encoding="utf-8").read())
+payload = json.loads(open(payload_path, "r", encoding="utf-8").read())
 namespace = {"__name__": "__algorithm__", "__builtins__": ALLOWED}
 sys.addaudithook(_algorithm_audit)
 try:
     _ALGORITHM_PHASE = False
     compiled = compile(source, source_path, "exec")
     exec(compiled, namespace, namespace)
+    if entrypoint not in namespace or not callable(namespace[entrypoint]):
+        raise ValueError("missing_entrypoint: " + entrypoint)
     _ALGORITHM_PHASE = True
-    result = namespace["propose"](profile, history)
+    result = namespace[entrypoint](**payload)
     _ALGORITHM_PHASE = False
     json.dump(result, open(output_path, "w", encoding="utf-8"), sort_keys=True)
 except Exception as exc:
@@ -300,37 +315,117 @@ class AlgorithmSandbox:
         self.executor = LocalProcessExecutor(timeout_s=self.timeout_s)
 
     def run(self, source: str, profile: Mapping[str, Any], history: Sequence[Mapping[str, Any]]) -> SandboxResult:
+        program = self.run_program(
+            source,
+            entrypoint="propose",
+            payload={"profile": dict(profile), "history": list(history)},
+        )
+        if program.status != "success":
+            return SandboxResult(
+                "failed",
+                program.source_sha256,
+                failure_type=program.failure_type or "sandbox_process",
+                message=program.message,
+                stdout_path=program.stdout_path,
+                stderr_path=program.stderr_path,
+                metadata=dict(program.metadata),
+            )
         try:
-            validated = validate_source(source)
-        except SourcePolicyError as exc:
-            return SandboxResult("failed", "", failure_type="sandbox_policy", message=str(exc))
-        run_root = Path(tempfile.mkdtemp(prefix="algorithm-", dir=str(self.root)))
-        source_path = run_root / "algorithm.py"
-        profile_path = run_root / "profile.json"
-        history_path = run_root / "history.json"
-        output_path = run_root / "output.json"
-        source_path.write_text(validated.source, encoding="utf-8")
-        profile_path.write_text(json.dumps(profile, sort_keys=True), encoding="utf-8")
-        history_path.write_text(json.dumps(list(history), sort_keys=True), encoding="utf-8")
-        runner_path = run_root / "runner.py"
-        runner_path.write_text(RUNNER_SOURCE, encoding="utf-8")
-        result = self.executor.execute((sys.executable, "-I", str(runner_path), str(source_path), str(profile_path), str(history_path), str(output_path), str(self.timeout_s)), run_root)
-        if result.status != "success":
-            return SandboxResult("failed", validated.sha256, failure_type=result.failure_type or "sandbox_process", message=result.message, stdout_path=result.stdout_path, stderr_path=result.stderr_path)
-        if not output_path.exists() or output_path.stat().st_size > self.max_output_bytes:
-            return SandboxResult("failed", validated.sha256, failure_type="algorithm_output_invalid", message="output is missing or exceeds size limit", stdout_path=result.stdout_path, stderr_path=result.stderr_path)
-        try:
-            raw = json.loads(output_path.read_text(encoding="utf-8"))
-            plan = CompressionPlan.from_mapping(raw, operator_specs=self.operator_specs)
-        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            return SandboxResult("failed", validated.sha256, failure_type="algorithm_output_invalid", message=str(exc), stdout_path=result.stdout_path, stderr_path=result.stderr_path)
+            plan = CompressionPlan.from_mapping(program.value, operator_specs=self.operator_specs)
+        except (TypeError, ValueError) as exc:
+            return SandboxResult(
+                "failed",
+                program.source_sha256,
+                failure_type="algorithm_output_invalid",
+                message=str(exc),
+                stdout_path=program.stdout_path,
+                stderr_path=program.stderr_path,
+                metadata=dict(program.metadata),
+            )
         return SandboxResult(
             "success",
-            validated.sha256,
+            program.source_sha256,
             plan=plan,
+            stdout_path=program.stdout_path,
+            stderr_path=program.stderr_path,
+            metadata=dict(program.metadata),
+        )
+
+    def run_program(
+        self,
+        source: str,
+        *,
+        entrypoint: str,
+        payload: Mapping[str, Any],
+    ) -> ProgramResult:
+        try:
+            validated = validate_source(source, required_entrypoint=entrypoint)
+        except SourcePolicyError as exc:
+            return ProgramResult("failed", "", failure_type="sandbox_policy", message=str(exc), metadata={"entrypoint": str(entrypoint)})
+        run_root = Path(tempfile.mkdtemp(prefix="algorithm-", dir=str(self.root)))
+        source_path = run_root / "algorithm.py"
+        payload_path = run_root / "payload.json"
+        output_path = run_root / "output.json"
+        source_path.write_text(validated.source, encoding="utf-8")
+        try:
+            payload_path.write_text(json.dumps(dict(payload), sort_keys=True), encoding="utf-8")
+        except (TypeError, ValueError) as exc:
+            return ProgramResult("failed", validated.sha256, failure_type="algorithm_payload_invalid", message=str(exc), metadata={"entrypoint": str(entrypoint)})
+        runner_path = run_root / "runner.py"
+        runner_path.write_text(RUNNER_SOURCE, encoding="utf-8")
+        result = self.executor.execute(
+            (
+                sys.executable,
+                "-I",
+                str(runner_path),
+                str(source_path),
+                str(payload_path),
+                str(output_path),
+                str(self.timeout_s),
+                str(entrypoint),
+            ),
+            run_root,
+        )
+        if result.status != "success":
+            return ProgramResult(
+                "failed",
+                validated.sha256,
+                failure_type=result.failure_type or "sandbox_process",
+                message=result.message,
+                stdout_path=result.stdout_path,
+                stderr_path=result.stderr_path,
+                metadata={"entrypoint": str(entrypoint), "process_isolation": "python-isolated-process"},
+            )
+        if not output_path.exists() or output_path.stat().st_size > self.max_output_bytes:
+            return ProgramResult(
+                "failed",
+                validated.sha256,
+                failure_type="algorithm_output_invalid",
+                message="output is missing or exceeds size limit",
+                stdout_path=result.stdout_path,
+                stderr_path=result.stderr_path,
+                metadata={"entrypoint": str(entrypoint)},
+            )
+        try:
+            raw = json.loads(output_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            return ProgramResult(
+                "failed",
+                validated.sha256,
+                failure_type="algorithm_output_invalid",
+                message=str(exc),
+                stdout_path=result.stdout_path,
+                stderr_path=result.stderr_path,
+                metadata={"entrypoint": str(entrypoint)},
+            )
+        return ProgramResult(
+            "success",
+            validated.sha256,
+            value=raw,
             stdout_path=result.stdout_path,
             stderr_path=result.stderr_path,
             metadata={
+                "entrypoint": str(entrypoint),
                 "offline_simulation": True,
                 "process_isolation": "python-isolated-process",
                 "runtime_audit": "deny-file-network-process-dynamic-code",

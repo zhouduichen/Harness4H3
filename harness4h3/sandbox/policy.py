@@ -31,7 +31,7 @@ def _root_name(node: ast.AST) -> str | None:
     return current.id if isinstance(current, ast.Name) else None
 
 
-def validate_source(source: str) -> ValidatedSource:
+def validate_source(source: str, required_entrypoint: str = "propose") -> ValidatedSource:
     if not isinstance(source, str) or not source.strip():
         raise SourcePolicyError("source must be non-empty text")
     encoded = source.encode("utf-8")
@@ -71,7 +71,10 @@ def validate_source(source: str) -> ValidatedSource:
             raise SourcePolicyError("forbidden_name: %s" % node.id)
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             raise SourcePolicyError("forbidden_scope_declaration")
-    if "propose" not in functions:
-        raise SourcePolicyError("missing_entrypoint: propose")
+    entrypoint = str(required_entrypoint).strip()
+    if not entrypoint or not entrypoint.isidentifier():
+        raise SourcePolicyError("invalid_entrypoint: %s" % required_entrypoint)
+    if entrypoint not in functions:
+        raise SourcePolicyError("missing_entrypoint: %s" % entrypoint)
     digest = hashlib.sha256(encoded).hexdigest()
     return ValidatedSource(source, digest, tuple(functions))
