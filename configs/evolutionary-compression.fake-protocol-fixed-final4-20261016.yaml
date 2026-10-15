@@ -1,0 +1,22 @@
+backend: fake
+checkpoint: fake://baseline
+output_root: ../var/evolutionary-compression-fake-fixed-final4-20261016
+device: cpu
+dtype: float32
+local_files_only: true
+fake:
+  block_count: 5
+  hidden_size: 8
+  ffn_width: 16
+  seed: 7
+sandbox_timeout_s: 10
+exploit_ratio: 1.0
+seed: 7
+advanced_profiling: true
+memory_enabled: false
+adapt_search_policy: false
+algorithm_improvement: false
+search_space_evolution: false
+candidate_screening: true
+controller:
+  provider: deterministic

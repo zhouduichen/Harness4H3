@@ -58,6 +58,28 @@ class TokenMergePolicy:
 
 
 @dataclass(frozen=True)
+class KVTokenSelectionPolicy:
+    """Keep full queries while selecting a smaller Self-Attention K/V set."""
+
+    keep_ratio: float
+    block_ids: tuple[str, ...] = ()
+    score: str = "l2_norm"
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "KVTokenSelectionPolicy":
+        block_ids = raw.get("block_ids", [])
+        if not isinstance(block_ids, (list, tuple)) or not all(isinstance(item, str) for item in block_ids):
+            raise ValueError("kv_token_select.block_ids must be a list of strings")
+        score = str(raw.get("score", "l2_norm"))
+        if score not in {"l2_norm", "mean_abs"}:
+            raise ValueError("unsupported KV token selection score")
+        return cls(_ratio(raw.get("keep_ratio"), "kv_token_select.keep_ratio"), tuple(block_ids), score)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**asdict(self), "block_ids": list(self.block_ids)}
+
+
+@dataclass(frozen=True)
 class SparseRuntimePolicy:
     keep_ratio: float
     attention: str = "attn1"

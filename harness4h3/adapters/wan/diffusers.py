@@ -11,7 +11,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange
 from .attention import prune_attention_module_heads
 from ...operators.wan.runtime_gating import normalized_timesteps, rule_matches, rules_to_dict, validate_timestep_gate_plan
-from ...operators.wan.runtime_policy import AttentionWindowPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
+from ...operators.wan.runtime_policy import AttentionWindowPolicy, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
 
 
 def _torch_modules() -> tuple[Any, Any]:
@@ -139,6 +139,15 @@ def _merge_token_sequence(hidden_states: Any, keep_ratio: float, torch: Any) -> 
         for group in range(target):
             anchors[group] = positions[source_groups == group][0]
     return merged, source_groups, anchors
+
+
+def _select_kv_indices(hidden_states: Any, keep_ratio: float, score: str, torch: Any) -> Any:
+    """Select one shared K/V index set from a batch for RoPE-compatible gather."""
+
+    count = max(1, min(int(hidden_states.shape[1]), int(round(int(hidden_states.shape[1]) * float(keep_ratio)))))
+    values = hidden_states.detach().float()
+    scores = values.pow(2).mean(dim=(0, 2)) if score == "l2_norm" else values.abs().mean(dim=(0, 2))
+    return torch.topk(scores, count).indices.sort().values
 
 
 def _apply_wan_rotary(hidden_states: Any, rotary_emb: Any) -> Any:
@@ -375,6 +384,8 @@ class DiffusersWanAdapter:
                     self.apply_token_sparsity(pipe, args)
                 elif operator == "token_merge":
                     self.apply_token_merge(pipe, args)
+                elif operator == "kv_token_select":
+                    self.apply_kv_token_selection(pipe, args)
                 elif operator == "sparse_runtime":
                     self.apply_sparse_runtime(pipe, args)
                 elif operator == "attention_window":
@@ -395,6 +406,9 @@ class DiffusersWanAdapter:
             token_merge_policy = getattr(config, "harness4h3_token_merge", None)
             if token_merge_policy:
                 self.apply_token_merge(pipe, token_merge_policy)
+            kv_policy = getattr(config, "harness4h3_kv_token_selection", None)
+            if kv_policy:
+                self.apply_kv_token_selection(pipe, kv_policy)
             sparse_policy = getattr(config, "harness4h3_sparse_runtime", None)
             if sparse_policy:
                 self.apply_sparse_runtime(pipe, sparse_policy)
@@ -431,7 +445,28 @@ class DiffusersWanAdapter:
         digest = getattr(model, "_harness4h3_checkpoint_sha256", None)
         if not digest:
             digest = hashlib.sha256(json.dumps(sorted(transformer.state_dict().keys())).encode("utf-8")).hexdigest()
-        return ModelStructure(self.architecture_name, len(blocks), hidden, max(widths), _param_count(transformer), digest, {"block_path": path, "ffn_widths": widths, "offline_simulation": False, "profile_device": self._device, "profile_dtype": self._dtype})
+        return ModelStructure(
+            self.architecture_name,
+            len(blocks),
+            hidden,
+            max(widths),
+            _param_count(transformer),
+            digest,
+            {
+                "block_path": path,
+                "ffn_widths": widths,
+                "offline_simulation": False,
+                "profile_device": self._device,
+                "profile_dtype": self._dtype,
+                "token_sparsity_policy": dict(getattr(transformer, "_harness4h3_token_sparsity_policy", {}) or {}),
+                "token_merge_policy": dict(getattr(transformer, "_harness4h3_token_merge_policy", {}) or {}),
+                "kv_token_selection_policy": dict(getattr(transformer, "_harness4h3_kv_token_selection_policy", {}) or {}),
+                "sparse_runtime_policy": dict(getattr(transformer, "_harness4h3_sparse_runtime_policy", {}) or {}),
+                "attention_window_policy": dict(getattr(transformer, "_harness4h3_attention_window_policy", {}) or {}),
+                "sampling_step_policy": dict(getattr(transformer, "_harness4h3_sampling_step_policy", {}) or {}),
+                "runtime_operations": [dict(item) for item in getattr(transformer, "_harness4h3_runtime_operations", []) or []],
+            },
+        )
 
     def get_blocks(self, model: Any) -> tuple[BlockRef, ...]:
         path, blocks = self._blocks(model)
@@ -639,6 +674,63 @@ class DiffusersWanAdapter:
         _record_runtime_operation(transformer, "token_merge", parsed.to_dict())
         return StructuralChange("runtime_token_merge", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0, "unmerge": True})
 
+    def apply_kv_token_selection(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
+        torch, _ = _torch_modules()
+        parsed = KVTokenSelectionPolicy.from_mapping(policy)
+        transformer = self._transformer(model)
+        if getattr(transformer, "_harness4h3_token_merge_policy", None):
+            raise ValueError("incompatible_runtime_attention_composition: kv_token_select and token_merge")
+        if getattr(transformer, "_harness4h3_attention_window_policy", None):
+            raise ValueError("incompatible_runtime_attention_composition: kv_token_select and attention_window")
+        _register_config(transformer, "harness4h3_kv_token_selection", parsed.to_dict())
+        transformer._harness4h3_kv_token_selection_policy = parsed.to_dict()
+        transformer._harness4h3_kv_token_selection_stats = {
+            "query_tokens": 0,
+            "full_kv_tokens": 0,
+            "selected_kv_tokens": 0,
+            "calls": 0,
+            "last_indices": [],
+        }
+        _path, blocks = self._blocks(model)
+        # If sparse_runtime was installed first, its wrapper is the combined
+        # execution point.  It reads this policy and applies one K/V gather;
+        # adding another wrapper would silently replace the operation order.
+        if getattr(transformer, "_harness4h3_sparse_runtime_policy", None):
+            _record_runtime_operation(transformer, "kv_token_select", parsed.to_dict())
+            return StructuralChange("runtime_kv_token_selection", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0, "full_query_length_preserved": True, "combined_with_sparse_runtime": True})
+        for index, block in enumerate(blocks):
+            block_id = "block.%d" % index
+            attention = getattr(block, "attn1", None)
+            if attention is None or hasattr(attention, "_harness4h3_kv_token_base_forward"):
+                continue
+            base = attention.forward
+
+            def kv_forward(attention_self: Any, hidden_states: Any, encoder_hidden_states: Any = None, attention_mask: Any = None, rotary_emb: Any = None, *args: Any, _block_id: str = block_id, _base: Any = base, **kwargs: Any) -> Any:
+                active = getattr(transformer, "_harness4h3_kv_token_selection_policy", parsed.to_dict())
+                if (
+                    encoder_hidden_states is not None
+                    or attention_mask is not None
+                    or hidden_states.ndim < 3
+                    or hidden_states.shape[1] <= 1
+                    or (active.get("block_ids") and _block_id not in active["block_ids"])
+                ):
+                    return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
+                indices = _select_kv_indices(hidden_states, float(active["keep_ratio"]), str(active.get("score", "l2_norm")), torch)
+                keys = hidden_states.index_select(1, indices)
+                output = _wan_sparse_self_attention(attention_self, hidden_states, keys, indices, rotary_emb, torch)
+                stats = transformer._harness4h3_kv_token_selection_stats
+                stats["query_tokens"] += int(hidden_states.shape[1])
+                stats["full_kv_tokens"] += int(hidden_states.shape[1])
+                stats["selected_kv_tokens"] += int(indices.numel())
+                stats["calls"] += 1
+                stats["last_indices"] = indices.detach().cpu().tolist()
+                return output
+
+            attention._harness4h3_kv_token_base_forward = base
+            attention.forward = MethodType(kv_forward, attention)
+        _record_runtime_operation(transformer, "kv_token_select", parsed.to_dict())
+        return StructuralChange("runtime_kv_token_selection", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0, "full_query_length_preserved": True})
+
     def apply_sparse_runtime(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
         torch, _ = _torch_modules()
         parsed = SparseRuntimePolicy.from_mapping(policy)
@@ -659,9 +751,10 @@ class DiffusersWanAdapter:
                 active = getattr(transformer, "_harness4h3_sparse_runtime_policy", parsed.to_dict())
                 if encoder_hidden_states is not None or hidden_states.ndim < 3 or hidden_states.shape[1] <= 1:
                     return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
-                count = max(1, min(int(hidden_states.shape[1]), int(round(float(hidden_states.shape[1]) * float(active["keep_ratio"])))) )
-                scores = hidden_states.detach().float().pow(2).mean(dim=(0, 2))
-                indices = torch.topk(scores, count).indices.sort().values
+                kv_policy = getattr(transformer, "_harness4h3_kv_token_selection_policy", None)
+                keep_ratio = min(float(active["keep_ratio"]), float(kv_policy["keep_ratio"])) if kv_policy else float(active["keep_ratio"])
+                score = str(kv_policy.get("score", active.get("score", "l2_norm"))) if kv_policy else str(active.get("score", "l2_norm"))
+                indices = _select_kv_indices(hidden_states, keep_ratio, score, torch)
                 keys = hidden_states.index_select(1, indices)
                 # Keep full Q, reduce K/V, and slice K's original RoPE
                 # positions independently.  Calling the stock processor with
@@ -669,7 +762,7 @@ class DiffusersWanAdapter:
                 # RoPE for the sparse branch.
                 result = _wan_sparse_self_attention(attention_self, hidden_states, keys, indices, rotary_emb, torch)
                 transformer._harness4h3_sparse_runtime_stats["full_tokens"] += int(hidden_states.shape[1])
-                transformer._harness4h3_sparse_runtime_stats["selected_tokens"] += int(count)
+                transformer._harness4h3_sparse_runtime_stats["selected_tokens"] += int(indices.numel())
                 return result
 
             attention._harness4h3_sparse_base_forward = base
@@ -797,6 +890,7 @@ class DiffusersWanAdapter:
                 total += 4.0 * heads * head_dim * 64.0 * 64.0
         token_policy = getattr(transformer, "_harness4h3_token_sparsity_policy", {})
         token_merge_policy = getattr(transformer, "_harness4h3_token_merge_policy", {})
+        kv_policy = getattr(transformer, "_harness4h3_kv_token_selection_policy", {})
         sparse_policy = getattr(transformer, "_harness4h3_sparse_runtime_policy", {})
         window_policy = getattr(transformer, "_harness4h3_attention_window_policy", {})
         sampling_policy = getattr(transformer, "_harness4h3_sampling_step_policy", {})
@@ -804,6 +898,8 @@ class DiffusersWanAdapter:
             total *= float(token_policy.get("keep_ratio", 1.0))
         if token_merge_policy:
             total *= float(token_merge_policy.get("keep_ratio", 1.0)) ** 2
+        if kv_policy:
+            total *= float(kv_policy.get("keep_ratio", 1.0))
         if sparse_policy:
             total *= float(sparse_policy.get("keep_ratio", 1.0))
         if window_policy:

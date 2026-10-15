@@ -23,6 +23,7 @@ def _parent(tmp_path):
         ("prune_heads", {"head_indices": [0]}),
         ("prune_tokens", {"keep_ratio": 0.5}),
         ("token_merge", {"keep_ratio": 0.5, "mode": "adjacent"}),
+        ("kv_token_select", {"keep_ratio": 0.5, "score": "l2_norm"}),
         ("sparse_runtime", {"keep_ratio": 0.5, "attention": "attn1"}),
         ("attention_window", {"window_size": 3, "attention": "attn1"}),
         ("sampling_step_skip", {"target_steps": 4}),
@@ -110,6 +111,53 @@ def test_token_merge_ratio_one_is_dense_equivalent():
         expected = plain.blocks[0].attn1(hidden)
         actual = merged.blocks[0].attn1(hidden)
     assert torch.equal(expected, actual)
+
+
+def test_kv_token_selection_keeps_full_queries_and_reduces_kv_after_reload(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "kv_token_select", adapter, parent, {"keep_ratio": 0.5, "score": "l2_norm"}, tmp_path / "kv-select"
+    )
+    assert result.status == "success", result.message
+    child = adapter.reload_model(result.child_checkpoint)
+    hidden = torch.randn(2, 7, 8)
+    with torch.no_grad():
+        output = child.blocks[0].attn1(hidden)
+    assert tuple(output.shape) == (2, 7, 8)
+    stats = child.blocks[0].attn1._harness4h3_kv_token_selection_stats
+    assert stats["query_tokens"] == 7
+    assert stats["full_kv_tokens"] == 7
+    assert stats["selected_kv_tokens"] == 4
+
+    targeted = adapter.load_model("fake://baseline")
+    adapter.apply_kv_token_selection(targeted, {"keep_ratio": 0.5, "block_ids": ["block.1"], "score": "l2_norm"})
+    with torch.no_grad():
+        targeted.blocks[0].attn1(torch.randn(1, 7, 8))
+        targeted.blocks[1].attn1(torch.randn(1, 7, 8))
+    assert not hasattr(targeted.blocks[0].attn1, "_harness4h3_kv_token_selection_stats")
+    assert targeted.blocks[1].attn1._harness4h3_kv_token_selection_stats["selected_kv_tokens"] == 4
+
+
+def test_kv_selection_and_sparse_runtime_compose_into_one_reduced_kv_path(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "compose",
+        adapter,
+        parent,
+        {
+            "steps": [
+                {"operator": "kv_token_select", "args": {"keep_ratio": 0.75, "score": "l2_norm"}},
+                {"operator": "sparse_runtime", "args": {"keep_ratio": 0.5, "attention": "attn1"}},
+            ]
+        },
+        tmp_path / "kv-sparse",
+    )
+    assert result.status == "success", result.message
+    child = adapter.reload_model(result.child_checkpoint)
+    with torch.no_grad():
+        output = child.blocks[0].attn1(torch.randn(1, 8, 8))
+    assert tuple(output.shape) == (1, 8, 8)
+    assert child.blocks[0].attn1._harness4h3_sparse_stats["selected_tokens"] < 8
 
 
 def test_attention_window_rejects_cross_attention_and_sparse_composition(tmp_path):
@@ -201,6 +249,13 @@ def test_diffusers_wan_attention_contract_is_structurally_executable():
         merge_output = merge_model.blocks[0].attn1(torch.randn(1, 5, 8), None, None, rotary)
     assert tuple(merge_output.shape) == (1, 5, 8)
     assert merge_model._harness4h3_token_merge_stats["merged_tokens"] == 2
+
+    kv_model = TinyWan()
+    adapter.apply_kv_token_selection(kv_model, {"keep_ratio": 0.5, "score": "l2_norm"})
+    with torch.no_grad():
+        kv_output = kv_model.blocks[0].attn1(torch.randn(1, 5, 8), None, None, rotary)
+    assert tuple(kv_output.shape) == (1, 5, 8)
+    assert kv_model._harness4h3_kv_token_selection_stats["selected_kv_tokens"] == 2
 
     window_model = TinyWan()
     adapter.apply_attention_window(window_model, {"window_size": 2, "attention": "attn1"})

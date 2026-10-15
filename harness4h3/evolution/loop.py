@@ -2274,6 +2274,8 @@ class EvolutionLoop:
                     continue
                 if operator in {"prune_tokens", "sparse_runtime"}:
                     runtime_ratio *= float(args.get("keep_ratio", 1.0))
+                elif operator == "kv_token_select":
+                    runtime_ratio *= float(args.get("keep_ratio", 1.0))
                 elif operator == "token_merge":
                     runtime_ratio *= float(args.get("keep_ratio", 1.0)) ** 2
                 elif operator == "attention_window":
