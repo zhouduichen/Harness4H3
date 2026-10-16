@@ -12,6 +12,7 @@ def test_evolution_features_are_default_off(tmp_path):
     assert config.search_space_evolution is False
     assert config.frozen_expanded_search_space is False
     assert config.candidate_screening is False
+    assert config.channel_method == "weight"
 
 
 def test_evolution_features_can_be_enabled_independently(tmp_path):
@@ -47,6 +48,18 @@ def test_frozen_expanded_search_space_is_a_distinct_mode(tmp_path):
     config = CompressionConfig.from_path(path)
     assert config.frozen_expanded_search_space is True
     assert config.search_space_evolution is False
+
+
+def test_channel_method_can_enable_real_ffn_output_perturbation(tmp_path):
+    path = tmp_path / "compression.yaml"
+    path.write_text(
+        "backend: fake\ncheckpoint: fake://baseline\nchannel_method: output_perturbation\n",
+        encoding="utf-8",
+    )
+
+    config = CompressionConfig.from_path(path)
+
+    assert config.channel_method == "output_perturbation"
 
 
 def test_tica_split_manifest_paths_are_resolved_independently(tmp_path):

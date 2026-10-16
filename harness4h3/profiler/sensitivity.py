@@ -4,6 +4,7 @@ import copy
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from ..adapters.wan.contracts import ChannelPruningConfig, WanModelAdapter
+from ..adapters.wan.attention import clone_head_surgery
 
 
 def _distance(left: Any, right: Any) -> Optional[float]:
@@ -132,6 +133,112 @@ class WeightContributionMethod:
         )
 
 
+def _profile_forward(adapter: Any, model: Any, sample: Any, forward_fn: Optional[Callable[[Any, Any], Any]]) -> Any:
+    if forward_fn is not None:
+        return forward_fn(model, sample)
+    adapter_forward = getattr(adapter, "forward_profile", None)
+    if callable(adapter_forward):
+        return adapter_forward(model, sample)
+    return _forward(model, sample, None)
+
+
+class OutputPerturbationMethod:
+    """Measure FFN channel leave-out deltas through the real model forward."""
+
+    name = "output_perturbation"
+
+    def __init__(self, adapter: Any, forward_fn: Optional[Callable[[Any, Any], Any]] = None) -> None:
+        self.adapter = adapter
+        self.forward_fn = forward_fn
+
+    @staticmethod
+    def _zero_channel(channel: int) -> Callable[[Any, Any, Any], Any]:
+        def hook(_module: Any, _inputs: Any, output: Any) -> Any:
+            try:
+                import torch
+
+                if not isinstance(output, torch.Tensor) or output.ndim < 1:
+                    raise TypeError("ffn_output_is_not_tensor")
+                if int(output.shape[-1]) <= int(channel):
+                    raise ValueError("ffn_output_channel_out_of_range")
+                changed = output.clone()
+                changed[..., int(channel)] = 0
+                return changed
+            except ImportError as exc:  # pragma: no cover - torch is an adapter dependency
+                raise RuntimeError("channel output perturbation requires torch") from exc
+
+        return hook
+
+    def measure(
+        self,
+        adapter: WanModelAdapter,
+        model: Any,
+        block: Any,
+        channel_indices: Sequence[int],
+        samples: Sequence[Any],
+    ) -> tuple[Mapping[str, Any], ...]:
+        del adapter
+        module = _resolve(model, str(block.module_path))
+        up, _down = _paired_ffn(module)
+        offline = bool(self.adapter.inspect(model).metadata.get("offline_simulation", False))
+        if not samples:
+            return tuple({
+                "channel": int(channel),
+                "importance_score": None,
+                "available": False,
+                "method": self.name,
+                "approximation": False,
+                "sample_count": 0,
+                "evidence": _evidence("unavailable", self.name, offline, "sample_set_unavailable"),
+                "score_semantics": "unavailable",
+            } for channel in channel_indices)
+
+        records: list[Mapping[str, Any]] = []
+        for channel in channel_indices:
+            scores: list[float] = []
+            for sample in samples:
+                try:
+                    base = _profile_forward(self.adapter, model, sample, self.forward_fn)
+                    if base is None:
+                        continue
+                    register = getattr(up, "register_forward_hook", None)
+                    if not callable(register):
+                        raise AttributeError("ffn_output_hook_unavailable")
+                    handle = register(self._zero_channel(int(channel)))
+                    try:
+                        modified = _profile_forward(self.adapter, model, sample, self.forward_fn)
+                    finally:
+                        handle.remove()
+                    score = _distance(base, modified)
+                    if score is not None:
+                        scores.append(float(score))
+                except (RuntimeError, TypeError, ValueError, AttributeError):
+                    continue
+            if scores:
+                records.append({
+                    "channel": int(channel),
+                    "importance_score": float(sum(scores) / len(scores)),
+                    "available": True,
+                    "method": self.name,
+                    "approximation": False,
+                    "sample_count": len(scores),
+                    "evidence": _evidence("estimated" if offline else "measured", self.name, offline),
+                    "score_semantics": "mean_absolute_model_output_difference_after_zeroing_ffn_channel",
+                })
+            else:
+                records.append({
+                    "channel": int(channel),
+                    "importance_score": None,
+                    "available": False,
+                    "method": self.name,
+                    "approximation": False,
+                    "sample_count": 0,
+                    "evidence": _evidence("unavailable", self.name, offline, "forward_or_output_probe_unavailable"),
+                    "score_semantics": "unavailable",
+                })
+        return tuple(records)
+
+
 class UnavailableImportanceMethod:
     def __init__(self, name: str, reason: str) -> None:
         self.name = str(name)
@@ -158,14 +265,21 @@ class UnavailableImportanceMethod:
         )
 
 
-def _channel_method(method: str) -> ChannelImportanceMethod:
+def _channel_method(
+    method: str,
+    *,
+    adapter: Optional[WanModelAdapter] = None,
+    forward_fn: Optional[Callable[[Any, Any], Any]] = None,
+) -> ChannelImportanceMethod:
     normalized = str(method).strip().lower().replace("-", "_")
     if normalized in {"weight", "weight_proxy", "paired_ffn_weight_contribution"}:
         return WeightContributionMethod()
+    if normalized in {"output_perturbation", "output_probe", "perturbation"}:
+        if adapter is None:
+            return UnavailableImportanceMethod("output_perturbation", "adapter_required_for_output_probe")
+        return OutputPerturbationMethod(adapter, forward_fn)
     if normalized in {"activation", "activation_importance"}:
         return UnavailableImportanceMethod("activation", "activation_hook_not_declared_by_adapter")
-    if normalized in {"output_perturbation", "perturbation"}:
-        return UnavailableImportanceMethod("output_perturbation", "output_probe_not_declared_by_adapter")
     raise ValueError("unsupported_channel_importance_method: %s" % method)
 
 
@@ -178,12 +292,13 @@ def measure_channel_sensitivity(
     chunk_size: Optional[int] = None,
     sample_set: Sequence[Any] = (),
     full: bool = False,
+    forward_fn: Optional[Callable[[Any, Any], Any]] = None,
 ) -> tuple[Mapping[str, Any], ...]:
     if int(max_probes) <= 0:
         raise ValueError("max_probes must be positive")
     if chunk_size is not None and int(chunk_size) <= 0:
         raise ValueError("chunk_size must be positive")
-    importance_method = _channel_method(method)
+    importance_method = _channel_method(method, adapter=adapter, forward_fn=forward_fn)
     effective_chunk = max(1, int(chunk_size or max_probes))
     records = []
     for block in adapter.get_blocks(model):
@@ -198,6 +313,8 @@ def measure_channel_sensitivity(
                 values.extend(importance_method.measure(adapter, model, block, indices, sample_set))
             available = bool(values) and all(item.get("available") is True for item in values)
             evidence_status = "estimated" if importance_method.name == "weight_proxy" else "unavailable"
+            if importance_method.name == "output_perturbation":
+                evidence_status = "estimated" if bool(adapter.inspect(model).metadata.get("offline_simulation", False)) else "measured"
             records.append({
                 "block_id": block.block_id,
                 "width": width,
@@ -208,7 +325,7 @@ def measure_channel_sensitivity(
                 "full": bool(full),
                 "chunk_size": effective_chunk,
                 "evidence": _evidence(evidence_status, importance_method.name, bool(adapter.inspect(model).metadata.get("offline_simulation", False))),
-                "score_semantics": "paired_weight_absolute_mean_not_activation_perturbation" if importance_method.name == "weight_proxy" else "unavailable",
+                "score_semantics": "paired_weight_absolute_mean_not_activation_perturbation" if importance_method.name == "weight_proxy" else ("mean_absolute_model_output_difference_after_zeroing_ffn_channel" if importance_method.name == "output_perturbation" else "unavailable"),
             })
         except (AttributeError, IndexError, TypeError, RuntimeError, ValueError) as exc:
             records.append({
@@ -269,20 +386,222 @@ def _attention_module(block: Any, name: str) -> Any:
     return value
 
 
+def _sequence_probe(sample: Any) -> Any:
+    """Return an attention-shaped tensor, without treating raw Wan latents as one.
+
+    Diffusers Wan profiling samples are mappings containing a 5-D latent.  That
+    tensor is valid for the transformer, but it is not a valid direct input to
+    an individual attention module.  Only a 2-D/3-D hidden-state tensor is
+    accepted here; callers can therefore distinguish a measured attention
+    ablation from a structural proxy instead of silently flattening latents.
+    """
+
+    candidate = sample
+    if isinstance(candidate, Mapping):
+        for key in ("hidden_states", "sample", "input", "x"):
+            value = candidate.get(key)
+            if value is not None:
+                candidate = value
+                break
+    rank = getattr(candidate, "ndim", None)
+    if rank not in {2, 3}:
+        return None
+    return candidate
+
+
+def _call_attention_probe(attention: Any, sample: Any, forward_fn: Optional[Callable[[Any, Any], Any]]) -> Any:
+    if sample is None or not callable(attention):
+        return None
+    try:
+        import torch
+
+        with torch.no_grad():
+            if forward_fn is not None:
+                return forward_fn(attention, sample)
+            return attention(sample)
+    except (RuntimeError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _call_model_probe(model: Any, sample: Any, forward_fn: Optional[Callable[[Any, Any], Any]]) -> Any:
+    if sample is None:
+        return None
+    try:
+        import torch
+
+        with torch.no_grad():
+            if forward_fn is not None:
+                return forward_fn(model, sample)
+            return _forward(model, sample, None)
+    except (RuntimeError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _attention_output_ablation(
+    attention: Any,
+    sample: Any,
+    heads: int,
+    *,
+    forward_fn: Optional[Callable[[Any, Any], Any]] = None,
+) -> tuple[Mapping[str, Any], ...]:
+    """Measure one-head leave-out deltas using a copied executable module."""
+
+    was_training = bool(getattr(attention, "training", False))
+    evaluation = getattr(attention, "eval", None)
+    if callable(evaluation):
+        evaluation()
+    try:
+        base = _call_attention_probe(attention, sample, forward_fn)
+        if base is None:
+            raise ValueError("attention_forward_unavailable")
+        values: list[Mapping[str, Any]] = []
+        for head in range(int(heads)):
+            candidate, surgery = clone_head_surgery(attention, (head,))
+            candidate_eval = getattr(candidate, "eval", None)
+            if callable(candidate_eval):
+                candidate_eval()
+            modified = _call_attention_probe(candidate, sample, forward_fn)
+            score = _distance(base, modified)
+            if score is None:
+                raise ValueError("attention_output_shape_unavailable")
+            values.append({
+                "head": int(head),
+                "importance_score": score,
+                "available": True,
+                "method": "attention_output_ablation",
+                "approximation": False,
+                "surgery": surgery,
+                "score_semantics": "mean_absolute_attention_output_difference",
+            })
+        return tuple(values)
+    finally:
+        if was_training:
+            train = getattr(attention, "train", None)
+            if callable(train):
+                train()
+
+
+def _captured_attention_output_ablation(
+    model: Any,
+    attention: Any,
+    sample: Any,
+    heads: int,
+    *,
+    model_forward_fn: Callable[[Any, Any], Any],
+) -> tuple[Mapping[str, Any], ...]:
+    """Run one model forward, then probe copied heads on captured real inputs.
+
+    This keeps raw Wan latent profiling practical: a 1.3B model is executed
+    once to capture each Attention's actual hidden/context/RoPE arguments, and
+    only the small Attention module is copied for each head probe.
+    """
+
+    captured: dict[str, Any] = {}
+
+    def pre_with_kwargs(_module: Any, args: Any, kwargs: Any) -> None:
+        captured["args"] = tuple(args)
+        captured["kwargs"] = dict(kwargs)
+
+    def pre_legacy(_module: Any, args: Any) -> None:
+        captured["args"] = tuple(args)
+        captured["kwargs"] = {}
+
+    def post(_module: Any, _inputs: Any, output: Any) -> None:
+        captured["output"] = output
+
+    register_pre = getattr(attention, "register_forward_pre_hook", None)
+    register_post = getattr(attention, "register_forward_hook", None)
+    if not callable(register_pre) or not callable(register_post):
+        raise AttributeError("attention_forward_hooks_unavailable")
+    try:
+        try:
+            pre_handle = register_pre(pre_with_kwargs, with_kwargs=True)
+        except TypeError:
+            pre_handle = register_pre(pre_legacy)
+        post_handle = register_post(post)
+        try:
+            _call_model_probe(model, sample, model_forward_fn)
+        finally:
+            pre_handle.remove()
+            post_handle.remove()
+    except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("attention_input_capture_failed:%s" % type(exc).__name__) from exc
+    if "args" not in captured or "output" not in captured:
+        raise ValueError("attention_input_capture_empty")
+
+    base = captured["output"]
+    args = tuple(captured["args"])
+    kwargs = dict(captured.get("kwargs", {}))
+    values: list[Mapping[str, Any]] = []
+    for head in range(int(heads)):
+        candidate, surgery = clone_head_surgery(attention, (head,))
+        candidate_eval = getattr(candidate, "eval", None)
+        if callable(candidate_eval):
+            candidate_eval()
+        try:
+            import torch
+
+            with torch.no_grad():
+                modified = candidate(*args, **kwargs)
+        except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("attention_candidate_forward_failed:%s" % type(exc).__name__) from exc
+        score = _distance(base, modified)
+        if score is None:
+            raise ValueError("attention_output_shape_unavailable")
+        values.append({
+            "head": int(head),
+            "importance_score": score,
+            "available": True,
+            "method": "attention_output_ablation",
+            "approximation": False,
+            "input_source": "captured_from_model_forward",
+            "surgery": surgery,
+            "score_semantics": "mean_absolute_attention_output_difference",
+        })
+    return tuple(values)
+
+
+def _attention_qkv_weights(attention: Any) -> tuple[Any, Any, Any]:
+    projections = tuple(getattr(attention, name, None) for name in ("to_q", "to_k", "to_v"))
+    if all(item is not None and hasattr(item, "weight") for item in projections):
+        return tuple(item.weight.detach().float() for item in projections)  # type: ignore[union-attr]
+    fused = getattr(attention, "to_qkv", None)
+    if fused is None or not hasattr(fused, "weight"):
+        raise AttributeError("attention_qkv_projections_unavailable")
+    rows = int(fused.weight.shape[0])
+    if rows <= 0 or rows % 3:
+        raise ValueError("fused_attention_projection_not_qkv_aligned")
+    return tuple(fused.weight.detach().float().chunk(3, dim=0))  # type: ignore[return-value]
+
+
 def measure_head_sensitivity(
     adapter: WanModelAdapter,
     model: Any,
     *,
     attention_name: str = "attn1",
+    sample: Any = None,
+    method: str = "output_ablation",
+    forward_fn: Optional[Callable[[Any, Any], Any]] = None,
+    model_forward_fn: Optional[Callable[[Any, Any], Any]] = None,
 ) -> tuple[Mapping[str, Any], ...]:
-    """Rank heads from their paired Q/K/V contribution, without fake zeros.
+    """Rank heads from executable attention ablation when a sequence is available.
 
-    A real Wan checkpoint cannot be deep-copied safely at 1.3B scale.  The
-    projection contribution is therefore a measured structural proxy and is
-    labelled as such; the execution operator later validates the selected
-    heads by real reload and evaluation.
+    The copied object is one attention module, not the 1.3B model.  Raw Wan
+    latent profiling samples cannot be passed to an individual attention
+    module, so those cases capture its real arguments during one full model
+    forward and probe copied Attention modules with those arguments when
+    ``model_forward_fn`` is provided; only unsupported layouts fall back to
+    the paired Q/K/V projection proxy.
     """
 
+    normalized_method = str(method).strip().lower().replace("-", "_")
+    if normalized_method in {"output_ablation", "attention_output_ablation", "perturbation"}:
+        normalized_method = "output_ablation"
+    elif normalized_method in {"projection_proxy", "qkv_projection_contribution", "weight_proxy"}:
+        normalized_method = "projection_proxy"
+    else:
+        raise ValueError("unsupported_head_importance_method: %s" % method)
+    sequence = _sequence_probe(sample) if normalized_method == "output_ablation" else None
     offline = bool(adapter.inspect(model).metadata.get("offline_simulation", False))
     records: list[Mapping[str, Any]] = []
     for block in adapter.get_blocks(model):
@@ -294,9 +613,48 @@ def measure_head_sensitivity(
             if heads <= 0 or inner % heads:
                 raise ValueError("head geometry unavailable")
             width = inner // heads
-            q = attention.to_q.weight.detach().float()
-            k = attention.to_k.weight.detach().float()
-            v = attention.to_v.weight.detach().float()
+            fallback_reason = None
+            if normalized_method == "output_ablation" and sequence is not None:
+                try:
+                    ablated = _attention_output_ablation(
+                        attention,
+                        sequence,
+                        heads,
+                        forward_fn=forward_fn,
+                    )
+                    records.extend({
+                        "block_id": block.block_id,
+                        "attention": attention_name,
+                        "evidence": _evidence("estimated" if offline else "measured", "attention_output_ablation", offline),
+                        "input_fixed": True,
+                        **item,
+                    } for item in ablated)
+                    continue
+                except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+                    fallback_reason = "%s:%s" % (type(exc).__name__, str(exc))
+            elif normalized_method == "output_ablation":
+                if model_forward_fn is not None and sample is not None:
+                    try:
+                        ablated = _captured_attention_output_ablation(
+                            model,
+                            attention,
+                            sample,
+                            heads,
+                            model_forward_fn=model_forward_fn,
+                        )
+                        records.extend({
+                            "block_id": block.block_id,
+                            "attention": attention_name,
+                            "evidence": _evidence("estimated" if offline else "measured", "attention_output_ablation", offline),
+                            "input_fixed": True,
+                            **item,
+                        } for item in ablated)
+                        continue
+                    except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+                        fallback_reason = "%s:%s" % (type(exc).__name__, str(exc))
+                else:
+                    fallback_reason = "sequence_sample_unavailable"
+            q, k, v = _attention_qkv_weights(attention)
             for head in range(heads):
                 rows = slice(head * width, (head + 1) * width)
                 score = float(q[rows].abs().mean().item() + k[rows].abs().mean().item() + v[rows].abs().mean().item())
@@ -310,6 +668,7 @@ def measure_head_sensitivity(
                     "approximation": True,
                     "evidence": _evidence("estimated", "qkv_projection_contribution", offline),
                     "score_semantics": "mean_absolute_qkv_projection_weight",
+                    "fallback_reason": fallback_reason,
                 })
         except (AttributeError, IndexError, RuntimeError, TypeError, ValueError) as exc:
             records.append({
@@ -326,10 +685,27 @@ def measure_head_sensitivity(
     return tuple(records)
 
 
-def measure_attention_sensitivity(adapter: WanModelAdapter, model: Any, *, attention_names: Sequence[str] = ("attn1", "attn2")) -> tuple[Mapping[str, Any], ...]:
+def measure_attention_sensitivity(
+    adapter: WanModelAdapter,
+    model: Any,
+    *,
+    attention_names: Sequence[str] = ("attn1", "attn2"),
+    sample: Any = None,
+    method: str = "output_ablation",
+    forward_fn: Optional[Callable[[Any, Any], Any]] = None,
+    model_forward_fn: Optional[Callable[[Any, Any], Any]] = None,
+) -> tuple[Mapping[str, Any], ...]:
     records: list[Mapping[str, Any]] = []
     for name in attention_names:
-        rows = measure_head_sensitivity(adapter, model, attention_name=str(name))
+        rows = measure_head_sensitivity(
+            adapter,
+            model,
+            attention_name=str(name),
+            sample=sample,
+            method=method,
+            forward_fn=forward_fn,
+            model_forward_fn=model_forward_fn,
+        )
         records.extend(rows)
     return tuple(records)
 

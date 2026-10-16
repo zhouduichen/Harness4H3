@@ -294,6 +294,7 @@ def profile_model(
     advanced: bool = False,
     channel_method: str = "weight",
     channel_chunk_size: Optional[int] = None,
+    head_method: str = "output_ablation",
 ) -> ProfileReport:
     structure = adapter.inspect(model)
     calibration_samples = calibration.samples() if calibration is not None else ()
@@ -301,14 +302,16 @@ def profile_model(
     effective_forward = forward_fn or (lambda current_model, current_sample: _adapter_forward(adapter, current_model, current_sample))
     layers, timing = _profile_layers(adapter, model, sample=sample, forward_fn=effective_forward, measure_latency=measure_latency, seed=seed, latency_warmup=latency_warmup, latency_repeats=latency_repeats)
     block_sensitivity = measure_block_sensitivity(adapter, model, sample=sample, forward_fn=effective_forward)
+    channel_samples = tuple(item.payload for item in calibration_samples) or (sample,)
     channel_sensitivity = measure_channel_sensitivity(
         adapter,
         model,
         max_probes=max_channel_probes,
         method=channel_method,
         chunk_size=channel_chunk_size,
-        sample_set=tuple(item.payload for item in calibration_samples),
+        sample_set=channel_samples,
         full=bool(advanced),
+        forward_fn=effective_forward,
     )
     default_timestep = getattr(adapter, "forward_timestep_profile", None)
     if callable(default_timestep):
@@ -316,8 +319,20 @@ def profile_model(
     else:
         timestep_forward = timestep_fn or _default_timestep_forward
     timestep_sensitivity = measure_timestep_sensitivity(adapter, model, sample=sample, forward_fn=timestep_forward)
-    head_sensitivity = measure_head_sensitivity(adapter, model)
-    attention_sensitivity = measure_attention_sensitivity(adapter, model)
+    head_sensitivity = measure_head_sensitivity(
+        adapter,
+        model,
+        sample=sample,
+        method=head_method,
+        model_forward_fn=effective_forward,
+    )
+    attention_sensitivity = measure_attention_sensitivity(
+        adapter,
+        model,
+        sample=sample,
+        method=head_method,
+        model_forward_fn=effective_forward,
+    )
     token_sensitivity = measure_token_sensitivity(adapter, model, sample=sample)
     sampling_step_sensitivity = measure_sampling_step_sensitivity(adapter, model)
     offline = bool(structure.metadata.get("offline_simulation", False))

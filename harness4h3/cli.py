@@ -113,6 +113,7 @@ def cmd_profile_wan(args: argparse.Namespace) -> int:
         calibration=calibration,
         advanced=config.advanced_profiling,
         channel_chunk_size=16 if config.advanced_profiling else None,
+        channel_method=config.channel_method,
     )
     output = Path(args.output).resolve() if args.output else config.output_root / "profile.json"
     report.write_json(output)
@@ -125,7 +126,7 @@ def cmd_compress_wan(args: argparse.Namespace) -> int:
     adapter, parent = _compression_context(config)
     source = Path(args.algorithm).read_text(encoding="utf-8")
     sandbox = AlgorithmSandbox(config.output_root / "sandbox", timeout_s=config.sandbox_timeout_s)
-    profile = profile_model(adapter, adapter.reload_model(parent), seed=config.seed)
+    profile = profile_model(adapter, adapter.reload_model(parent), seed=config.seed, channel_method=config.channel_method)
     result = sandbox.run(source, profile.to_dict(), [])
     if result.status != "success" or result.plan is None:
         _emit({"status": "failed", "failure_type": result.failure_type, "message": result.message}, args.json)
@@ -230,6 +231,7 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         memory_enabled=config.memory_enabled,
         adapt_search_policy=config.adapt_search_policy,
         advanced_profiling=config.advanced_profiling,
+        channel_method=config.channel_method,
         algorithm_improvement=config.algorithm_improvement,
         search_space_evolution=config.search_space_evolution,
         frozen_expanded_search_space=config.frozen_expanded_search_space,

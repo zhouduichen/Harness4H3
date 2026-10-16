@@ -31,3 +31,32 @@ def test_unsupported_activation_method_is_unavailable_not_zero():
     assert all(row["available"] is False for row in rows)
     assert all(row["evidence"]["status"] == "unavailable" for row in rows)
     assert all(channel["importance_score"] is None for channel in rows[0]["channels"])
+
+
+def test_output_perturbation_channel_profile_measures_model_delta():
+    adapter = FakeWanDiTAdapter(block_count=2, hidden_size=8, ffn_width=10)
+    model = adapter.load_model("fake://baseline")
+    sample = adapter.profile_sample(model, seed=13)
+
+    rows = measure_channel_sensitivity(
+        adapter,
+        model,
+        max_probes=3,
+        method="output_perturbation",
+        sample_set=(sample,),
+        forward_fn=adapter.forward_profile,
+    )
+
+    assert all(row["available"] is True for row in rows)
+    assert all(channel["method"] == "output_perturbation" for row in rows for channel in row["channels"])
+    assert all(channel["approximation"] is False for row in rows for channel in row["channels"])
+    assert all(channel["importance_score"] is not None and channel["importance_score"] > 0.0 for row in rows for channel in row["channels"])
+    assert all(channel["score_semantics"] == "mean_absolute_model_output_difference_after_zeroing_ffn_channel" for row in rows for channel in row["channels"])
+
+
+def test_output_perturbation_without_samples_is_explicitly_unavailable():
+    adapter = FakeWanDiTAdapter(block_count=2, hidden_size=8, ffn_width=10)
+    rows = measure_channel_sensitivity(adapter, adapter.load_model("fake://baseline"), method="output_perturbation")
+
+    assert all(row["available"] is False for row in rows)
+    assert all(channel["evidence"]["reason"] == "sample_set_unavailable" for row in rows for channel in row["channels"])

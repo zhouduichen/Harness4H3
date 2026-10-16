@@ -73,6 +73,7 @@ class EvolutionLoop:
         adapt_search_policy: bool = True,
         promotion_policy: Optional[PromotionPolicy] = None,
         advanced_profiling: bool = False,
+        channel_method: str = "weight",
         algorithm_improvement: bool = False,
         search_space_evolution: bool = False,
         frozen_expanded_search_space: bool = False,
@@ -131,6 +132,7 @@ class EvolutionLoop:
         self.adapt_search_policy = bool(adapt_search_policy)
         self.promotion_policy = promotion_policy or PromotionPolicy()
         self.advanced_profiling = bool(advanced_profiling)
+        self.channel_method = str(channel_method).strip() or "weight"
         self.algorithm_improvement = bool(algorithm_improvement)
         self.search_space_evolution = bool(search_space_evolution)
         self.frozen_expanded_search_space = bool(frozen_expanded_search_space)
@@ -1286,9 +1288,10 @@ class EvolutionLoop:
                 calibration=calibration,
                 advanced=True,
                 channel_chunk_size=16,
+                channel_method=getattr(self, "channel_method", "weight"),
             )
         else:
-            profile = profile_model(self.adapter, model, seed=7)
+            profile = profile_model(self.adapter, model, seed=7, channel_method=getattr(self, "channel_method", "weight"))
         profile.write_json(path)
         return profile
 
@@ -2029,6 +2032,7 @@ class EvolutionLoop:
                 seed=seed,
                 advanced=self.advanced_profiling,
                 channel_chunk_size=16 if self.advanced_profiling else None,
+                channel_method=getattr(self, "channel_method", "weight"),
             ).to_dict()
         alternate = profile_model(
             self.adapter,
@@ -2036,6 +2040,7 @@ class EvolutionLoop:
             seed=seed + 1,
             advanced=self.advanced_profiling,
             channel_chunk_size=16 if self.advanced_profiling else None,
+            channel_method=getattr(self, "channel_method", "weight"),
         ).to_dict()
         if self.tica_prune:
             # Validation is an independent comparison/evaluation input.  It
