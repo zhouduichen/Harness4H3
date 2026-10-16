@@ -15,6 +15,7 @@ from harness4h3.operators.wan import (
     TimestepBlockGatingOperator,
     build_wan_compression_registry,
 )
+from harness4h3.operators.wan.search_space import _assert_finite
 
 
 def _parent(tmp_path):
@@ -33,6 +34,16 @@ def _threshold_spec():
         limitations=("weight_proxy_only", "not_real_wan_validated"),
         trusted_factory_key="prune_ffn_by_weight_threshold",
     )
+
+
+def test_finite_check_uses_transformer_for_diffusion_pipeline():
+    class PipelineLike:
+        parameters = {"pipeline_component": "not-an-iterator"}
+
+        def __init__(self):
+            self.transformer = torch.nn.Linear(2, 2)
+
+    _assert_finite(PipelineLike())
 
 
 def test_unvalidated_operator_is_described_but_not_executable(tmp_path):

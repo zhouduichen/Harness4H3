@@ -2,6 +2,44 @@
 
 本实验严格在远程 `ai4mbse-remote` 执行，本机没有下载 Wan 权重，也没有运行真实 Wan pipeline。
 
+## 最新：10 轮 Full RSI（2026-10-16/17）
+
+本节是当前验收批次；后文的首轮 smoke 和基础设施 smoke 是历史记录。
+
+- Code staging：`/home/intern/huangjiahao/Harness4H3-rsi/work/codex-algorithm-discovery-rsi-f082f19/`
+- Wan checkpoint：`/home/intern/hf_cache/hub/models--Wan-AI--Wan2.1-T2V-1.3B-Diffusers/snapshots/0fad780a534b6463e45facd96134c9f345acfa5b`
+- Output root：`/data/models/harness4h3-evolutionary-compression-20261016/remote-rsi-f082f19-20261016`
+- Device：`cuda:1`；GPU0 的 vLLM controller 未触碰
+- 命令：
+
+```bash
+HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 \
+/home/intern/miniconda3/envs/comfy/bin/python -m harness4h3 evolve-compression \
+  --config configs/evolutionary-compression.wan-remote-rsi-f082f19-20261016.yaml \
+  --rounds 10 --json
+```
+
+结果为 `failed_rounds=0`。R0001–R0010 全部完成 `algorithm → sandbox → validation → compression → evaluation → decision`，每轮 `evaluation_status=measured_video`、`offline_simulation=false`、`generation_device=cuda:1`；10 个算法 source hash 全部不同，A0001–A0010 均生成 M0001–M0010 子代。所有候选均被 promotion policy 拒绝，原因是质量/效率阈值未同时满足，而不是运行失败。
+
+最终被评测的计划在本批次交替出现 `prune_blocks` 和 `head_gating`。完整的候选搜索、递归 search 轨迹和其他多粒度算子保存在各轮 `algorithm-program-trace.json`、`algorithm-validation.json` 和 `decision.json` 中。真实视频示例可从 R0010 的 `evaluation.json` 路径字段取得；视频为 256×256×81、1 case、1 seed，并通过 visual-structure gate。
+
+### SearchSpace 修复与下一代传播
+
+原批次的 P0008（`timestep_block_gate`）曾被记录为 `"'dict' object is not callable"`。完整 traceback 显示错误发生在 `_assert_finite(reloaded)`：Diffusers pipeline 的 `parameters` 是 mapping，不能按 module iterator 调用。修复后改为在 pipeline 上检查 `transformer.parameters()`，并记录异常类型/traceback。
+
+修复后的定点远程验证：
+
+- 目录：`/data/models/harness4h3-evolutionary-compression-20261016/search-space-fix-smoke-S0002/`
+- P0008 在真实 Wan checkpoint 上保存/重载成功：`status=validated`、`child_reload_verified=true`、`dynamic_compute=true`、`parameter_reduction_ratio=0.0`。
+- 注册结果：`S0002`，从 S0001 的 13 个算子扩展到 14 个；runtime-only gate 不记录参数减少。
+- 下一代传播证据：`next-generation/algorithm-program-trace.json` 使用 A0010 source 和 R0010 profile 读取 `S0002`，14 个 operator 名称均进入 sandbox，并生成 `timestep_block_gate` 候选。
+
+S0002 验证是结构保存/重载和有限值检查，不冒充完整视频质量或专用 CUDA kernel 证据；10 轮 Full RSI 的 `measured_video` 结果承担视频级证据。
+
+本批次没有任何本机 Wan 权重或本机真实实验产物。
+
+## 历史：首轮真实结果
+
 ## 远程执行边界
 
 - Code staging：`/home/intern/huangjiahao/Harness4H3-rsi/work/codex-algorithm-discovery-rsi-254959e`
@@ -39,7 +77,7 @@ HF_HUB_OFFLINE=1 /home/intern/miniconda3/envs/comfy/bin/python -m harness4h3 evo
 
 `/data/models/harness4h3-evolutionary-compression-20261016/remote-rsi-gpu1-20261016/rounds/R0001/`
 
-## 后续 RSI（已按当前执行要求暂停）
+## 历史：后续 RSI（旧批次，已停止）
 
 首轮后曾短暂启动剩余 9 轮，但根据“先完成基础设施、只跑基础 smoke”的执行要求，已主动停止该长时进程。R0002 只保留 profiling/搜索中间产物，仍为 `in_progress`，没有最终 decision 或可用于晋升的独立视频证据；不把它计入完成轮次，也不继续复用它启动长跑。旧日志保留在：
 
@@ -47,7 +85,7 @@ HF_HUB_OFFLINE=1 /home/intern/miniconda3/envs/comfy/bin/python -m harness4h3 evo
 
 基础设施修复后的远程 staging revision 为 `c2788a5`（包含 `e826fd3` 的 runtime manifest replay 修复以及 Variant/Registry 恢复幂等性修复）。后续只允许使用 `configs/evolutionary-compression.wan-remote-infra-smoke-20261016.yaml` 的新独立 output root 执行单轮远程 smoke，确认 Variant/Registry/恢复链路后再由用户明确授权长跑。
 
-## 基础设施 smoke 结果
+## 历史：基础设施 smoke 结果
 
 使用上述配置通过非交互 SSH 在远程 GPU1 执行一轮，成功产物位于：
 
@@ -62,7 +100,7 @@ HF_HUB_OFFLINE=1 /home/intern/miniconda3/envs/comfy/bin/python -m harness4h3 evo
 
 本次远程真实配置暂未开启 TICA：远程主机未发现可用的真实 Wan calibration tensor manifest，因此不能伪造 TICA 证据。TICA 仍需单独准备远程 calibration/validation/test 缓存后再执行。
 
-## 多粒度 runtime 基础设施 smoke（`f082f19`）
+## 历史：多粒度 runtime 基础设施 smoke（`f082f19`）
 
 按“先完成基础设施、只跑短 smoke”的要求，未启动长时间 RSI。代码从
 `codex/algorithm-discovery-rsi` 的 `f082f19` 同步到新的远程 staging：

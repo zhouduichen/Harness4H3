@@ -27,7 +27,7 @@
 - Token 当前包含 Self-Attention 输入选择/恢复和 `token_merge` 路径；Token Selection 提供 `(T,H,W)` 网格下的逐帧 Anchor 保留，避免纯一维 top-k 丢失整帧；`token_merge` 同时支持兼容旧配置的 1-D adjacent 以及 `(T,H,W)` cuboid TokenMap，保存 anchor/group shape，在合并后的序列上执行 Attention，再 unmerge 回残差长度。三维专用 CUDA Kernel 仍未宣称完成。
 - FLOPs 为 adapter 的结构估计；真实性能结论必须使用 WanVideoEvaluator 的固定 GPU、Prompt、Seed、Scheduler 和 warm-up/repeat 结果。
 - 候选级 `runtime_execution` 是 post-forward trace，用于证明 Token/KV/Window/Timestep 等策略确实改变执行；GPU kernel、端到端延迟和显存仍由独立真实 Wan Evaluator 提供。
-- 最新 10 轮 Full RSI 重跑（`fake-rsi-final8-20261016`）返回 `failed_rounds=0`，SearchSpace 从 `S0001` 演化到 `S0003`；产物中的 Token/KV/Sparse/Timestep/Sampling 候选出现非零实际削减比例，说明 runtime trace 已由真实三维 mixed-timestep probe 触发，而非零值占位。
+- 远程 10 轮 Full RSI（见下节）返回 `failed_rounds=0`；R0001–R0010 均完成真实 Wan 视频评测，10 个算法 source hash 均不同。该批次在修复前运行，因此 SearchSpace 提案 P0001–P0008 均停留在 S0001，P0008 的拒绝原因是 Diffusers pipeline 的 finite-check 兼容性 bug，而不是新算子执行失败。
 
 ## 最新基础设施回归
 
@@ -36,6 +36,37 @@
 远程单轮 Wan smoke 和多粒度 runtime probe 均已在独立 output root 完成：`failed_rounds=0`、`offline_simulation=false`、真实视频与 visual-structure gate 均有效；Block 候选因质量/效率门槛未达标而 rejected，但 Token/Head/Sparse/Window 组合 probe 的真实执行统计均有效。远程证据详见 [`evolutionary-compression-wan-remote-20261016.md`](evolutionary-compression-wan-remote-20261016.md)。
 
 之前的 `1043 passed, 4 skipped` 和 CPU Fake RSI 结果保留为历史记录，不覆盖本次回归结果。
+
+## 远程 10 轮 Full RSI 与 SearchSpace 修复证据
+
+本次实验严格在 `ai4mbse-remote` 的 GPU1 执行，本机没有 Wan 权重。使用配置
+[`evolutionary-compression.wan-remote-rsi-f082f19-20261016.yaml`](../configs/evolutionary-compression.wan-remote-rsi-f082f19-20261016.yaml)
+运行：
+
+```bash
+HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 \
+python -m harness4h3 evolve-compression \
+  --config configs/evolutionary-compression.wan-remote-rsi-f082f19-20261016.yaml \
+  --rounds 10 --json
+```
+
+远端产物根目录为：
+`/data/models/harness4h3-evolutionary-compression-20261016/remote-rsi-f082f19-20261016/`。
+
+- R0001–R0010 全部终态为 `rejected`，但 `failed_rounds=0`；每轮都有 `algorithm.json`、程序轨迹、压缩、决策和 `evaluation.json`。
+- 每轮 `evaluation_status=measured_video`、`offline_simulation=false`、`generation_device=cuda:1`，视频为 256×256×81、1 case、1 seed，并通过 visual-structure gate。
+- 10 个算法 source hash 全部唯一，满足多代 Algorithm Evolution；每轮的模型子代 M0001–M0010 均实际生成并评测，但没有达到 promotion 的质量/延迟/显存/模型大小阈值，因此没有被晋级。
+- 真实评测中实际被选为最终计划的算子包括 `prune_blocks` 和 `head_gating`；多粒度候选搜索仍在每轮的 algorithm validation/search trace 中执行，不能把最终未晋级误认为路径未执行。
+
+该批次发现了 SearchSpace 验证 bug：真实 Diffusers `DiffusionPipeline` 的 `parameters` 在当前版本是 mapping，旧代码调用 `model.parameters()`，导致 P0008 被记录为 `"'dict' object is not callable"`。修复后 `_assert_finite` 在 pipeline 上回退到 `pipeline.transformer.parameters()`，并保留异常类型/traceback 以便后续审计。
+
+修复后的远程定点验证目录为：
+`/data/models/harness4h3-evolutionary-compression-20261016/search-space-fix-smoke-S0002/`。
+
+- P0008 在真实 Wan 父检查点上完成保存、重载和 finite 检查，`status=validated`、`child_reload_verified=true`、`dynamic_compute=true`、`parameter_reduction_ratio=0.0`。
+- P0008 注册为 `S0002`，算子数从 13 增加到 14，保留 runtime-only 的参数收益为 0。
+- `next-generation/algorithm-program-trace.json` 用 A0010 的 search 源码和 R0010 profile 读取 S0002，明确记录 `search_space_version=S0002`、14 个 operator 名称，并生成了 `timestep_block_gate` 候选；这闭合了“提案→验证→注册→下一代使用”的链路。
+- 该 S0002 smoke 是真实 Wan 结构保存/重载验证，不冒充完整视频质量或 GPU kernel 加速证据；完整视频证据来自上述 10 轮真实 evaluator。
 
 ## 历史测试证据
 

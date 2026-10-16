@@ -8,6 +8,7 @@ import importlib
 import os
 import tempfile
 import time
+import traceback
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -503,7 +504,13 @@ class SearchSpaceManager:
                 base,
                 status="rejected",
                 rejection_reason=str(exc),
-                validation={"status": "rejected", "elapsed_s": time.monotonic() - started, "offline_simulation": True},
+                validation={
+                    "status": "rejected",
+                    "elapsed_s": time.monotonic() - started,
+                    "offline_simulation": True,
+                    "exception_type": type(exc).__name__,
+                    "traceback": traceback.format_exc(),
+                },
             )
         return self.store.write_proposal(validated)
 
@@ -677,7 +684,16 @@ def _channel_scores(adapter: WanModelAdapter, model: Any, block_ids: Sequence[st
 
 
 def _assert_finite(model: Any) -> None:
-    for parameter in model.parameters():
+    parameters = getattr(model, "parameters", None)
+    if not callable(parameters):
+        # DiffusionPipeline exposes a mapping named ``parameters`` in some
+        # Diffusers releases.  Search-space validation is concerned with the
+        # executable Wan transformer, so fall back to its module iterator.
+        transformer = getattr(model, "transformer", None)
+        parameters = getattr(transformer, "parameters", None)
+    if not callable(parameters):
+        raise TypeError("model_parameters_iterator_unavailable")
+    for parameter in parameters():
         if not bool(parameter.detach().isfinite().all()):
             raise ValueError("model_integrity_failed: non-finite parameter")
 
