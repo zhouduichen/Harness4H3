@@ -32,6 +32,8 @@
 
 在 `c2788a5` 上，基础设施修复后的本地全量回归为 `1052 passed, 4 skipped`。4 个 skip 仍是本机未提供真实 Wan checkpoint、CUDA 或 CUDA RNG parity 条件；真实 Wan smoke 只在远程执行。
 
+远程单轮 Wan smoke 已在独立 output root 完成：`failed_rounds=0`、`offline_simulation=false`、真实视频与 visual-structure gate 均有效；候选因质量/效率门槛未达标而 rejected。远程证据详见 [`evolutionary-compression-wan-remote-20261016.md`](evolutionary-compression-wan-remote-20261016.md)。
+
 之前的 `1043 passed, 4 skipped` 和 CPU Fake RSI 结果保留为历史记录，不覆盖本次回归结果。
 
 ## 历史测试证据

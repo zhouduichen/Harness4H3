@@ -47,4 +47,17 @@ HF_HUB_OFFLINE=1 /home/intern/miniconda3/envs/comfy/bin/python -m harness4h3 evo
 
 基础设施修复后的远程 staging revision 为 `c2788a5`（包含 `e826fd3` 的 runtime manifest replay 修复以及 Variant/Registry 恢复幂等性修复）。后续只允许使用 `configs/evolutionary-compression.wan-remote-infra-smoke-20261016.yaml` 的新独立 output root 执行单轮远程 smoke，确认 Variant/Registry/恢复链路后再由用户明确授权长跑。
 
+## 基础设施 smoke 结果
+
+使用上述配置通过非交互 SSH 在远程 GPU1 执行一轮，成功产物位于：
+
+`/data/models/harness4h3-evolutionary-compression-20261016/remote-infra-smoke-c2788a5-nopty/`
+
+- `failed_rounds=0`，完整 round 状态已落盘；`offline_simulation=false`，生成和 pipeline 均为 `cuda:1`。
+- `compression.json` 成功保存 30→29 层的真实结构 checkpoint；`variant_manifest.json` 保存有序 `prune_blocks` 操作、结构 checkpoint 路径和 variant digest。
+- baseline/candidate 各生成 1 个 256×256×81 视频，视频有效性和 visual-structure gate 均通过；candidate latency 为 7.316 s，logical model size 为 24.225 GB。
+- 本轮 candidate 按 promotion policy 被拒绝：temporal 质量下降，约 3.26% latency 改善和约 0.36% logical size 改善均未达到阈值，且 peak memory 上升。该 rejection 是有效评测结论，不是基础设施失败。
+
+首次使用带伪终端的前台 SSH 运行曾产生 `[Errno 32] Broken pipe`，产物保留在独立目录 `remote-infra-smoke-c2788a5`，不计入有效评测；改用非交互 SSH 后链路成功。
+
 本次远程真实配置暂未开启 TICA：远程主机未发现可用的真实 Wan calibration tensor manifest，因此不能伪造 TICA 证据。TICA 仍需单独准备远程 calibration/validation/test 缓存后再执行。
