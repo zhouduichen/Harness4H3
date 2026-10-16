@@ -28,7 +28,13 @@
 - 候选级 `runtime_execution` 是 post-forward trace，用于证明 Token/KV/Window/Timestep 等策略确实改变执行；GPU kernel、端到端延迟和显存仍由独立真实 Wan Evaluator 提供。
 - 最新 10 轮 Full RSI 重跑（`fake-rsi-final8-20261016`）返回 `failed_rounds=0`，SearchSpace 从 `S0001` 演化到 `S0003`；产物中的 Token/KV/Sparse/Timestep/Sampling 候选出现非零实际削减比例，说明 runtime trace 已由真实三维 mixed-timestep probe 触发，而非零值占位。
 
-## 测试证据
+## 最新基础设施回归
+
+在 `c2788a5` 上，基础设施修复后的本地全量回归为 `1052 passed, 4 skipped`。4 个 skip 仍是本机未提供真实 Wan checkpoint、CUDA 或 CUDA RNG parity 条件；真实 Wan smoke 只在远程执行。
+
+之前的 `1043 passed, 4 skipped` 和 CPU Fake RSI 结果保留为历史记录，不覆盖本次回归结果。
+
+## 历史测试证据
 
 ```text
 focused algorithm/runtime tests: 38 passed

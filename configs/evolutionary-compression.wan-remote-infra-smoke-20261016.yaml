@@ -1,0 +1,46 @@
+# Remote-only Wan2.1-T2V-1.3B infrastructure smoke.
+# Every path below is resolved on ai4mbse-remote; do not run this config locally.
+# This is intentionally one short evolution round, not an RSI campaign.
+backend: diffusers
+checkpoint: /home/intern/hf_cache/hub/models--Wan-AI--Wan2.1-T2V-1.3B-Diffusers/snapshots/0fad780a534b6463e45facd96134c9f345acfa5b
+output_root: /data/models/harness4h3-evolutionary-compression-20261016/remote-infra-smoke-c2788a5
+device: cuda:1
+dtype: bfloat16
+local_files_only: true
+sandbox_timeout_s: 10
+exploit_ratio: 1.0
+seed: 7
+advanced_profiling: false
+memory_enabled: false
+adapt_search_policy: false
+algorithm_improvement: false
+search_space_evolution: false
+candidate_screening: false
+tica_prune: false
+controller:
+  provider: deterministic
+evaluator:
+  backend: wan_video
+  wan_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-1.3b-paper16.remote.yaml
+  evaluation_manifest: /home/intern/huangjiahao/Harness4H3-rsi-codex-20261013/configs/evaluation-manifest.wan-rsi-dev.json
+  clip_model_path: /data/models/clip-vit-large-patch14-336
+  device: cuda:1
+  quality_device: cuda:1
+  dtype: bfloat16
+  local_files_only: true
+  max_cases: 1
+  seed_count: 1
+  sample_frames: 4
+  latency_warmup: 0
+  latency_repeats: 1
+  max_quality_drop: 0.05
+  evaluation_split: validation
+  source_revision: c2788a5
+  visual_quality_gate:
+    enabled: true
+    version: visual-structure-v1
+    min_spatial_gradient: 0.05
+    min_laplacian_std: 0.50
+    min_block_variance: 1.0
+    min_frame_difference: 0.001
+    max_low_texture_frame_ratio: 0.75

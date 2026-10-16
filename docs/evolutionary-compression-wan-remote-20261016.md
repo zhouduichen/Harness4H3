@@ -45,6 +45,6 @@ HF_HUB_OFFLINE=1 /home/intern/miniconda3/envs/comfy/bin/python -m harness4h3 evo
 
 `/data/models/harness4h3-evolutionary-compression-20261016/remote-rsi-gpu1-20261016/remote-rsi-remaining9.log`
 
-基础设施修复后的远程 staging revision 为 `fb6d2fc`（包含 `e826fd3` 的 runtime manifest replay 修复）。后续只允许用新的独立 output root 执行短时远程 smoke，确认 Variant/Registry/恢复链路后再由用户明确授权长跑。
+基础设施修复后的远程 staging revision 为 `c2788a5`（包含 `e826fd3` 的 runtime manifest replay 修复以及 Variant/Registry 恢复幂等性修复）。后续只允许使用 `configs/evolutionary-compression.wan-remote-infra-smoke-20261016.yaml` 的新独立 output root 执行单轮远程 smoke，确认 Variant/Registry/恢复链路后再由用户明确授权长跑。
 
 本次远程真实配置暂未开启 TICA：远程主机未发现可用的真实 Wan calibration tensor manifest，因此不能伪造 TICA 证据。TICA 仍需单独准备远程 calibration/validation/test 缓存后再执行。
