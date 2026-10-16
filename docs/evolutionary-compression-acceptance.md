@@ -19,7 +19,7 @@
 
 ## 部分完成 / 有条件完成
 
-- Diffusers Wan 的 Head/Token/Sparse/Attention Window 代码已按当前安装版本（Diffusers 0.39.0）的真实模块签名实现，并有 Tiny Wan 结构 smoke；完整 Wan2.1-1.3B 视频、GPU Kernel、显存和端到端延迟尚未在本机执行。
+- Diffusers Wan 的 Head/Token/Sparse/Attention Window 代码已按当前安装版本（Diffusers 0.39.0）的真实模块签名实现，并有 Tiny Wan 结构 smoke；Algorithm evaluator 现在还提供真实适配器的 sequence-shaped mixed-timestep runtime probe；完整 Wan2.1-1.3B 视频、GPU Kernel、显存和端到端延迟尚未在本机执行。
 - Sparse Runtime 当前是可执行的 Top-k KV 选择后端；它保留 Wan Q/K 归一化、RoPE 位置和输出投影，并确实缩短 K/V 输入，不宣称 SVOO/SparseVideo CUDA Kernel。独立的 KV Token Selection 也通过同一真实 K/V gather 路径执行，可与 Sparse Runtime 合并，但不会与 Token Merge 或 Attention Window 静默叠加。
 - Attention Window 当前同时支持历史 flat contiguous window 与可选 `(grid_shape, window_radius)` 的 3-D local Self-Attention；3-D 路径保持完整 Q，按原始 `(T,H,W)` 位置选择邻域 K/V 并切 RoPE，网格不匹配会显式失败。它仍未宣称 Flex/SVOO 三维 BlockMask 或专用 CUDA Kernel。
 - Timestep Gate 对 batch 内不同 timestep 使用 active-subset 执行；新增的 `timestep_attention_policy` 对匹配的每个 batch 子集实际缩短 Self-Attention K/V，并记录 rule、完整/选中 token 数与重载后的统计。`Sparse Runtime + Attention Window` 当前明确拒绝，因为尚未实现两种 Attention wrapper 的联合编译，不会静默忽略其中一个。
@@ -33,7 +33,7 @@
 ```text
 focused algorithm/runtime tests: 38 passed
 focused profiler/config/runtime selection: 54 passed
-full regression: 1042 passed, 4 skipped
+full regression: 1043 passed, 4 skipped
 ```
 
 4 个 skip 分别是未设置真实 Wan checkpoint、CUDA 不可用或 CUDA RNG parity 条件，不是实现失败。

@@ -331,14 +331,16 @@ class AlgorithmModelEvaluator:
             self._assert_finite(child_model)
             child_output = self.adapter.forward_profile(child_model, self._sample)
             runtime_probe_error = None
+            runtime_metadata = child_structure.metadata if isinstance(child_structure.metadata, Mapping) else {}
+            has_runtime_operation = bool(runtime_metadata.get("runtime_operations"))
             runtime_probe = getattr(self.adapter, "runtime_profile", None)
-            if callable(runtime_probe):
+            if callable(runtime_probe) and has_runtime_operation:
                 try:
                     runtime_probe(child_model, seed=int(self.seed))
                 except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
                     runtime_probe_error = str(exc)
             sampling_steps = getattr(self.adapter, "sampling_steps", None)
-            if callable(sampling_steps):
+            if callable(sampling_steps) and has_runtime_operation:
                 try:
                     sampling_steps(child_model, tuple(range(16, 0, -1)))
                 except (AttributeError, RuntimeError, TypeError, ValueError) as exc:

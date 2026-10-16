@@ -999,6 +999,33 @@ class DiffusersWanAdapter:
         with torch.no_grad():
             return self._probe_output(self._transformer(model)(**dict(sample)))
 
+    def runtime_profile(self, model: Any, seed: int = 7) -> Any:
+        """Run runtime policies on a small mixed-timestep Wan probe.
+
+        The ordinary profile probe is single-sample and is sufficient for
+        structural comparison.  Runtime policies need a sequence-shaped
+        input and, for timestep-conditioned policies, two independent batch
+        timesteps so the adapter cannot silently choose the first element.
+        """
+
+        torch, _ = _torch_modules()
+        sample = self.profile_sample(model, seed)
+        hidden_states = sample["hidden_states"]
+        encoder_hidden_states = sample["encoder_hidden_states"]
+        if int(hidden_states.shape[0]) == 1:
+            hidden_states = hidden_states.repeat(2, *([1] * (hidden_states.ndim - 1)))
+            encoder_hidden_states = encoder_hidden_states.repeat(2, *([1] * (encoder_hidden_states.ndim - 1)))
+        timestep = sample["timestep"]
+        timestep = timestep.new_tensor([100, 900]) if int(timestep.shape[0]) == 1 else timestep
+        return self.forward_profile(
+            model,
+            {
+                "hidden_states": hidden_states,
+                "timestep": timestep,
+                "encoder_hidden_states": encoder_hidden_states,
+            },
+        )
+
     def forward_timestep_profile(self, model: Any, bucket: str, sample: Mapping[str, Any]) -> Any:
         values = {"high_noise": 900, "middle": 500, "low_noise": 100}
         probe = dict(sample)

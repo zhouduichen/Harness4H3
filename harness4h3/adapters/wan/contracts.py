@@ -372,6 +372,10 @@ class WanModelAdapter(Protocol):
     def forward_profile(self, model: Any, sample: Any) -> Any:
         ...
 
+    def runtime_profile(self, model: Any, seed: int = 7) -> Any:
+        """Optional sequence/mixed-timestep probe for runtime policies."""
+        ...
+
     def estimate_flops(self, model: Any) -> Optional[int]:
         ...
 
