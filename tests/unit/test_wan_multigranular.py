@@ -372,13 +372,28 @@ def test_diffusers_wan_attention_contract_is_structurally_executable():
         grid_window_output = grid_window_model.blocks[0].attn1(torch.randn(1, 8, 8), None, None, grid_rotary)
     assert tuple(grid_window_output.shape) == (1, 8, 8)
     assert grid_window_model._harness4h3_attention_window_stats["selected_kv_tokens"] < 8 * 8
+    timestep_model = TinyWan()
     adapter.apply_timestep_block_gating(
-        model,
+        timestep_model,
         [{"block_id": "block.0", "min_timestep": 0.0, "max_timestep": 0.3}],
     )
-    mixed = model(torch.randn(2, 5, 8), torch.tensor([100, 900]), torch.randn(2, 4, 8))
+    mixed = timestep_model(torch.randn(2, 5, 8), torch.tensor([100, 900]), torch.randn(2, 4, 8))
     assert tuple(mixed.shape) == (2, 5, 8)
-    assert model._harness4h3_gate_stats["block.0"] == {"executed": 1, "skipped": 1}
+    assert timestep_model._harness4h3_gate_stats["block.0"] == {"executed": 1, "skipped": 1}
+    adapter.apply_timestep_attention_policy(
+        timestep_model,
+        {
+            "rules": [
+                {"min_timestep": 0.0, "max_timestep": 0.3, "keep_ratio": 0.5, "block_ids": ["block.0"], "score": "l2_norm"},
+                {"min_timestep": 0.7, "max_timestep": 1.0, "keep_ratio": 0.75, "block_ids": ["block.0"], "score": "l2_norm"},
+            ],
+            "policy": "select_kv_tokens",
+        },
+    )
+    mixed_attention = timestep_model(torch.randn(2, 5, 8), [100, 900], torch.randn(2, 4, 8))
+    assert tuple(mixed_attention.shape) == (2, 5, 8)
+    assert timestep_model._harness4h3_timestep_attention_stats["block.0"]["calls"] == 1
+    assert timestep_model._harness4h3_timestep_attention_stats["block.0"]["selected_kv_tokens"] == 4
     from diffusers import FlowMatchEulerDiscreteScheduler
 
     model.scheduler = FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=3.0)

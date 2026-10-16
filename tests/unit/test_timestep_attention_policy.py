@@ -5,7 +5,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from harness4h3.adapters.wan import FakeWanDiTAdapter
-from harness4h3.operators.wan import OperatorSpec, SearchSpaceManager, TimestepAttentionPolicyOperator
+from harness4h3.operators.wan import OperatorSpec, SearchSpaceManager, TimestepAttentionPolicyOperator, build_wan_compression_registry
 from harness4h3.sandbox.runner import CompressionPlan
 
 
@@ -82,3 +82,34 @@ def test_timestep_attention_policy_can_be_validated_and_registered_as_evolved_sp
     assert validated.status == "validated", validated.rejection_reason
     version = manager.register(validated)
     assert "timestep_attention_policy" in version.operator_names()
+
+
+def test_timestep_block_gate_and_attention_budget_compose_per_sample(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=3, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "compose",
+        adapter,
+        parent,
+        {
+            "steps": [
+                {
+                    "operator": "timestep_block_gate",
+                    "args": {"rules": [{"block_id": "block.0", "min_timestep": 0.0, "max_timestep": 0.3}], "policy": "skip_when_in_range"},
+                },
+                {"operator": "timestep_attention_policy", "args": _plan()},
+            ]
+        },
+        tmp_path / "composed",
+    )
+    assert result.status == "success", result.message
+    child = adapter.reload_model(result.child_checkpoint)
+    hidden = torch.randn(2, 8, 8)
+    with torch.no_grad():
+        output = child(hidden, timestep=torch.tensor([100, 900]))
+    assert tuple(output.shape) == tuple(hidden.shape)
+    assert child.runtime_gate_stats["block.0"] == {"executed": 1, "skipped": 1}
+    stats = child.runtime_timestep_attention_stats["block.0"]
+    assert stats["calls"] == 1
+    assert stats["full_kv_tokens"] == 8
+    assert stats["selected_kv_tokens"] == 6

@@ -1129,9 +1129,23 @@ class DiffusersWanAdapter:
                         return {key: select_batch(item) for key, item in value.items()}
                     return value
 
+                def select_timestep(value: Any) -> Any:
+                    if hasattr(value, "shape") and getattr(value, "ndim", 0) > 0 and int(value.shape[0]) == batch_size:
+                        return value.index_select(0, active_indices.to(value.device))
+                    if isinstance(value, (list, tuple)) and len(value) == batch_size:
+                        selected = [value[int(index)] for index in active_indices.detach().cpu().tolist()]
+                        return tuple(selected) if isinstance(value, tuple) else selected
+                    return value
+
                 active_args = tuple(select_batch(item) for item in args)
                 active_kwargs = {key: select_batch(item) for key, item in kwargs.items()}
-                output = _base(hidden_states.index_select(0, active_indices), *active_args, **active_kwargs)
+                previous_timestep = getattr(transformer, "_harness4h3_current_timestep", None)
+                if previous_timestep is not None:
+                    transformer._harness4h3_current_timestep = select_timestep(previous_timestep)
+                try:
+                    output = _base(hidden_states.index_select(0, active_indices), *active_args, **active_kwargs)
+                finally:
+                    transformer._harness4h3_current_timestep = previous_timestep
                 restored = hidden_states.clone()
                 restored.index_copy_(0, active_indices, output)
                 transformer._harness4h3_gate_stats[_block_id]["executed"] += 1
