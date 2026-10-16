@@ -58,6 +58,26 @@ def test_runtime_only_variant_manifest_preserves_order_and_zero_weight_claim(tmp
     assert restored.to_dict() == variant.to_dict()
     assert restored.variant_digest != parent.sha256
 
+    reloaded = restored.restore(adapter)
+    assert reloaded._harness4h3_token_sparsity_policy["keep_ratio"] == 0.75
+    assert reloaded._harness4h3_attention_window_policy["window_size"] == 32
+    selected = adapter.sampling_steps(reloaded, tuple(range(16, 0, -1)))
+    assert len(selected) == 8
+    assert selected[0] == 16
+    assert selected[-1] == 1
+
+
+def test_variant_manifest_digest_is_verified_on_restore(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "sampling_step_skip", adapter, parent, {"target_steps": 8}, tmp_path / "sampling-child"
+    )
+    variant = ModelVariant.from_compression("M0003", parent, result, {"operator": "sampling_step_skip", "args": {"target_steps": 8}})
+    payload = variant.to_dict()
+    payload["ordered_operations"][0]["args"]["target_steps"] = 4
+    with pytest.raises(ValueError, match="manifest_digest_mismatch"):
+        ModelVariant.from_dict(payload)
+
 
 def test_static_variant_records_structural_checkpoint(tmp_path):
     adapter, parent = _parent(tmp_path)

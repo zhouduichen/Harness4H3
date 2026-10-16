@@ -108,7 +108,7 @@ class CompressionPlan:
             for step in steps:
                 if not isinstance(step, Mapping) or step.get("operator") == "compose":
                     raise ValueError("algorithm_output_invalid: nested compose is not allowed")
-                normalized_steps.append(cls._from_base_mapping(step).to_dict())
+                normalized_steps.append(cls.from_mapping(step, operator_specs=extensions).to_dict())
             return cls("compose", {"steps": normalized_steps})
         if operator in cls.BASE_OPERATORS:
             return cls._from_base_mapping({"operator": operator, "args": args})

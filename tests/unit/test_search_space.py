@@ -73,6 +73,20 @@ def test_fake_threshold_operator_validates_registers_and_reloads(tmp_path):
     assert result.structural_change["operator"] == "prune_ffn_by_weight_threshold"
     assert result.structural_change["block_ids"] == ["block.0"]
 
+    composite = registry.execute(
+        "compose",
+        adapter,
+        parent,
+        {
+            "steps": [
+                {"operator": proposal.spec.name, "args": {"block_ids": ["block.0"], "threshold": float(validated.validation["threshold"])}},
+                {"operator": "prune_blocks", "args": {"block_ids": ["block.0"]}},
+            ]
+        },
+        tmp_path / "composite-child",
+    )
+    assert composite.status == "success", composite.message
+
 
 def test_rejected_proposal_cannot_register_or_mutate_registry(tmp_path):
     adapter, parent = _parent(tmp_path)
@@ -114,6 +128,55 @@ def test_search_space_active_pointer_can_roll_back_without_deleting_new_version(
     assert manager.active.version_id == "S0001"
     assert manager.store.latest().version_id == version.version_id
     assert (tmp_path / "space" / "active.json").is_file()
+
+
+def test_active_registry_contains_only_active_search_space_operators(tmp_path):
+    manager = SearchSpaceManager(tmp_path / "space")
+    limited = SearchSpaceVersion(
+        "S0098",
+        manager.active.version_id,
+        (OperatorSpec("prune_blocks", "1", {"block_ids": "list[str]"}, "block"),),
+    )
+    manager.store.write_version(limited)
+    manager.activate(limited.version_id)
+
+    registry = manager.registry_for(limited, build_wan_compression_registry(include_multigranular=True))
+
+    assert registry.names() == ("prune_blocks",)
+    with pytest.raises(ValueError, match="unsupported_compression_operator"):
+        registry.get("attention_window")
+
+
+def test_search_space_register_is_idempotent_after_resume(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    manager = SearchSpaceManager(tmp_path / "space")
+    validated = manager.validate(manager.propose(_threshold_spec(), "resume-safe proposal"), adapter, parent, output_dir=tmp_path / "validation")
+    first = manager.register(validated)
+    second = manager.register(validated)
+
+    assert second.version_id == first.version_id
+    assert len(manager.store.read_versions()) == 2
+
+
+def test_validating_search_space_proposal_can_resume(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    manager = SearchSpaceManager(tmp_path / "space")
+    manager.propose(_threshold_spec(), "recover an interrupted validation")
+    pending = manager.store.read_proposals()[0]
+    validating = type(pending)(
+        proposal_id=pending.proposal_id,
+        parent_version_id=pending.parent_version_id,
+        spec=pending.spec,
+        rationale=pending.rationale,
+        evidence_ids=pending.evidence_ids,
+        trigger_evidence=pending.trigger_evidence,
+        status="validating",
+    )
+    manager.store.write_proposal(validating)
+
+    resumed = manager.validate(validating, adapter, parent, output_dir=tmp_path / "validation")
+
+    assert resumed.status == "validated"
 
 
 def test_versioned_implementation_ref_loads_and_validates_without_factory_key(tmp_path):

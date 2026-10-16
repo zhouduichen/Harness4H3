@@ -81,6 +81,28 @@ def test_sandbox_accepts_only_registered_search_space_extension(tmp_path):
     assert allowed.plan.operator == "prune_ffn_by_weight_threshold"
 
 
+def test_sandbox_allows_registered_extension_inside_ordered_composite(tmp_path):
+    source = """def propose(profile, history):
+    return {'operator': 'compose', 'args': {'steps': [
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}},
+        {'operator': 'prune_ffn_by_weight_threshold', 'args': {'block_ids': ['block.1'], 'threshold': 0.3}},
+    ]}}
+"""
+    spec = OperatorSpec(
+        "prune_ffn_by_weight_threshold",
+        "1",
+        {"block_ids": "list[str]", "threshold": "float"},
+        "channel",
+        trusted_factory_key="prune_ffn_by_weight_threshold",
+    )
+
+    result = AlgorithmSandbox(tmp_path, operator_specs=(spec,)).run(source, {}, [])
+
+    assert result.status == "success"
+    assert result.plan is not None
+    assert result.plan.to_dict()["args"]["steps"][1]["operator"] == "prune_ffn_by_weight_threshold"
+
+
 def test_sandbox_rejects_nested_composite_plan(tmp_path):
     source = """def propose(profile, history):
     return {'operator': 'compose', 'args': {'steps': [

@@ -15,7 +15,7 @@ from ..h3.state import ModelState
 from ..memory.design_gene import DesignGene
 from ..memory.experience import ExperienceRecord, ExperienceStore
 from ..profiler import CalibrationCorpus, CalibrationSampleSpec, FakeWanCalibrationProvider, ProfileReport, profile_model
-from ..operators.wan import OperatorSpec, SearchSpaceManager, default_search_space
+from ..operators.wan import OperatorSpec, SearchSpaceManager, SearchSpaceVersion, default_search_space
 from ..sandbox.policy import SourcePolicyError, validate_source
 from ..sandbox.runner import AlgorithmSandbox, CompressionPlan as SandboxCompressionPlan, SandboxResult
 from .agent import AlgorithmAgent
@@ -243,6 +243,23 @@ class EvolutionLoop:
             tica_profile = self._load_or_collect_tica_profile(tica_profile_path, parent_artifact)
             profile_payload = {**dict(profile_payload), **dict(tica_profile)}
         search_space_path = round_dir / "search-space.json"
+        pinned_search_space = False
+        if resuming and search_space_path.exists() and self.search_space_manager is not None:
+            try:
+                pinned = SearchSpaceVersion.from_dict(self._read_json(search_space_path))
+                if pinned.status == "validated":
+                    self.search_space_version = pinned
+                    self.registry = self.search_space_manager.registry_for(pinned, self.registry)
+                    self.sandbox.operator_specs.update(
+                        {
+                            item.name: item.to_dict()
+                            for item in pinned.operators
+                            if item.trusted_factory_key
+                        }
+                    )
+                    pinned_search_space = True
+            except (KeyError, TypeError, ValueError):
+                pinned_search_space = False
         if self.search_space_version is not None and not search_space_path.exists():
             _write_json(search_space_path, self.search_space_version.to_dict())
         architecture = str(profile_payload["model"]["architecture"])
@@ -261,7 +278,7 @@ class EvolutionLoop:
         # The initial parent already has a measured structural state.  Let the
         # policy decide whether to exploit it or open an exploration branch.
         search_choice = str(round_state.get("search_choice", "")).strip() or self.search_policy.choose(has_best=bool(parent_candidate.state.measured_metrics))
-        if self.search_space_evolution:
+        if self.search_space_evolution and not pinned_search_space:
             self._maybe_evolve_search_space()
             self.registry = self.search_space_manager.registry_for(self.search_space_version, self.registry)  # type: ignore[union-attr]
             self.sandbox.operator_specs.update(

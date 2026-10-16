@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, CompressionResult, OperatorCapability, WanModelAdapter
 from ...sandbox import AlgorithmSandbox
-from .compression import AttentionHeadPruningOperator, AttentionWindowOperator, FFNChannelPruningOperator, HeadPruningOperator, KVTokenSelectionOperator, LayerPruningOperator, SamplingStepSkipOperator, SparseRuntimeOperator, TimestepAttentionPolicyOperator, TimestepBlockGatingOperator, TokenMergeOperator, TokenPruningOperator, WanCompressionRegistry
+from .compression import AttentionHeadPruningOperator, AttentionWindowOperator, FFNChannelPruningOperator, HeadPruningOperator, KVTokenSelectionOperator, LayerPruningOperator, SamplingStepSkipOperator, SparseRuntimeOperator, TimestepAttentionPolicyOperator, TimestepBlockGatingOperator, TokenMergeOperator, TokenPruningOperator, WanCompressionRegistry, build_wan_compression_registry
 
 
 def _jsonable(value: Any) -> Any:
@@ -334,7 +334,8 @@ class SearchSpaceManager:
         selected = versions.get(active_id) if active_id else None
         if selected is not None and selected.status == "validated":
             return selected
-        return self.store.latest() or default_search_space()
+        validated = [item for item in self.store.read_versions() if item.status == "validated"]
+        return validated[-1] if validated else default_search_space()
 
     def propose(
         self,
@@ -365,7 +366,7 @@ class SearchSpaceManager:
         diagnostic: Optional[Callable[[CompressionResult], Mapping[str, Any]]] = None,
         output_dir: Optional[Path] = None,
     ) -> SearchSpaceProposal:
-        if proposal.status != "proposed":
+        if proposal.status not in {"proposed", "validating"}:
             raise ValueError("search_space_proposal_not_pending")
         base = replace(proposal, status="validating")
         self.store.write_proposal(base)
@@ -506,6 +507,17 @@ class SearchSpaceManager:
     def register(self, proposal: SearchSpaceProposal) -> SearchSpaceVersion:
         if proposal.status != "validated":
             raise ValueError("only_validated_search_space_proposals_can_register")
+        existing = next(
+            (
+                item
+                for item in self.store.read_versions()
+                if proposal.proposal_id in item.evidence_ids and item.status == "validated"
+            ),
+            None,
+        )
+        if existing is not None:
+            self.store.write_active_id(existing.version_id)
+            return existing
         active = self.active
         if proposal.parent_version_id != active.version_id:
             raise ValueError("search_space_parent_version_mismatch")
@@ -539,12 +551,13 @@ class SearchSpaceManager:
 
     def registry_for(self, version: Optional[SearchSpaceVersion] = None, base: Optional[WanCompressionRegistry] = None) -> WanCompressionRegistry:
         target = version or self.active
+        available = base or build_wan_compression_registry(include_multigranular=True)
         factories = {key: factory for key, factory in _TRUSTED_FACTORIES.items()}
         for spec in target.operators:
             reference = str(spec.implementation_ref or spec.trusted_factory_key).strip()
             if reference and reference not in factories:
                 factories[reference] = lambda current_spec, registry=self.implementation_registry: registry.instantiate(current_spec)
-        return (base or WanCompressionRegistry()).for_search_space(target, factories)
+        return available.for_search_space(target, factories)
 
 
 class ThresholdFFNChannelOperator:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, ChannelPruningConfig, CompressionResult, WanModelAdapter
 from .runtime_gating import validate_timestep_attention_plan, validate_timestep_gate_plan
@@ -361,6 +361,17 @@ class CompositeCompressionOperator:
         "timestep_attention_policy": TimestepAttentionPolicyOperator,
     }
 
+    def __init__(self, operator_resolver: Optional[Callable[[str], CompressionOperator]] = None) -> None:
+        self._operator_resolver = operator_resolver
+
+    def _resolve(self, name: str) -> CompressionOperator:
+        if self._operator_resolver is not None:
+            return self._operator_resolver(name)
+        operator_type = self._BASE_OPERATORS.get(name)
+        if operator_type is None:
+            raise ValueError("unsupported_composite_operator: %s" % name)
+        return operator_type()
+
     def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
         started = time.monotonic()
         steps = plan.get("steps")
@@ -373,8 +384,7 @@ class CompositeCompressionOperator:
                 return _failed(parent, "invalid_composite_plan", "each compose step requires operator and args", started)
             operator_name = raw_step.get("operator")
             args = raw_step.get("args")
-            operator_type = self._BASE_OPERATORS.get(operator_name)
-            if operator_type is None or not isinstance(args, Mapping):
+            if not isinstance(args, Mapping):
                 return _failed(parent, "invalid_composite_plan", "compose steps must use base operators", started)
             if operator_name == "prune_ffn_channels" and getattr(adapter, "channel_pruning_requires_all_blocks", False):
                 # The Diffusers Wan adapter uses positional block IDs after a
@@ -386,7 +396,11 @@ class CompositeCompressionOperator:
                     **dict(args),
                     "block_ids": ["block.%d" % current_index for current_index in range(int(current.structure.block_count))],
                 }
-            result = operator_type().execute(adapter, current, args, Path(output_dir) / ("step-%02d" % index))
+            try:
+                operator = self._resolve(str(operator_name))
+            except ValueError as exc:
+                return _failed(parent, "invalid_composite_plan", str(exc), started)
+            result = operator.execute(adapter, current, args, Path(output_dir) / ("step-%02d" % index))
             if result.status != "success" or result.child_checkpoint is None:
                 return CompressionResult(
                     "failed",
@@ -444,14 +458,17 @@ class WanCompressionRegistry:
     def execute(self, name: str, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
         return self.get(name).execute(adapter, parent, plan, output_dir)
 
-    def for_search_space(self, version: Any, factories: Mapping[str, Callable[[], CompressionOperator]]) -> "WanCompressionRegistry":
-        """Return a registry view populated only from trusted factories."""
+    def for_search_space(self, version: Any, factories: Mapping[str, Callable[..., CompressionOperator]]) -> "WanCompressionRegistry":
+        """Return a registry view containing exactly the active version."""
 
-        view = WanCompressionRegistry(tuple(self._operators.values()))
+        view = WanCompressionRegistry()
         for spec in getattr(version, "operators", ()):
-            factory_key = str(getattr(spec, "implementation_ref", "") or getattr(spec, "trusted_factory_key", ""))
-            if not factory_key or str(getattr(spec, "name", "")) in view._operators:
+            if str(getattr(spec, "name", "")) in self._operators:
+                view._operators[spec.name] = self._operators[spec.name]
                 continue
+            factory_key = str(getattr(spec, "implementation_ref", "") or getattr(spec, "trusted_factory_key", ""))
+            if not factory_key:
+                raise ValueError("unavailable_trusted_operator_factory: %s" % getattr(spec, "name", ""))
             factory = factories.get(factory_key)
             if factory is None:
                 raise ValueError("unavailable_trusted_operator_factory: %s" % factory_key)
@@ -465,6 +482,8 @@ class WanCompressionRegistry:
             if operator.name != spec.name:
                 raise ValueError("trusted_operator_factory_name_mismatch")
             view._operators[operator.name] = operator
+        if isinstance(view._operators.get("compose"), CompositeCompressionOperator):
+            view._operators["compose"] = CompositeCompressionOperator(lambda name: view.get(name))
         return view
 
 

@@ -257,7 +257,7 @@ class ModelVariant:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "ModelVariant":
-        return cls(
+        restored = cls(
             variant_id=str(raw["variant_id"]),
             base_checkpoint=str(raw["base_checkpoint"]),
             structural_checkpoint=str(raw["structural_checkpoint"]) if raw.get("structural_checkpoint") else None,
@@ -271,6 +271,10 @@ class ModelVariant:
             base_checkpoint_sha256=str(raw["base_checkpoint_sha256"]) if raw.get("base_checkpoint_sha256") else None,
             structural_checkpoint_sha256=str(raw["structural_checkpoint_sha256"]) if raw.get("structural_checkpoint_sha256") else None,
         )
+        persisted_digest = raw.get("variant_digest")
+        if persisted_digest is not None and str(persisted_digest) != restored.variant_digest:
+            raise ValueError("model_variant_manifest_digest_mismatch")
+        return restored
 
     def write_manifest(self, path: str | Path) -> Path:
         target = Path(path)
@@ -281,6 +285,47 @@ class ModelVariant:
     @classmethod
     def read_manifest(cls, path: str | Path) -> "ModelVariant":
         return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+
+    def restore(self, adapter: Any, *, device: Optional[str] = None, dtype: Optional[str] = None) -> Any:
+        """Reload this variant after a process restart."""
+
+        checkpoint = self.structural_checkpoint or self.base_checkpoint
+        kwargs: dict[str, Any] = {}
+        if device is not None:
+            kwargs["device"] = device
+        if dtype is not None:
+            kwargs["dtype"] = dtype
+        model = adapter.load_model(checkpoint, **kwargs)
+        if self.structural_checkpoint is not None:
+            return model
+        for operation in self.ordered_operations:
+            name = str(operation.get("operator", ""))
+            args = dict(operation.get("args") or {})
+            if name in {"prune_blocks", "prune_layers"}:
+                adapter.remove_blocks(model, tuple(args["block_ids"]))
+            elif name == "prune_ffn_channels":
+                adapter.prune_channels(model, ChannelPruningConfig(tuple(args["block_ids"]), tuple(args["retained_indices"]), str(args.get("projection_name", "ffn"))))
+            elif name in {"prune_attention_heads", "prune_heads"}:
+                adapter.prune_attention_heads(model, tuple(args["head_indices"]), tuple(args.get("attention_names", ("attn1", "attn2"))))
+            elif name == "timestep_block_gate":
+                adapter.apply_timestep_block_gating(model, args.get("rules", []))
+            elif name == "timestep_attention_policy":
+                adapter.apply_timestep_attention_policy(model, args)
+            elif name == "prune_tokens":
+                adapter.apply_token_sparsity(model, args)
+            elif name == "token_merge":
+                adapter.apply_token_merge(model, args)
+            elif name == "kv_token_select":
+                adapter.apply_kv_token_selection(model, args)
+            elif name == "sparse_runtime":
+                adapter.apply_sparse_runtime(model, args)
+            elif name == "attention_window":
+                adapter.apply_attention_window(model, args)
+            elif name == "sampling_step_skip":
+                adapter.apply_sampling_step_policy(model, args)
+            else:
+                raise ValueError("unsupported_model_variant_operation: %s" % name)
+        return model
 
     @classmethod
     def from_compression(
@@ -305,10 +350,22 @@ class ModelVariant:
             return [dict(step) for step in steps if isinstance(step, Mapping)]
 
         ordered = tuple(operations(plan))
-        structural_names = {"prune_blocks", "prune_layers", "prune_ffn_channels", "prune_attention_heads", "prune_heads", "tica_prune"}
+        structural_names = {"prune_blocks", "prune_layers", "prune_ffn_channels", "prune_ffn_by_weight_threshold", "prune_attention_heads", "prune_heads", "tica_prune"}
         runtime_names = {"timestep_block_gate", "timestep_attention_policy", "prune_tokens", "token_merge", "kv_token_select", "sparse_runtime", "attention_window"}
         sampler_names = {"sampling_step_skip"}
+
+        def has_parameter_change(value: Any) -> bool:
+            if isinstance(value, Mapping):
+                reduction = value.get("parameter_reduction_ratio")
+                if isinstance(reduction, (int, float)) and not isinstance(reduction, bool) and float(reduction) > 0.0:
+                    return True
+                return any(has_parameter_change(item) for item in value.values())
+            if isinstance(value, (list, tuple)):
+                return any(has_parameter_change(item) for item in value)
+            return False
+
         structural = any(str(item.get("operator")) in structural_names for item in ordered)
+        structural = structural or has_parameter_change(child.structural_change)
         runtime_policy = {
             str(item["operator"]): dict(item.get("args") or {})
             for item in ordered

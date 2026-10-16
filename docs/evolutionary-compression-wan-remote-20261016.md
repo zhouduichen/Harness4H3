@@ -39,10 +39,12 @@ HF_HUB_OFFLINE=1 /home/intern/miniconda3/envs/comfy/bin/python -m harness4h3 evo
 
 `/data/models/harness4h3-evolutionary-compression-20261016/remote-rsi-gpu1-20261016/rounds/R0001/`
 
-## 后续 RSI
+## 后续 RSI（已按当前执行要求暂停）
 
-首轮完成后，剩余 9 轮已在远程 staging 后台启动，使用同一 output root、固定 validation manifest 和 GPU1；远程日志为：
+首轮后曾短暂启动剩余 9 轮，但根据“先完成基础设施、只跑基础 smoke”的执行要求，已主动停止该长时进程。R0002 只保留 profiling/搜索中间产物，仍为 `in_progress`，没有最终 decision 或可用于晋升的独立视频证据；不把它计入完成轮次，也不继续复用它启动长跑。旧日志保留在：
 
 `/data/models/harness4h3-evolutionary-compression-20261016/remote-rsi-gpu1-20261016/remote-rsi-remaining9.log`
+
+基础设施修复后的远程 staging revision 为 `fb6d2fc`（包含 `e826fd3` 的 runtime manifest replay 修复）。后续只允许用新的独立 output root 执行短时远程 smoke，确认 Variant/Registry/恢复链路后再由用户明确授权长跑。
 
 本次远程真实配置暂未开启 TICA：远程主机未发现可用的真实 Wan calibration tensor manifest，因此不能伪造 TICA 证据。TICA 仍需单独准备远程 calibration/validation/test 缓存后再执行。
