@@ -34,7 +34,7 @@ evaluator:
   latency_repeats: 1
   max_quality_drop: 0.05
   evaluation_split: validation
-  source_revision: f6f4465
+  source_revision: e826fd3
   visual_quality_gate:
     enabled: true
     version: visual-structure-v1
