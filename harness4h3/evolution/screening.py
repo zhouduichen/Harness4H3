@@ -173,13 +173,14 @@ class CandidateScreeningPipeline:
                 }
             if metrics.get("valid") is not True:
                 raise ValueError("diagnostic_evaluator_rejected")
+            offline = bool(metrics.get("offline_simulation", True))
             return ScreeningResult(
                 stage=ScreeningStage.DIAGNOSTIC.value,
                 status="passed",
                 elapsed_s=time.monotonic() - started,
                 evidence_level="diagnostic",
                 metrics=metrics,
-                offline_simulation=True,
+                offline_simulation=offline,
             )
         except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
             return ScreeningResult(
