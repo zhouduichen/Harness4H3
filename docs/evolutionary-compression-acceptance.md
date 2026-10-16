@@ -30,7 +30,7 @@
 ```text
 focused algorithm/runtime tests: 38 passed
 focused profiler/config/runtime selection: 54 passed
-full regression: 1041 passed, 4 skipped
+full regression: 1042 passed, 4 skipped
 ```
 
 4 个 skip 分别是未设置真实 Wan checkpoint、CUDA 不可用或 CUDA RNG parity 条件，不是实现失败。

@@ -7,7 +7,7 @@
 ```text
 focused algorithm/runtime tests: 38 passed
 focused profiler/config/runtime selection: 54 passed
-full regression: 1041 passed, 4 skipped
+full regression: 1042 passed, 4 skipped
 ```
 
 完整回归的 4 个 skip 是真实 Wan checkpoint、CUDA、CUDA RNG parity 和训练运行条件未满足，不是实现失败。新增的 KV 路径覆盖 Fake 执行与重载、按 Block 目标选择、KV + Sparse 组合，以及 Diffusers Tiny Wan 的真实注意力张量形状/统计检查；本轮还覆盖 Head + Sparse、Layer + Sampling 的有序组合、Provider 对 Active SearchSpace 的读取，Head/FFN 的输出扰动敏感度测量和显式回退，3-D TokenMap/Local Window 的重载 smoke，逐样本 timestep 驱动的 K/V budget 选择和 SearchSpace 注册，以及激活后新 timestep 算子进入 `max_candidates=8` 实测预算的 RSI smoke。
