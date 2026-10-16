@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,7 +9,7 @@ torch = pytest.importorskip("torch")
 
 from harness4h3.adapters.wan import FakeWanDiTAdapter
 from harness4h3.evolution.candidate import AlgorithmCandidate
-from harness4h3.evolution.screening import CandidateScreeningPipeline, ScreeningContext, ScreeningStage
+from harness4h3.evolution.screening import CandidateScreeningPipeline, ScreeningContext, ScreeningStage, _assert_finite
 from harness4h3.operators.wan import build_wan_compression_registry
 from harness4h3.sandbox.runner import CompressionPlan
 
@@ -72,3 +73,10 @@ def test_screening_resume_does_not_repeat_full_evaluator(tmp_path):
     second = CandidateScreeningPipeline(root).run(_context(tmp_path, full_evaluator=full))
     assert len(first) == len(second) == 3
     assert calls == ["full"]
+
+
+def test_finite_check_uses_transformer_for_diffusion_pipeline_shape():
+    transformer = torch.nn.Linear(4, 4)
+    pipeline = SimpleNamespace(parameters={}, transformer=transformer)
+
+    _assert_finite(pipeline)

@@ -164,9 +164,10 @@ class CandidateScreeningPipeline:
                     raise ValueError(compression.failure_type or "diagnostic_compression_failed")
                 child = context.adapter.reload_model(compression.child_checkpoint)
                 _assert_finite(child)
+                child_metadata = context.adapter.inspect(child).metadata
                 metrics = {
                     "valid": True,
-                    "offline_simulation": True,
+                    "offline_simulation": bool(child_metadata.get("offline_simulation", True)),
                     "structural_change": dict(compression.structural_change),
                     "child_checkpoint_sha256": compression.child_checkpoint.sha256,
                 }
@@ -268,7 +269,16 @@ def _validate_static_args(plan: CompressionPlan, profile: Mapping[str, Any]) -> 
 
 
 def _assert_finite(model: Any) -> None:
-    for parameter in model.parameters():
+    parameters = getattr(model, "parameters", None)
+    if not callable(parameters):
+        # DiffusionPipeline exposes its trainable modules through named
+        # components rather than a Module.parameters() method.  Structural
+        # screening must still check the actual Wan transformer after reload.
+        transformer = getattr(model, "transformer", None)
+        parameters = getattr(transformer, "parameters", None)
+    if not callable(parameters):
+        raise ValueError("diagnostic_model_parameters_unavailable")
+    for parameter in parameters():
         if not bool(parameter.detach().isfinite().all()):
             raise ValueError("diagnostic_model_integrity_failed")
 
