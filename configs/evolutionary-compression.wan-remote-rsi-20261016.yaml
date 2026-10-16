@@ -2,7 +2,7 @@
 # Every path below is resolved on ai4mbse-remote; do not run this config locally.
 backend: diffusers
 checkpoint: /home/intern/hf_cache/hub/models--Wan-AI--Wan2.1-T2V-1.3B-Diffusers/snapshots/0fad780a534b6463e45facd96134c9f345acfa5b
-output_root: /data/models/harness4h3-evolutionary-compression-20261016/remote-rsi-38cd4f1
+output_root: /data/models/harness4h3-evolutionary-compression-20261016/remote-rsi-753b1f1
 device: cuda:0
 dtype: bfloat16
 local_files_only: true
@@ -21,7 +21,7 @@ controller:
 evaluator:
   backend: wan_video
   wan_config: /home/intern/huangjiahao/Harness4H3-long-video-30s/configs/wan-student-1.3b-paper16.remote.yaml
-  evaluation_manifest: /home/intern/huangjiahao/Harness4H3-rsi/work/codex-algorithm-discovery-rsi-38cd4f1/configs/evaluation-manifest.wan-rsi-dev.json
+  evaluation_manifest: /home/intern/huangjiahao/Harness4H3-rsi/work/codex-algorithm-discovery-rsi-753b1f1/configs/evaluation-manifest.wan-rsi-dev.json
   clip_model_path: /data/models/clip-vit-large-patch14-336
   device: cuda:0
   quality_device: cuda:0
@@ -34,7 +34,7 @@ evaluator:
   latency_repeats: 1
   max_quality_drop: 0.05
   evaluation_split: validation
-  source_revision: 38cd4f1
+  source_revision: 753b1f1
   visual_quality_gate:
     enabled: true
     version: visual-structure-v1
