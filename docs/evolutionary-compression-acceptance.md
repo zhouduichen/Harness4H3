@@ -12,6 +12,7 @@
 - Algorithm Discovery：Sandbox 中执行 Agent 的 `search()`，轨迹记录候选集合、排序和选中计划；搜索源码纳入逻辑摘要，递归子代保留父子源码差异。
 - Search-Space Evolution：提案经过 Sandbox、真实 adapter 执行、保存/重载、finite 检查后注册；下一代 Program 读取新版本并能生成新算子计划。执行器通过受限的 `implementation_ref` loader 恢复，不要求为每个新类修改管理器分支。
 - 新增的 timestep attention 扩展在激活后的 SearchSpace smoke 中进入 `max_candidates=8` 的实测预算，候选结果 `valid=true`；候选未被 Pareto 选择不等于未执行，搜索轨迹保留了该评测结果。
+- 标准 Algorithm Search 的每个候选现在持久化真实执行证据：`runtime_execution.stats/derived`、结构/FLOPs/参数变化和硬件测量边界；CPU Fake/Tiny 的运行时计数不会被写成 GPU latency 或 VRAM。
 - 对照实验：新增 `RSI Fixed Space` 与 `Frozen Expanded Space`；后者固定版本 `S0001`，但下一代实际读取并生成扩展算子候选，用于区分“算子更多”和“空间动态演化”的收益。
 - Provider Agent：初始算法生成请求现在携带当前 SearchSpace 的 operator/schema/约束摘要，提示词不再把候选限制为 Block/FFN；因此真实 Provider 路径也能提出 Head、KV、Sparse、Window、Timestep 和 Sampling 计划。
 - Sensitivity：Head profiling 在有 Attention-shaped 序列样本时逐个复制 Attention、执行真实 Head surgery 并测量输出 leave-one-out 差异；真实 Wan 的 5-D latent 会先通过一次模型 forward 捕获每个 Attention 的真实参数，再只复制 Attention 做 probe，避免复制 1.3B 模型。FFN channel 支持 `channel_method: output_perturbation`，通过实际 `up_proj` hook 和完整模型输出差异评分。没有可用样本或 hook 时仍明确返回 unavailable/weight proxy，不填零分。
@@ -24,6 +25,7 @@
 - Timestep Gate 对 batch 内不同 timestep 使用 active-subset 执行；新增的 `timestep_attention_policy` 对匹配的每个 batch 子集实际缩短 Self-Attention K/V，并记录 rule、完整/选中 token 数与重载后的统计。`Sparse Runtime + Attention Window` 当前明确拒绝，因为尚未实现两种 Attention wrapper 的联合编译，不会静默忽略其中一个。
 - Token 当前包含 Self-Attention 输入选择/恢复和 `token_merge` 路径；后者同时支持兼容旧配置的 1-D adjacent 以及 `(T,H,W)` cuboid TokenMap，保存 anchor/group shape，在合并后的序列上执行 Attention，再 unmerge 回残差长度。三维专用 CUDA Kernel 仍未宣称完成。
 - FLOPs 为 adapter 的结构估计；真实性能结论必须使用 WanVideoEvaluator 的固定 GPU、Prompt、Seed、Scheduler 和 warm-up/repeat 结果。
+- 候选级 `runtime_execution` 是 post-forward trace，用于证明 Token/KV/Window/Timestep 等策略确实改变执行；GPU kernel、端到端延迟和显存仍由独立真实 Wan Evaluator 提供。
 
 ## 测试证据
 

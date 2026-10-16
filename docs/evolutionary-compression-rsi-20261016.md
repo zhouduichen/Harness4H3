@@ -25,6 +25,8 @@ full regression: 1042 passed, 4 skipped
 
 Full RSI 的反馈文件记录了 `pareto_stagnation`、`repeated_algorithm_plan`、`repeated_failure` 和 `latency_diminishing_efficiency_gain` 四类信号。SearchSpace 扩展先经过 proposal、Sandbox、adapter 执行、保存/重载和 finite 检查，再注册到 `S0002`，下一轮 Program 能读取该版本。
 
+标准搜索 trace 现在还为每个已执行候选保存 `runtime_execution`：包括实际 forward 后的策略计数、Token/KV 选中比例、Timestep 跳过比例、结构/FLOPs/参数证据，以及明确的 CPU-only 硬件边界。该字段用于比较候选执行行为，不替代真实 GPU latency、显存或视频质量。
+
 本轮六组配置（`final6`，均启用 `channel_method: output_perturbation`）：
 
 - [`fixed-final6 config`](../configs/evolutionary-compression.fake-protocol-fixed-final6-20261016.yaml)

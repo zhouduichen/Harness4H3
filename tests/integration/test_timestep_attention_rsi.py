@@ -46,4 +46,9 @@ def test_activated_timestep_attention_operator_is_evaluated_inside_search_budget
     candidate = next(item for item in results if item["plan"]["operator"] == "timestep_attention_policy")
     assert candidate["valid"] is True
     assert candidate["failure_reason"] is None
+    assert candidate["runtime_execution"]["available"] is True
+    assert candidate["runtime_execution"]["hardware_latency_available"] is False
+    assert candidate["runtime_execution"]["hardware_latency_reason"]
+    assert "timestep_attention" in candidate["runtime_execution"]["policies"]
+    assert candidate["runtime_execution"]["measurement_domain"] == "post_forward_runtime_trace"
     assert len(results) <= 8

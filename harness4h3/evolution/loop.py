@@ -1673,6 +1673,21 @@ class EvolutionLoop:
                     "search_score": metrics.get("search_score"),
                     "failure_reason": metrics.get("failure_reason"),
                 }
+                # Keep actual candidate execution evidence in the search
+                # trace.  This makes runtime-only candidates comparable and
+                # preserves the explicit boundary between CPU counters and
+                # independent GPU timing.
+                for key in (
+                    "evidence_level",
+                    "structural_change",
+                    "parameter_reduction_ratio",
+                    "compute_metrics",
+                    "estimated_flops",
+                    "runtime_execution",
+                    "hardware_metrics",
+                ):
+                    if key in metrics:
+                        record[key] = metrics[key]
                 depth_records.append(record)
                 measured.append(record)
 

@@ -77,6 +77,136 @@ def _output_metrics(parent_output: Any, child_output: Any) -> Optional[dict[str,
         return None
 
 
+def _json_safe(value: Any) -> Any:
+    """Convert runtime counters to a stable JSON-compatible snapshot."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _sum_counter(value: Any, key: str) -> int:
+    """Sum a named counter through per-block runtime telemetry."""
+
+    if isinstance(value, Mapping):
+        own = value.get(key, 0)
+        total = int(own) if isinstance(own, (int, float)) and not isinstance(own, bool) else 0
+        return total + sum(_sum_counter(item, key) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_sum_counter(item, key) for item in value)
+    return 0
+
+
+def _runtime_execution_evidence(model: Any, structure: Any = None) -> Mapping[str, Any]:
+    """Collect actual runtime-policy counters after a probe forward.
+
+    These counters are execution evidence, not GPU performance claims.  The
+    Fake and Diffusers adapters intentionally expose the same policy families
+    with slightly different storage names, so this boundary normalizes both
+    without making the algorithm evaluator depend on either implementation.
+    """
+
+    root = getattr(model, "transformer", model)
+    aliases = {
+        "timestep_gate": ("runtime_gate_stats", "_harness4h3_gate_stats"),
+        "timestep_attention": ("runtime_timestep_attention_stats", "_harness4h3_timestep_attention_stats"),
+        "token_sparsity": ("runtime_token_stats", "_harness4h3_token_sparsity_stats"),
+        "token_merge": ("_harness4h3_token_merge_stats",),
+        "kv_token_selection": ("_harness4h3_kv_token_selection_stats",),
+        "sparse_runtime": ("_harness4h3_sparse_runtime_stats",),
+        "attention_window": ("_harness4h3_attention_window_stats",),
+        "sampling": ("_harness4h3_sampling_step_stats",),
+    }
+    stats: dict[str, Any] = {}
+    for name, candidates in aliases.items():
+        for candidate in candidates:
+            value = getattr(root, candidate, None)
+            if value is None and root is not model:
+                value = getattr(model, candidate, None)
+            if isinstance(value, Mapping):
+                stats[name] = _json_safe(value)
+                break
+
+    policies: dict[str, Any] = {}
+    for name, attribute in {
+        "runtime_operations": "_harness4h3_runtime_operations",
+        "token_sparsity": "_harness4h3_token_sparsity_policy",
+        "token_merge": "_harness4h3_token_merge_policy",
+        "kv_token_selection": "_harness4h3_kv_token_selection_policy",
+        "sparse_runtime": "_harness4h3_sparse_runtime_policy",
+        "attention_window": "_harness4h3_attention_window_policy",
+        "sampling": "_harness4h3_sampling_step_policy",
+        "timestep_attention": "_harness4h3_timestep_attention_policy",
+    }.items():
+        value = getattr(root, attribute, None)
+        if isinstance(value, (Mapping, list, tuple)) and value:
+            policies[name] = _json_safe(value)
+    fake_timestep_rules = getattr(root, "timestep_attention_rules", None)
+    if fake_timestep_rules and "timestep_attention" not in policies:
+        policies["timestep_attention"] = _json_safe(fake_timestep_rules)
+    if structure is not None:
+        metadata = getattr(structure, "metadata", {})
+        if isinstance(metadata, Mapping):
+            for name in (
+                "runtime_operations",
+                "timestep_attention_policy",
+                "token_sparsity_policy",
+                "token_merge_policy",
+                "kv_token_selection_policy",
+                "sparse_runtime_policy",
+                "attention_window_policy",
+                "sampling_step_policy",
+            ):
+                value = metadata.get(name)
+                if value and name not in policies:
+                    policies[name] = _json_safe(value)
+
+    derived: dict[str, Any] = {}
+    for name, full_key, selected_key in (
+        ("kv_token_selection", "full_kv_tokens", "selected_kv_tokens"),
+        ("sparse_runtime", "full_tokens", "selected_tokens"),
+        ("attention_window", "query_tokens", "selected_kv_tokens"),
+        ("timestep_attention", "full_kv_tokens", "selected_kv_tokens"),
+    ):
+        if name not in stats:
+            continue
+        full = _sum_counter(stats[name], full_key)
+        selected = _sum_counter(stats[name], selected_key)
+        if full > 0:
+            derived[name + "_selected_ratio"] = float(selected) / float(full)
+            derived[name + "_reduction_ratio"] = 1.0 - float(selected) / float(full)
+    if "token_sparsity" in stats:
+        selected = _sum_counter(stats["token_sparsity"], "selected") + _sum_counter(stats["token_sparsity"], "selected_tokens")
+        skipped = _sum_counter(stats["token_sparsity"], "skipped") + _sum_counter(stats["token_sparsity"], "skipped_tokens")
+        if selected + skipped > 0:
+            derived["token_sparsity_selected_ratio"] = float(selected) / float(selected + skipped)
+            derived["token_sparsity_reduction_ratio"] = float(skipped) / float(selected + skipped)
+    if "timestep_gate" in stats:
+        executed = _sum_counter(stats["timestep_gate"], "executed")
+        skipped = _sum_counter(stats["timestep_gate"], "skipped")
+        if executed + skipped > 0:
+            derived["timestep_gate_skip_ratio"] = float(skipped) / float(executed + skipped)
+    if "sampling" in stats:
+        requested = _sum_counter(stats["sampling"], "requested_steps")
+        effective = _sum_counter(stats["sampling"], "effective_steps")
+        if requested > 0:
+            derived["sampling_step_reduction_ratio"] = max(0.0, 1.0 - float(effective) / float(requested))
+
+    return {
+        "available": bool(stats or policies),
+        "measurement_domain": "post_forward_runtime_trace",
+        "stats": stats,
+        "policies": policies,
+        "derived": derived,
+        "hardware_latency_available": False,
+        "hardware_latency_reason": "algorithm probe records execution counters; GPU timing requires the independent Wan evaluator",
+    }
+
+
 def _logical_bytes(path: str | Path) -> int:
     """Count logical checkpoint bytes once per inode.
 
@@ -171,6 +301,8 @@ class AlgorithmModelEvaluator:
             parent_structure = self.adapter.inspect(self._parent_model)
             self._assert_finite(child_model)
             child_output = self.adapter.forward_profile(child_model, self._sample)
+            child_structure = self.adapter.inspect(child_model)
+            runtime_execution = _runtime_execution_evidence(child_model, child_structure)
             if self.calibration_manifest is not None:
                 output = self._measure_tica_outputs(child_model, result.plan)
             else:
@@ -206,6 +338,7 @@ class AlgorithmModelEvaluator:
                 "plan_digest": plan_digest,
                 "operator": result.plan.operator,
                 "structural_change": dict(compression.structural_change),
+                "runtime_execution": runtime_execution,
                 "parent_structure": parent_structure.to_dict(),
                 "child_structure": child_structure.to_dict(),
                 "parameter_count": child_parameters,
