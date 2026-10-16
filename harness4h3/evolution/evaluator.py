@@ -795,6 +795,12 @@ class WanVideoEvaluator:
                 local_files_only=self.config.local_files_only,
                 torch_dtype=getattr(torch, self.config.dtype),
             )
+            # Diffusers drops unknown transformer config fields during load.
+            # Re-read the raw checkpoint manifest so runtime candidates are
+            # evaluated with the same ordered policies that were screened.
+            from ..adapters.wan.diffusers import DiffusersWanAdapter
+
+            DiffusersWanAdapter(local_files_only=self.config.local_files_only).replay_runtime_operations(pipeline, checkpoint)
             pipeline = self._move_pipeline_to_device(pipeline, self.config.resolved_pipeline_device)
             execution_device = torch.device(self.config.device)
             cls = type(

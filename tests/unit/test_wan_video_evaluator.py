@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,6 +61,67 @@ def test_real_evaluator_defaults_quality_device_to_generation_device(tmp_path):
     assert config.quality_device == "cuda:3"
     assert config.resolved_pipeline_device == "cuda:3"
     assert config.source_revision == "test-revision"
+
+
+def test_real_evaluator_replays_raw_runtime_manifest_before_device_move(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "checkpoint"
+    transformer_dir = checkpoint / "transformer"
+    transformer_dir.mkdir(parents=True)
+    (transformer_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "harness4h3_runtime_operations": [
+                    {"operator": "sampling_step_skip", "args": {"target_steps": 4, "strategy": "uniform"}}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class Transformer:
+        def __init__(self):
+            self.config = SimpleNamespace()
+            self.eval_calls = 0
+
+        def eval(self):
+            self.eval_calls += 1
+            return self
+
+    class Pipeline:
+        def __init__(self):
+            self.transformer = Transformer()
+            self.to_calls = []
+
+        def to(self, device):
+            self.to_calls.append(device)
+            return self
+
+        def set_progress_bar_config(self, **kwargs):
+            self.progress_kwargs = kwargs
+
+    pipeline = Pipeline()
+
+    class DiffusionPipeline:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return pipeline
+
+    monkeypatch.setitem(sys.modules, "diffusers", SimpleNamespace(DiffusionPipeline=DiffusionPipeline))
+    evaluator = object.__new__(WanVideoEvaluator)
+    evaluator._pipeline_loader = None
+    evaluator.config = SimpleNamespace(
+        local_files_only=True,
+        dtype="float32",
+        device="cpu",
+        resolved_pipeline_device="cpu",
+    )
+
+    loaded, _torch = evaluator._load_pipeline(str(checkpoint))
+
+    assert loaded is pipeline
+    assert pipeline.transformer._harness4h3_sampling_step_policy["target_steps"] == 4
+    assert [item["operator"] for item in pipeline.transformer._harness4h3_runtime_operations] == ["sampling_step_skip"]
+    assert pipeline.to_calls == ["cpu"]
 
 
 def test_real_evaluator_allows_explicit_pipeline_device_and_binds_recipe(tmp_path):

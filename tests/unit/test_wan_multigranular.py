@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -305,6 +308,30 @@ def test_runtime_operation_order_survives_fake_checkpoint_reload(tmp_path):
     assert reloaded._harness4h3_sampling_step_policy["target_steps"] == 8
     assert reloaded._harness4h3_sparse_runtime_policy["keep_ratio"] == 0.5
     assert reloaded._harness4h3_token_sparsity_policy["block_ids"] == ["block.1"]
+
+
+def test_diffusers_runtime_replay_reads_raw_transformer_config(tmp_path):
+    from harness4h3.adapters.wan.diffusers import DiffusersWanAdapter
+
+    checkpoint = tmp_path / "checkpoint"
+    transformer_dir = checkpoint / "transformer"
+    transformer_dir.mkdir(parents=True)
+    (transformer_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "harness4h3_runtime_operations": [
+                    {"operator": "sampling_step_skip", "args": {"target_steps": 4, "strategy": "uniform"}}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    model = SimpleNamespace(config=SimpleNamespace())
+
+    DiffusersWanAdapter().replay_runtime_operations(model, checkpoint)
+
+    assert model._harness4h3_sampling_step_policy["target_steps"] == 4
+    assert [item["operator"] for item in model._harness4h3_runtime_operations] == ["sampling_step_skip"]
 
 
 def test_diffusers_wan_attention_contract_is_structurally_executable():

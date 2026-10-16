@@ -81,6 +81,26 @@ def _register_config(module: Any, key: str, value: Any) -> None:
         setattr(getattr(module, "config", module), key, value)
 
 
+def _read_runtime_config(checkpoint: str | Path) -> Mapping[str, Any]:
+    """Read EvoCompress runtime metadata from the raw Wan config JSON.
+
+    Diffusers intentionally drops unknown config attributes while constructing
+    a model.  Runtime policies are still persisted in the checkpoint, so
+    replay must read the source JSON rather than trusting ``transformer.config``.
+    """
+
+    path = Path(checkpoint) / "transformer" / "config.json"
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid_runtime_config: %s" % exc) from exc
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid_runtime_config: expected JSON object")
+    return value
+
+
 def _record_runtime_operation(module: Any, operator: str, args: Mapping[str, Any]) -> None:
     """Persist the exact runtime/sampler application order in the transformer config."""
 
@@ -346,6 +366,80 @@ class DiffusersWanAdapter:
             "cuda_loaded": str(self._device).startswith("cuda"),
         }
 
+    def _replay_runtime_config(self, model: Any, config: Mapping[str, Any]) -> None:
+        """Install the persisted runtime policy sequence on a loaded model."""
+
+        transformer = self._transformer(model)
+        runtime_operations = config.get("harness4h3_runtime_operations")
+        if isinstance(runtime_operations, list):
+            # Rebuild the in-memory record while replaying so loading does not
+            # append a second copy of the persisted operation sequence.
+            transformer._harness4h3_runtime_operations = []
+            _register_config(transformer, "harness4h3_runtime_operations", [])
+            for item in runtime_operations:
+                if not isinstance(item, Mapping) or not isinstance(item.get("args", {}), Mapping):
+                    raise ValueError("invalid_runtime_operation_manifest")
+                operator = str(item.get("operator", ""))
+                args = dict(item.get("args") or {})
+                if operator == "timestep_block_gate":
+                    self.apply_timestep_block_gating(model, args.get("rules", []))
+                elif operator == "timestep_attention_policy":
+                    self.apply_timestep_attention_policy(model, args)
+                elif operator == "prune_tokens":
+                    self.apply_token_sparsity(model, args)
+                elif operator == "token_merge":
+                    self.apply_token_merge(model, args)
+                elif operator == "kv_token_select":
+                    self.apply_kv_token_selection(model, args)
+                elif operator == "sparse_runtime":
+                    self.apply_sparse_runtime(model, args)
+                elif operator == "attention_window":
+                    self.apply_attention_window(model, args)
+                elif operator == "sampling_step_skip":
+                    self.apply_sampling_step_policy(model, args)
+                else:
+                    raise ValueError("unsupported_runtime_operation: %s" % operator)
+            return
+
+        # Legacy checkpoints predate the ordered manifest.  Their individual
+        # config fields are replayed in the historical order.
+        runtime_rules = config.get("harness4h3_timestep_block_gating")
+        if runtime_rules:
+            self.apply_timestep_block_gating(model, runtime_rules)
+        runtime_attention_rules = config.get("harness4h3_timestep_attention_policy")
+        if runtime_attention_rules:
+            self.apply_timestep_attention_policy(model, runtime_attention_rules)
+        token_policy = config.get("harness4h3_token_sparsity")
+        if token_policy:
+            self.apply_token_sparsity(model, token_policy)
+        token_merge_policy = config.get("harness4h3_token_merge")
+        if token_merge_policy:
+            self.apply_token_merge(model, token_merge_policy)
+        kv_policy = config.get("harness4h3_kv_token_selection")
+        if kv_policy:
+            self.apply_kv_token_selection(model, kv_policy)
+        sparse_policy = config.get("harness4h3_sparse_runtime")
+        if sparse_policy:
+            self.apply_sparse_runtime(model, sparse_policy)
+        window_policy = config.get("harness4h3_attention_window")
+        if window_policy:
+            self.apply_attention_window(model, window_policy)
+        sampling_policy = config.get("harness4h3_sampling_step")
+        if sampling_policy:
+            self.apply_sampling_step_policy(model, sampling_policy)
+
+    def replay_runtime_operations(self, model: Any, checkpoint: str | Path) -> Any:
+        """Replay runtime policies using the checkpoint's raw manifest.
+
+        This public hook is also used by the independent video evaluator,
+        which loads a full Diffusers pipeline instead of calling ``load_model``.
+        """
+
+        config = _read_runtime_config(checkpoint)
+        if config:
+            self._replay_runtime_config(model, config)
+        return model
+
     def load_model(self, checkpoint: str, *, device: Optional[str] = None, dtype: Optional[str] = None) -> Any:
         torch, _ = _torch_modules()
         pipeline_cls = _import_pipeline()
@@ -354,6 +448,7 @@ class DiffusersWanAdapter:
         pipe = pipeline_cls.from_pretrained(checkpoint, local_files_only=self.local_files_only, torch_dtype=getattr(torch, dtype))
         if not hasattr(pipe, "transformer"):
             raise ValueError("unsupported_model_layout: Wan pipeline has no transformer")
+        self._replay_runtime_config(pipe, _read_runtime_config(checkpoint))
         # Structural exploration only needs the DiT transformer.  Moving the
         # T5 encoder and VAE as well can exceed one GPU and also triggers
         # allocator/NVML issues on otherwise usable multi-GPU hosts.
@@ -363,63 +458,6 @@ class DiffusersWanAdapter:
         self._dtype = str(dtype)
         pipe._harness4h3_checkpoint_root = str(checkpoint)
         pipe._harness4h3_checkpoint_sha256 = _transformer_checkpoint_sha256(checkpoint)
-        config = getattr(pipe.transformer, "config", None)
-        runtime_operations = getattr(config, "harness4h3_runtime_operations", None)
-        if isinstance(runtime_operations, list):
-            # Rebuild the in-memory record while replaying so loading does not
-            # append a second copy of the persisted operation sequence.
-            pipe.transformer._harness4h3_runtime_operations = []
-            _register_config(pipe.transformer, "harness4h3_runtime_operations", [])
-            for item in runtime_operations:
-                if not isinstance(item, Mapping) or not isinstance(item.get("args", {}), Mapping):
-                    raise ValueError("invalid_runtime_operation_manifest")
-                operator = str(item.get("operator", ""))
-                args = dict(item.get("args") or {})
-                if operator == "timestep_block_gate":
-                    self.apply_timestep_block_gating(pipe, args.get("rules", []))
-                elif operator == "timestep_attention_policy":
-                    self.apply_timestep_attention_policy(pipe, args)
-                elif operator == "prune_tokens":
-                    self.apply_token_sparsity(pipe, args)
-                elif operator == "token_merge":
-                    self.apply_token_merge(pipe, args)
-                elif operator == "kv_token_select":
-                    self.apply_kv_token_selection(pipe, args)
-                elif operator == "sparse_runtime":
-                    self.apply_sparse_runtime(pipe, args)
-                elif operator == "attention_window":
-                    self.apply_attention_window(pipe, args)
-                elif operator == "sampling_step_skip":
-                    self.apply_sampling_step_policy(pipe, args)
-                else:
-                    raise ValueError("unsupported_runtime_operation: %s" % operator)
-        else:
-            # Legacy checkpoints predate the ordered manifest.  Their
-            # individual config fields are replayed in the historical order.
-            runtime_rules = getattr(config, "harness4h3_timestep_block_gating", None)
-            if runtime_rules:
-                self.apply_timestep_block_gating(pipe, runtime_rules)
-            runtime_attention_rules = getattr(config, "harness4h3_timestep_attention_policy", None)
-            if runtime_attention_rules:
-                self.apply_timestep_attention_policy(pipe, runtime_attention_rules)
-            token_policy = getattr(config, "harness4h3_token_sparsity", None)
-            if token_policy:
-                self.apply_token_sparsity(pipe, token_policy)
-            token_merge_policy = getattr(config, "harness4h3_token_merge", None)
-            if token_merge_policy:
-                self.apply_token_merge(pipe, token_merge_policy)
-            kv_policy = getattr(config, "harness4h3_kv_token_selection", None)
-            if kv_policy:
-                self.apply_kv_token_selection(pipe, kv_policy)
-            sparse_policy = getattr(config, "harness4h3_sparse_runtime", None)
-            if sparse_policy:
-                self.apply_sparse_runtime(pipe, sparse_policy)
-            window_policy = getattr(config, "harness4h3_attention_window", None)
-            if window_policy:
-                self.apply_attention_window(pipe, window_policy)
-            sampling_policy = getattr(config, "harness4h3_sampling_step", None)
-            if sampling_policy:
-                self.apply_sampling_step_policy(pipe, sampling_policy)
         return pipe
 
     @classmethod
