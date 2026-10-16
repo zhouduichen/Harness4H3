@@ -50,6 +50,7 @@ class CompressionPlan:
         "attention_window",
         "sampling_step_skip",
         "timestep_block_gate",
+        "timestep_attention_policy",
         "compose",
     })
     BASE_OPERATORS = frozenset({
@@ -65,6 +66,7 @@ class CompressionPlan:
         "attention_window",
         "sampling_step_skip",
         "timestep_block_gate",
+        "timestep_attention_policy",
     })
     MAX_COMPOSITE_STEPS = 6
 
@@ -198,6 +200,27 @@ class CompressionPlan:
                 raise ValueError("algorithm_output_invalid: timestep_block_gate requires rules and policy")
             if not all(isinstance(item, Mapping) for item in args["rules"]):
                 raise ValueError("algorithm_output_invalid: timestep rules must contain objects")
+        if operator == "timestep_attention_policy":
+            required = {"rules", "policy"}
+            if set(args) != required or not isinstance(args["rules"], list) or not isinstance(args["policy"], str):
+                raise ValueError("algorithm_output_invalid: timestep_attention_policy requires rules and policy")
+            if args["policy"] != "select_kv_tokens" or not args["rules"] or not all(isinstance(item, Mapping) for item in args["rules"]):
+                raise ValueError("algorithm_output_invalid: invalid timestep attention policy")
+            for rule in args["rules"]:
+                required_rule = {"min_timestep", "max_timestep", "keep_ratio"}
+                if not required_rule <= set(rule) or set(rule) - {"min_timestep", "max_timestep", "keep_ratio", "block_ids", "score"}:
+                    raise ValueError("algorithm_output_invalid: invalid timestep attention rule")
+                for name in required_rule:
+                    if not isinstance(rule[name], (int, float)) or isinstance(rule[name], bool):
+                        raise ValueError("algorithm_output_invalid: timestep attention numeric field invalid")
+                if not 0.0 <= float(rule["min_timestep"]) <= float(rule["max_timestep"]) <= 1.0:
+                    raise ValueError("algorithm_output_invalid: timestep attention interval invalid")
+                if not 0.0 < float(rule["keep_ratio"]) <= 1.0:
+                    raise ValueError("algorithm_output_invalid: timestep attention keep_ratio invalid")
+                if "block_ids" in rule and (not isinstance(rule["block_ids"], list) or not all(isinstance(item, str) for item in rule["block_ids"])):
+                    raise ValueError("algorithm_output_invalid: timestep attention block_ids invalid")
+                if "score" in rule and rule["score"] not in {"l2_norm", "mean_abs"}:
+                    raise ValueError("algorithm_output_invalid: timestep attention score invalid")
         return cls(str(operator), {str(key): value for key, value in args.items()})
 
     @classmethod

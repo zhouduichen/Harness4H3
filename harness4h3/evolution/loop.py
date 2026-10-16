@@ -1895,7 +1895,11 @@ class EvolutionLoop:
             return
         # A validated active extension is already the result of an earlier
         # evidence gate. Do not repeatedly rediscover the same capability.
-        if len(self.search_space_version.operators) > len(default_search_space().operators):
+        # Permit the first two evidence-backed extensions (the original
+        # timestep gate and then a timestep-conditioned attention budget).
+        # Later generations must not grow the registry without a new audit
+        # rule, otherwise a noisy CPU run could keep adding duplicate ideas.
+        if len(self.search_space_version.operators) > len(default_search_space().operators) + 1:
             return
         history = self._feedback_history()
         failures = tuple(str(item) for item in feedback.get("signals", ()))

@@ -11,7 +11,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange
 from .attention import prune_attention_module_heads
 from ...operators.wan.token_geometry import merge_token_sequence
-from ...operators.wan.runtime_gating import normalized_timesteps, rule_matches, rules_to_dict, validate_timestep_gate_plan
+from ...operators.wan.runtime_gating import TimestepAttentionRule, normalized_timesteps, rule_matches, rules_to_dict, validate_timestep_attention_plan, validate_timestep_gate_plan
 from ...operators.wan.runtime_policy import AttentionWindowPolicy, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
 
 
@@ -377,6 +377,8 @@ class DiffusersWanAdapter:
                 args = dict(item.get("args") or {})
                 if operator == "timestep_block_gate":
                     self.apply_timestep_block_gating(pipe, args.get("rules", []))
+                elif operator == "timestep_attention_policy":
+                    self.apply_timestep_attention_policy(pipe, args)
                 elif operator == "prune_tokens":
                     self.apply_token_sparsity(pipe, args)
                 elif operator == "token_merge":
@@ -397,6 +399,9 @@ class DiffusersWanAdapter:
             runtime_rules = getattr(config, "harness4h3_timestep_block_gating", None)
             if runtime_rules:
                 self.apply_timestep_block_gating(pipe, runtime_rules)
+            runtime_attention_rules = getattr(config, "harness4h3_timestep_attention_policy", None)
+            if runtime_attention_rules:
+                self.apply_timestep_attention_policy(pipe, runtime_attention_rules)
             token_policy = getattr(config, "harness4h3_token_sparsity", None)
             if token_policy:
                 self.apply_token_sparsity(pipe, token_policy)
@@ -456,6 +461,8 @@ class DiffusersWanAdapter:
                 "profile_device": self._device,
                 "profile_dtype": self._dtype,
                 "token_sparsity_policy": dict(getattr(transformer, "_harness4h3_token_sparsity_policy", {}) or {}),
+                "timestep_attention_policy": dict(getattr(transformer, "_harness4h3_timestep_attention_policy", {}) or {}),
+                "timestep_attention_stats": dict(getattr(transformer, "_harness4h3_timestep_attention_stats", {}) or {}),
                 "token_merge_policy": dict(getattr(transformer, "_harness4h3_token_merge_policy", {}) or {}),
                 "kv_token_selection_policy": dict(getattr(transformer, "_harness4h3_kv_token_selection_policy", {}) or {}),
                 "sparse_runtime_policy": dict(getattr(transformer, "_harness4h3_sparse_runtime_policy", {}) or {}),
@@ -1140,6 +1147,140 @@ class DiffusersWanAdapter:
                 "rules": rules_to_dict(validated),
                 "parameter_reduction_ratio": 0.0,
                 "dynamic_compute": True,
+            },
+        )
+
+    def apply_timestep_attention_policy(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
+        """Select a real self-attention K/V budget from the current timestep.
+
+        The wrapper groups mixed-timestep batches before attention, so no
+        sample silently inherits the first element's policy.  Matched groups
+        call the same RoPE/QK-Norm/output path as the ordinary KV selector,
+        but pass a smaller K/V tensor to SDPA; unmatched groups delegate to
+        the original (or previously installed) attention implementation.
+        """
+
+        torch, _ = _torch_modules()
+        transformer = self._transformer(model)
+        _path, blocks = self._blocks(model)
+        block_ids = ["block.%d" % index for index in range(len(blocks))]
+        validated = validate_timestep_attention_plan(
+            {"rules": [dict(item) for item in policy.get("rules", [])], "policy": policy.get("policy")},
+            block_ids,
+        )
+        serialized_rules = [rule.to_dict() for rule in validated]
+        _register_config(transformer, "harness4h3_timestep_attention_policy", {"rules": serialized_rules, "policy": "select_kv_tokens"})
+        transformer._harness4h3_timestep_attention_policy = {"rules": serialized_rules, "policy": "select_kv_tokens"}
+        transformer._harness4h3_timestep_attention_rules = validated
+        transformer._harness4h3_timestep_attention_stats = {
+            block_id: {"calls": 0, "full_kv_tokens": 0, "selected_kv_tokens": 0, "by_rule": {}}
+            for block_id in block_ids
+        }
+        _record_runtime_operation(transformer, "timestep_attention_policy", transformer._harness4h3_timestep_attention_policy)
+
+        if not hasattr(transformer, "_harness4h3_timestep_attention_base_forward"):
+            base_transformer_forward = transformer.forward
+
+            def timestep_transformer_forward(transformer_self: Any, hidden_states: Any, timestep: Any, *args: Any, _base: Any = base_transformer_forward, **kwargs: Any) -> Any:
+                transformer_self._harness4h3_current_timestep = timestep
+                try:
+                    return _base(hidden_states, timestep, *args, **kwargs)
+                finally:
+                    transformer_self._harness4h3_current_timestep = None
+
+            transformer._harness4h3_timestep_attention_base_forward = base_transformer_forward
+            transformer.forward = MethodType(timestep_transformer_forward, transformer)
+
+        for index, block in enumerate(blocks):
+            block_id = "block.%d" % index
+            attention = getattr(block, "attn1", None)
+            if attention is None or hasattr(attention, "_harness4h3_timestep_attention_base_forward"):
+                continue
+            base = attention.forward
+
+            def timestep_attention_forward(
+                attention_self: Any,
+                hidden_states: Any,
+                encoder_hidden_states: Any = None,
+                attention_mask: Any = None,
+                rotary_emb: Any = None,
+                *args: Any,
+                _block_id: str = block_id,
+                _base: Any = base,
+                **kwargs: Any,
+            ) -> Any:
+                current_timestep = getattr(transformer, "_harness4h3_current_timestep", None)
+                if current_timestep is None or encoder_hidden_states is not None or getattr(hidden_states, "ndim", 0) < 3 or int(hidden_states.shape[1]) <= 1:
+                    return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
+                batch_size = int(hidden_states.shape[0])
+                timesteps = normalized_timesteps(current_timestep, batch_size)
+                selected_rules = tuple(
+                    next((rule for rule in getattr(transformer, "_harness4h3_timestep_attention_rules", ()) if rule.applies_to(_block_id) and rule_matches(rule, value)), None)
+                    for value in timesteps
+                )
+                if not any(rule is not None for rule in selected_rules):
+                    return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
+
+                def select_batch(value: Any, indices: Any) -> Any:
+                    if hasattr(value, "shape") and getattr(value, "ndim", 0) > 0 and int(value.shape[0]) == batch_size:
+                        return value.index_select(0, indices.to(value.device))
+                    if isinstance(value, tuple):
+                        return tuple(select_batch(item, indices) for item in value)
+                    if isinstance(value, list):
+                        return [select_batch(item, indices) for item in value]
+                    if isinstance(value, Mapping):
+                        return {key: select_batch(item, indices) for key, item in value.items()}
+                    return value
+
+                output = hidden_states.clone()
+                groups: dict[str | None, list[int]] = {}
+                rule_by_key: dict[str | None, TimestepAttentionRule | None] = {}
+                for local_index, rule in enumerate(selected_rules):
+                    key = None if rule is None else repr(rule.to_dict())
+                    groups.setdefault(key, []).append(local_index)
+                    rule_by_key[key] = rule
+                for key, local_indices in groups.items():
+                    indices = torch.tensor(local_indices, device=hidden_states.device, dtype=torch.long)
+                    local_hidden = hidden_states.index_select(0, indices)
+                    local_encoder = select_batch(encoder_hidden_states, indices)
+                    local_mask = select_batch(attention_mask, indices)
+                    local_rotary = select_batch(rotary_emb, indices)
+                    local_args = tuple(select_batch(item, indices) for item in args)
+                    local_kwargs = {name: select_batch(item, indices) for name, item in kwargs.items()}
+                    rule = rule_by_key[key]
+                    if rule is None:
+                        local_output = _base(local_hidden, local_encoder, local_mask, local_rotary, *local_args, **local_kwargs)
+                    else:
+                        kv_indices = _select_kv_indices(local_hidden, rule.keep_ratio, rule.score, torch)
+                        keys = local_hidden.index_select(1, kv_indices)
+                        local_output = _wan_sparse_self_attention(
+                            attention_self,
+                            local_hidden,
+                            keys,
+                            kv_indices,
+                            local_rotary,
+                            torch,
+                        )
+                        stats = transformer._harness4h3_timestep_attention_stats[_block_id]
+                        stats["calls"] += 1
+                        stats["full_kv_tokens"] += int(local_hidden.shape[1]) * int(local_hidden.shape[0])
+                        stats["selected_kv_tokens"] += int(kv_indices.numel()) * int(local_hidden.shape[0])
+                        rule_key = "%s:%s" % (rule.min_timestep, rule.max_timestep)
+                        stats["by_rule"][rule_key] = int(stats["by_rule"].get(rule_key, 0)) + int(local_hidden.shape[0])
+                    output.index_copy_(0, indices, local_output)
+                return output
+
+            attention._harness4h3_timestep_attention_base_forward = base
+            attention.forward = MethodType(timestep_attention_forward, attention)
+        return StructuralChange(
+            "runtime_timestep_attention_policy",
+            {
+                "runtime_operator": "timestep_attention_policy",
+                "rules": serialized_rules,
+                "policy": "select_kv_tokens",
+                "parameter_reduction_ratio": 0.0,
+                "dynamic_compute": True,
+                "per_sample_timestep": True,
             },
         )
 

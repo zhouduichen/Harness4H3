@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, ChannelPruningConfig, CompressionResult, WanModelAdapter
-from .runtime_gating import validate_timestep_gate_plan
+from .runtime_gating import validate_timestep_attention_plan, validate_timestep_gate_plan
 from .runtime_policy import AttentionWindowPolicy, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy
 
 
@@ -243,6 +243,48 @@ class TimestepBlockGatingOperator:
             return _failed(parent, _failure_type(exc, "timestep_gate_failed"), str(exc), started)
 
 
+class TimestepAttentionPolicyOperator:
+    """Select the actual self-attention K/V budget from each sample's timestep."""
+
+    name = "timestep_attention_policy"
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        started = time.monotonic()
+        try:
+            model = adapter.reload_model(parent)
+            block_ids = [item.block_id for item in adapter.get_blocks(model)]
+            rules = validate_timestep_attention_plan(plan, block_ids)
+            change = adapter.apply_timestep_attention_policy(model, {"rules": [rule.to_dict() for rule in rules], "policy": "select_kv_tokens"})
+            child = adapter.save_model(model, Path(output_dir))
+            if child.sha256 == parent.sha256:
+                return _failed(parent, "checkpoint_not_changed", "timestep attention policy did not change checkpoint configuration", started)
+            reloaded = adapter.reload_model(child)
+            restored = getattr(reloaded, "timestep_attention_rules", None)
+            transformer = getattr(reloaded, "transformer", reloaded)
+            if restored is None:
+                restored = getattr(getattr(transformer, "config", None), "harness4h3_timestep_attention_policy", None)
+            if not restored:
+                return _failed(parent, "timestep_attention_reload_failed", "timestep attention rules were not restored", started)
+            return CompressionResult(
+                "success",
+                parent.sha256,
+                child,
+                {
+                    "kind": "runtime_timestep_attention_policy",
+                    "runtime_operator": self.name,
+                    "rules": [rule.to_dict() for rule in rules],
+                    "policy": "select_kv_tokens",
+                    "parameter_reduction_ratio": 0.0,
+                    "dynamic_compute": True,
+                    "per_sample_timestep": True,
+                    "child_reload_verified": True,
+                },
+                wall_time_s=time.monotonic() - started,
+            )
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            return _failed(parent, _failure_type(exc, "timestep_attention_policy_failed"), str(exc), started)
+
+
 class TICAPruningOperator:
     """Execute a TICA recipe through existing trusted structural mutations."""
 
@@ -316,6 +358,7 @@ class CompositeCompressionOperator:
         "attention_window": AttentionWindowOperator,
         "sampling_step_skip": SamplingStepSkipOperator,
         "timestep_block_gate": TimestepBlockGatingOperator,
+        "timestep_attention_policy": TimestepAttentionPolicyOperator,
     }
 
     def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
@@ -441,6 +484,7 @@ def build_wan_compression_registry(*, include_tica: bool = False, include_multig
                 AttentionWindowOperator(),
                 SamplingStepSkipOperator(),
                 TimestepBlockGatingOperator(),
+                TimestepAttentionPolicyOperator(),
             ]
         )
     if include_tica:

@@ -160,6 +160,11 @@ def _search_program_suffix(algorithm_id: str, *, exploration: bool = False) -> s
         "    # budget even when exploration reverses the candidate ranking.\n"
         "    if 'timestep_block_gate' in names and ordered:\n"
         "        add({'operator': 'timestep_block_gate', 'args': {'rules': [{'block_id': ordered[0], 'min_timestep': 0.0, 'max_timestep': 0.3}], 'policy': 'skip_when_in_range'}})\n"
+        "    if 'timestep_attention_policy' in names and ordered:\n"
+        "        add({'operator': 'timestep_attention_policy', 'args': {'rules': [\n"
+        "            {'min_timestep': 0.0, 'max_timestep': 0.3, 'keep_ratio': 0.5, 'block_ids': [ordered[0]], 'score': 'l2_norm'},\n"
+        "            {'min_timestep': 0.7, 'max_timestep': 1.0, 'keep_ratio': 0.75, 'block_ids': [ordered[0]], 'score': 'l2_norm'},\n"
+        "        ], 'policy': 'select_kv_tokens'}})\n"
         "    if not candidates:\n"
         "        fallback = 'block.' + str(int(state.get('depth', 0)))\n"
         "        return {'candidates': [{'operator': 'prune_blocks', 'args': {'block_ids': [fallback]}}], 'rank': [0], 'stop': True}\n"
@@ -483,6 +488,33 @@ class AlgorithmAgent:
                     "implementation_source": implementation_source,
                 },
                 "rationale": "timestep-local quality/latency feedback motivates a dynamic Block gate that preserves parameters while changing the executed path",
+                "evidence_ids": tuple(str(item) for item in failures if str(item).strip())[:16] or ("offline-bootstrap",),
+            }
+        if (
+            "timestep_block_gate" in active_names
+            and "timestep_attention_policy" not in active_names
+            and any(token in failure_text for token in ("timestep", "dynamic", "latency", "attention", "pareto"))
+        ):
+            implementation_source = """def propose(profile, history):
+    layers = profile.get('layers', [])
+    block_id = str(layers[0].get('block_id')) if layers else 'block.0'
+    return {'operator': 'timestep_attention_policy', 'args': {'rules': [
+        {'min_timestep': 0.0, 'max_timestep': 0.3, 'keep_ratio': 0.5, 'block_ids': [block_id], 'score': 'l2_norm'},
+        {'min_timestep': 0.7, 'max_timestep': 1.0, 'keep_ratio': 0.75, 'block_ids': [block_id], 'score': 'l2_norm'},
+    ], 'policy': 'select_kv_tokens'}}
+"""
+            return {
+                "spec": {
+                    "name": "timestep_attention_policy",
+                    "version": "1",
+                    "argument_schema": {"rules": "list[object]", "policy": "str"},
+                    "granularity": "timestep_attention",
+                    "constraints": ["per_sample_timestep", "reduced_kv_length", "self_attention_only"],
+                    "limitations": ["runtime_only", "cpu_fake_structure_evidence_only", "requires_real_wan_replay_for_hardware_claim"],
+                    "trusted_factory_key": "timestep_attention_policy",
+                    "implementation_source": implementation_source,
+                },
+                "rationale": "block-only timestep gating leaves attention/token compute unchanged; add a validated per-sample K/V budget",
                 "evidence_ids": tuple(str(item) for item in failures if str(item).strip())[:16] or ("offline-bootstrap",),
             }
         if "prune_ffn_by_weight_threshold" in active_names:

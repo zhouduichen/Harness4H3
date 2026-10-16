@@ -16,7 +16,7 @@ from .contracts import (
     StructuralChange,
     checkpoint_content_sha256,
 )
-from ...operators.wan.runtime_gating import TimestepGateRule, normalized_timesteps, rule_matches, validate_timestep_gate_plan
+from ...operators.wan.runtime_gating import TimestepAttentionRule, TimestepGateRule, normalized_timesteps, rule_matches, validate_timestep_attention_plan, validate_timestep_gate_plan
 from ...operators.wan.runtime_policy import AttentionWindowPolicy, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
 from ...operators.wan.token_geometry import merge_token_sequence
 from .attention import prune_attention_module_heads
@@ -105,7 +105,7 @@ def _fake_attention_module(hidden_size: int, heads: int, head_dim: int | None = 
                         "group_shape": list(group_shape) if group_shape is not None else None,
                     }
             policy = getattr(self, "_harness4h3_sparse_policy", None)
-            kv_policy = getattr(self, "_harness4h3_kv_token_selection_policy", None)
+            kv_policy = getattr(self, "_harness4h3_timestep_kv_policy", None) or getattr(self, "_harness4h3_kv_token_selection_policy", None)
             if kv_policy and encoder_hidden_states is None and hidden.ndim >= 3 and hidden.shape[1] > 1 and (not kv_policy.get("block_ids") or block_id in kv_policy["block_ids"]):
                 keep = max(1, min(int(hidden.shape[1]), int(round(float(hidden.shape[1]) * float(kv_policy["keep_ratio"])))) )
                 scores = context.detach().float().pow(2).mean(dim=-1) if kv_policy.get("score", "l2_norm") == "l2_norm" else context.detach().float().abs().mean(dim=-1)
@@ -117,6 +117,7 @@ def _fake_attention_module(hidden_size: int, heads: int, head_dim: int | None = 
                     "selected_kv_tokens": int(keep),
                     "indices": indices.detach().cpu().tolist(),
                 }
+                self._harness4h3_last_kv_token_selection_stats = dict(self._harness4h3_kv_token_selection_stats)
             if policy and context.ndim >= 3 and context.shape[1] > 1 and encoder_hidden_states is None:
                 keep = max(1, min(int(context.shape[1]), int(round(float(context.shape[1]) * float(policy["keep_ratio"])))) )
                 scores = context.detach().float().pow(2).mean(dim=-1)
@@ -213,7 +214,7 @@ def _copy_module(module: Any) -> Any:
 class FakeWanDiT:
     """Small Torch module kept separate so the adapter owns structure policy."""
 
-    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None, num_heads: int = 4, attention_head_dim: int | None = None, runtime_gate_rules: Sequence[Mapping[str, Any]] | None = None, token_sparsity_policy: Mapping[str, Any] | None = None, token_merge_policy: Mapping[str, Any] | None = None, kv_token_selection_policy: Mapping[str, Any] | None = None, sparse_runtime_policy: Mapping[str, Any] | None = None, attention_window_policy: Mapping[str, Any] | None = None, sampling_step_policy: Mapping[str, Any] | None = None, runtime_operations: Sequence[Mapping[str, Any]] | None = None) -> None:
+    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None, num_heads: int = 4, attention_head_dim: int | None = None, runtime_gate_rules: Sequence[Mapping[str, Any]] | None = None, timestep_attention_rules: Sequence[Mapping[str, Any]] | None = None, token_sparsity_policy: Mapping[str, Any] | None = None, token_merge_policy: Mapping[str, Any] | None = None, kv_token_selection_policy: Mapping[str, Any] | None = None, sparse_runtime_policy: Mapping[str, Any] | None = None, attention_window_policy: Mapping[str, Any] | None = None, sampling_step_policy: Mapping[str, Any] | None = None, runtime_operations: Sequence[Mapping[str, Any]] | None = None) -> None:
         _, nn = _torch()
         widths = list(ffn_widths or [ffn_width] * block_count)
         if len(widths) != block_count:
@@ -235,6 +236,7 @@ class FakeWanDiT:
         self.output = nn.Linear(self.hidden_size, self.hidden_size)
         self._artifact_sha256 = "0" * 64
         self.runtime_gate_rules = [dict(item) for item in (runtime_gate_rules or [])]
+        self.timestep_attention_rules = [dict(item) for item in (timestep_attention_rules or [])]
         self._harness4h3_token_sparsity_policy = dict(token_sparsity_policy or {})
         self._harness4h3_token_merge_policy = dict(token_merge_policy or {})
         self._harness4h3_kv_token_selection_policy = dict(kv_token_selection_policy or {})
@@ -258,6 +260,10 @@ class FakeWanDiT:
             str(block_id): {"executed": 0, "skipped": 0}
             for block_id in self.block_ids
         }
+        self.runtime_timestep_attention_stats = {
+            str(block_id): {"calls": 0, "full_kv_tokens": 0, "selected_kv_tokens": 0, "by_rule": {}}
+            for block_id in self.block_ids
+        }
         self.runtime_token_stats = {str(block_id): {"selected": 0, "skipped": 0} for block_id in self.block_ids}
 
     def __call__(self, value: Any, timestep: Any = None) -> Any:
@@ -267,10 +273,11 @@ class FakeWanDiT:
         batch_size = int(value.shape[0]) if getattr(value, "ndim", 0) >= 1 else 1
         current_timesteps = (0.5,) * batch_size if timestep is None else normalized_timesteps(timestep, batch_size)
         rules = {str(item["block_id"]): TimestepGateRule.from_mapping(item) for item in self.runtime_gate_rules}
+        timestep_attention_rules = tuple(TimestepAttentionRule.from_mapping(item) for item in self.timestep_attention_rules)
         token_policy = TokenSparsityPolicy.from_mapping(self._harness4h3_token_sparsity_policy) if self._harness4h3_token_sparsity_policy else None
 
-        def run_block(inputs: Any, block: Any) -> Any:
-            if token_policy is not None and (not token_policy.block_ids or block_id in token_policy.block_ids) and inputs.ndim >= 3 and inputs.shape[1] > 1:
+        def run_block(inputs: Any, block: Any, current_block_id: str) -> Any:
+            if token_policy is not None and (not token_policy.block_ids or current_block_id in token_policy.block_ids) and inputs.ndim >= 3 and inputs.shape[1] > 1:
                 count = max(1, min(int(inputs.shape[1]), int(round(float(inputs.shape[1]) * token_policy.keep_ratio))))
                 scores = inputs.detach().float().pow(2).mean(dim=-1)
                 indices = scores.topk(count, dim=1).indices
@@ -278,10 +285,64 @@ class FakeWanDiT:
                 updated = selected + block(selected)
                 result = inputs.clone()
                 result.scatter_(1, indices.unsqueeze(-1).expand_as(updated), updated)
-                self.runtime_token_stats[str(block_id)]["selected"] += int(count * inputs.shape[0])
-                self.runtime_token_stats[str(block_id)]["skipped"] += int((inputs.shape[1] - count) * inputs.shape[0])
+                self.runtime_token_stats[str(current_block_id)]["selected"] += int(count * inputs.shape[0])
+                self.runtime_token_stats[str(current_block_id)]["skipped"] += int((inputs.shape[1] - count) * inputs.shape[0])
                 return result
             return inputs + block(inputs)
+
+        def run_attention_group(inputs: Any, block: Any, current_block_id: str, rule: TimestepAttentionRule | None) -> Any:
+            attention = block.attn1
+            marker = object()
+            previous = getattr(attention, "_harness4h3_timestep_kv_policy", marker)
+            if rule is not None and hasattr(attention, "_harness4h3_last_kv_token_selection_stats"):
+                delattr(attention, "_harness4h3_last_kv_token_selection_stats")
+            if rule is None:
+                if hasattr(attention, "_harness4h3_timestep_kv_policy"):
+                    delattr(attention, "_harness4h3_timestep_kv_policy")
+            else:
+                attention._harness4h3_timestep_kv_policy = rule.to_dict()
+            try:
+                output = run_block(inputs, block, current_block_id)
+                if rule is not None:
+                    observed = getattr(attention, "_harness4h3_last_kv_token_selection_stats", None)
+                    if isinstance(observed, Mapping):
+                        stats = self.runtime_timestep_attention_stats[str(current_block_id)]
+                        stats["calls"] += 1
+                        stats["full_kv_tokens"] += int(observed.get("full_kv_tokens", 0)) * int(inputs.shape[0])
+                        stats["selected_kv_tokens"] += int(observed.get("selected_kv_tokens", 0)) * int(inputs.shape[0])
+                        key = "%s:%s" % (rule.min_timestep, rule.max_timestep)
+                        stats["by_rule"][key] = int(stats["by_rule"].get(key, 0)) + int(inputs.shape[0])
+                return output
+            finally:
+                if previous is marker:
+                    if hasattr(attention, "_harness4h3_timestep_kv_policy"):
+                        delattr(attention, "_harness4h3_timestep_kv_policy")
+                else:
+                    attention._harness4h3_timestep_kv_policy = previous
+
+        def run_timestep_groups(inputs: Any, block: Any, current_block_id: str, timesteps: Sequence[float]) -> Any:
+            if not timestep_attention_rules:
+                return run_attention_group(inputs, block, current_block_id, None)
+            selected = tuple(
+                next((rule for rule in timestep_attention_rules if rule.applies_to(current_block_id) and rule_matches(rule, current)), None)
+                for current in timesteps
+            )
+            keys = tuple(None if rule is None else repr(rule.to_dict()) for rule in selected)
+            if len(set(keys)) <= 1:
+                return run_attention_group(inputs, block, current_block_id, selected[0] if selected else None)
+            torch, _ = _torch()
+            output = inputs.clone()
+            groups: dict[str | None, list[int]] = {}
+            rule_by_key: dict[str | None, TimestepAttentionRule | None] = {}
+            for index, rule in enumerate(selected):
+                key = None if rule is None else repr(rule.to_dict())
+                groups.setdefault(key, []).append(index)
+                rule_by_key[key] = rule
+            for key, indices in groups.items():
+                index_tensor = torch.tensor(indices, device=inputs.device, dtype=torch.long)
+                group_output = run_attention_group(inputs.index_select(0, index_tensor), block, current_block_id, rule_by_key[key])
+                output.index_copy_(0, index_tensor, group_output)
+            return output
 
         for block_id, block in zip(self.block_ids, self.blocks):
             rule = rules.get(str(block_id))
@@ -294,12 +355,12 @@ class FakeWanDiT:
             active = tuple(index for index, should_skip in enumerate(skip) if not should_skip)
             if len(active) == batch_size:
                 self.runtime_gate_stats[str(block_id)]["executed"] += 1
-                value = run_block(value, block)
+                value = run_timestep_groups(value, block, str(block_id), current_timesteps)
             else:
                 torch, _ = _torch()
                 active_indices = torch.tensor(active, device=value.device, dtype=torch.long)
                 active_value = value.index_select(0, active_indices)
-                active_value = run_block(active_value, block)
+                active_value = run_timestep_groups(active_value, block, str(block_id), tuple(current_timesteps[index] for index in active))
                 value = value.clone()
                 value.index_copy_(0, active_indices, active_value)
                 self.runtime_gate_stats[str(block_id)]["executed"] += 1
@@ -372,6 +433,7 @@ class FakeWanDiTAdapter:
                 num_heads=int(config.get("num_heads", 4)),
                 attention_head_dim=int(config.get("attention_head_dim", int(config["hidden_size"]) // int(config.get("num_heads", 4)))),
                 runtime_gate_rules=config.get("runtime_gate_rules", []),
+                timestep_attention_rules=config.get("timestep_attention_rules", []),
                 token_sparsity_policy=config.get("token_sparsity_policy", {}),
                 token_merge_policy=config.get("token_merge_policy", {}),
                 kv_token_selection_policy=config.get("kv_token_selection_policy", {}),
@@ -409,6 +471,8 @@ class FakeWanDiTAdapter:
                 "num_attention_heads": int(model.blocks[0].attn1.heads),
                 "attention_head_dim": int(model.blocks[0].attn1.inner_dim // model.blocks[0].attn1.heads),
                 "token_sparsity_policy": dict(model._harness4h3_token_sparsity_policy),
+                "timestep_attention_rules": list(model.timestep_attention_rules),
+                "runtime_timestep_attention_stats": {block_id: dict(stats) for block_id, stats in model.runtime_timestep_attention_stats.items()},
                 "token_merge_policy": dict(model._harness4h3_token_merge_policy),
                 "kv_token_selection_policy": dict(model._harness4h3_kv_token_selection_policy),
                 "sparse_runtime_policy": dict(model._harness4h3_sparse_runtime_policy),
@@ -597,6 +661,7 @@ class FakeWanDiTAdapter:
             "num_heads": int(model.blocks[0].attn1.heads),
             "attention_head_dim": int(model.blocks[0].attn1.inner_dim // model.blocks[0].attn1.heads),
             "runtime_gate_rules": list(model.runtime_gate_rules),
+            "timestep_attention_rules": list(model.timestep_attention_rules),
             "token_sparsity_policy": dict(model._harness4h3_token_sparsity_policy),
             "token_merge_policy": dict(model._harness4h3_token_merge_policy),
             "kv_token_selection_policy": dict(model._harness4h3_kv_token_selection_policy),
@@ -724,5 +789,30 @@ class FakeWanDiTAdapter:
                 "rules": [rule.to_dict() for rule in validated],
                 "parameter_reduction_ratio": 0.0,
                 "dynamic_compute": True,
+            },
+        )
+
+    def apply_timestep_attention_policy(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
+        validated = validate_timestep_attention_plan(
+            {"rules": [dict(item) for item in policy.get("rules", [])], "policy": policy.get("policy")},
+            model.block_ids,
+        )
+        model.timestep_attention_rules = [dict(rule.to_dict()) for rule in validated]
+        model.runtime_timestep_attention_stats = {
+            str(block_id): {"calls": 0, "full_kv_tokens": 0, "selected_kv_tokens": 0, "by_rule": {}}
+            for block_id in model.block_ids
+        }
+        model._harness4h3_runtime_operations.append(
+            {"operator": "timestep_attention_policy", "args": {"rules": list(model.timestep_attention_rules), "policy": "select_kv_tokens"}}
+        )
+        return StructuralChange(
+            "runtime_timestep_attention_policy",
+            {
+                "runtime_operator": "timestep_attention_policy",
+                "rules": list(model.timestep_attention_rules),
+                "policy": "select_kv_tokens",
+                "parameter_reduction_ratio": 0.0,
+                "dynamic_compute": True,
+                "per_sample_timestep": True,
             },
         )

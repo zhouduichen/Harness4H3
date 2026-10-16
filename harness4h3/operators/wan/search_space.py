@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, CompressionResult, OperatorCapability, WanModelAdapter
 from ...sandbox import AlgorithmSandbox
-from .compression import AttentionHeadPruningOperator, AttentionWindowOperator, FFNChannelPruningOperator, HeadPruningOperator, KVTokenSelectionOperator, LayerPruningOperator, SamplingStepSkipOperator, SparseRuntimeOperator, TimestepBlockGatingOperator, TokenMergeOperator, TokenPruningOperator, WanCompressionRegistry
+from .compression import AttentionHeadPruningOperator, AttentionWindowOperator, FFNChannelPruningOperator, HeadPruningOperator, KVTokenSelectionOperator, LayerPruningOperator, SamplingStepSkipOperator, SparseRuntimeOperator, TimestepAttentionPolicyOperator, TimestepBlockGatingOperator, TokenMergeOperator, TokenPruningOperator, WanCompressionRegistry
 
 
 def _jsonable(value: Any) -> Any:
@@ -397,6 +397,16 @@ class SearchSpaceManager:
                     }],
                     "policy": "skip_when_in_range",
                 }
+            elif implementation_key == "timestep_attention_policy" or proposal.spec.name == "timestep_attention_policy":
+                if not block_ids:
+                    raise ValueError("timestep_attention_requires_blocks")
+                plan_args = {
+                    "rules": [
+                        {"min_timestep": 0.0, "max_timestep": 0.3, "keep_ratio": 0.5, "block_ids": [block_ids[0]], "score": "l2_norm"},
+                        {"min_timestep": 0.7, "max_timestep": 1.0, "keep_ratio": 0.75, "block_ids": [block_ids[0]], "score": "l2_norm"},
+                    ],
+                    "policy": "select_kv_tokens",
+                }
             elif implementation_key in {"prune_attention_heads", "prune_heads"}:
                 plan_args = {"head_indices": [0], "attention_names": ["attn1", "attn2"]}
             elif implementation_key == "prune_tokens":
@@ -427,6 +437,8 @@ class SearchSpaceManager:
                     raise ValueError(generated.failure_type or "implementation_source_validation_failed")
                 if proposal.spec.name == "timestep_block_gate" and generated.plan.operator != proposal.spec.name:
                     raise ValueError("timestep_gate_source_must_return_declared_operator")
+                if proposal.spec.name == "timestep_attention_policy" and generated.plan.operator != proposal.spec.name:
+                    raise ValueError("timestep_attention_source_must_return_declared_operator")
                 plan_args = dict(generated.plan.args)
             result = operator.execute(
                 adapter,
@@ -466,6 +478,17 @@ class SearchSpaceManager:
                     "operator": proposal.spec.name,
                     "parameter_reduction_ratio": float(result.structural_change.get("parameter_reduction_ratio", 0.0)),
                     "dynamic_compute": bool(result.structural_change.get("dynamic_compute", False)),
+                    "child_reload_verified": bool(result.structural_change.get("child_reload_verified", False)),
+                }
+            if proposal.spec.name == "timestep_attention_policy":
+                validation["structure_outside_active_closure"] = True
+                validation["structural_counterexample"] = {
+                    "kind": "dynamic_timestep_attention_execution",
+                    "operator": proposal.spec.name,
+                    "rules": _jsonable(plan_args.get("rules", [])),
+                    "parameter_reduction_ratio": float(result.structural_change.get("parameter_reduction_ratio", 0.0)),
+                    "dynamic_compute": bool(result.structural_change.get("dynamic_compute", False)),
+                    "per_sample_timestep": bool(result.structural_change.get("per_sample_timestep", False)),
                     "child_reload_verified": bool(result.structural_change.get("child_reload_verified", False)),
                 }
             if proposal.spec.implementation_source:
@@ -646,6 +669,7 @@ def _assert_finite(model: Any) -> None:
 _TRUSTED_FACTORIES: dict[str, Callable[[], Any]] = {
     "prune_ffn_by_weight_threshold": ThresholdFFNChannelOperator,
     "timestep_block_gate": TimestepBlockGatingOperator,
+    "timestep_attention_policy": TimestepAttentionPolicyOperator,
     "generated_channel_rule": lambda spec=None: GeneratedChannelRuleOperator(
         str(getattr(spec, "name", "generated_channel_rule")),
         str(getattr(spec, "implementation_source", "")),
