@@ -739,7 +739,12 @@ def measure_token_sensitivity(
     if token_sample is None or not hasattr(token_sample, "ndim") or int(token_sample.ndim) < 3:
         return tuple({"keep_ratio": float(ratio), "available": False, "method": "token_energy_concentration", "evidence": _evidence("unavailable", "token_energy_concentration", offline, "profile sample has no sequence dimension"), "score_semantics": "unavailable"} for ratio in keep_ratios)
     try:
-        scores = token_sample.detach().float().pow(2).mean(dim=tuple(index for index in range(token_sample.ndim) if index != 1))
+        # Keep the batch axis so each sample retains an ordered token score.
+        # Reducing every dimension except the token axis collapses [B, N, C]
+        # to [N] for real Wan probes, which makes the later batch-wise sort
+        # fail.  Feature axes start at 2 for the normalized [B, N, ...] view.
+        feature_axes = tuple(range(2, int(token_sample.ndim)))
+        scores = token_sample.detach().float().pow(2).mean(dim=feature_axes)
         ordered = scores.sort(dim=1, descending=True).values
         total = ordered.sum(dim=1).clamp_min(1e-12)
         return tuple({

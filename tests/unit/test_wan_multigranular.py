@@ -7,6 +7,7 @@ torch = pytest.importorskip("torch")
 from harness4h3.adapters.wan import FakeWanDiTAdapter
 from harness4h3.operators.wan import build_wan_compression_registry
 from harness4h3.profiler import profile_model
+from harness4h3.profiler.sensitivity import measure_token_sensitivity
 
 
 def _parent(tmp_path):
@@ -53,6 +54,21 @@ def test_profile_contains_all_search_granularities(tmp_path):
     assert report.sampling_step_sensitivity["available"] is True
     payload = report.to_dict()
     assert {"head_sensitivity", "attention_sensitivity", "token_sensitivity", "sampling_step_sensitivity"} <= set(payload)
+
+
+def test_token_sensitivity_preserves_batch_axis_for_real_wan_sequence_shape():
+    adapter = FakeWanDiTAdapter(block_count=2, hidden_size=8, ffn_width=12)
+    model = adapter.load_model("fake://baseline")
+    records = measure_token_sensitivity(
+        adapter,
+        model,
+        sample={"hidden_states": torch.randn(2, 7, 8)},
+        keep_ratios=(0.5,),
+    )
+
+    assert records[0]["available"] is True
+    assert records[0]["token_count"] == 7
+    assert 0.0 <= records[0]["importance_score"] <= 1.0
 
 
 def test_sampling_schedule_is_executed_by_adapter(tmp_path):
