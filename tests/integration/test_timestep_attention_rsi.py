@@ -51,4 +51,5 @@ def test_activated_timestep_attention_operator_is_evaluated_inside_search_budget
     assert candidate["runtime_execution"]["hardware_latency_reason"]
     assert "timestep_attention" in candidate["runtime_execution"]["policies"]
     assert candidate["runtime_execution"]["measurement_domain"] == "post_forward_runtime_trace"
+    assert candidate["runtime_execution"]["derived"]["timestep_attention_reduction_ratio"] > 0.0
     assert len(results) <= 8

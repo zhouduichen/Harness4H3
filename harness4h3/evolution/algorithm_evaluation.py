@@ -131,6 +131,35 @@ def _runtime_execution_evidence(model: Any, structure: Any = None) -> Mapping[st
                 stats[name] = _json_safe(value)
                 break
 
+    # Fake Wan keeps some attention counters on each self-attention module,
+    # while the Diffusers adapter aggregates them on the transformer.  Use the
+    # module-level form only when no aggregate exists so counters are not
+    # double-counted.
+    attention_aliases = {
+        "token_merge": ("_harness4h3_token_merge_stats",),
+        "kv_token_selection": ("_harness4h3_kv_token_selection_stats",),
+        "sparse_runtime": ("_harness4h3_sparse_stats",),
+        "attention_window": ("_harness4h3_window_stats",),
+    }
+    blocks = getattr(root, "blocks", None)
+    if blocks is None:
+        blocks = getattr(root, "transformer_blocks", ())
+    for name, candidates in attention_aliases.items():
+        if name in stats:
+            continue
+        per_block: dict[str, Any] = {}
+        for index, block in enumerate(tuple(blocks or ())):
+            attention = getattr(block, "attn1", None)
+            if attention is None:
+                continue
+            for candidate in candidates:
+                value = getattr(attention, candidate, None)
+                if isinstance(value, Mapping):
+                    per_block["block.%d" % index] = _json_safe(value)
+                    break
+        if per_block:
+            stats[name] = {"by_block": per_block}
+
     policies: dict[str, Any] = {}
     for name, attribute in {
         "runtime_operations": "_harness4h3_runtime_operations",
@@ -301,8 +330,23 @@ class AlgorithmModelEvaluator:
             parent_structure = self.adapter.inspect(self._parent_model)
             self._assert_finite(child_model)
             child_output = self.adapter.forward_profile(child_model, self._sample)
+            runtime_probe_error = None
+            runtime_probe = getattr(self.adapter, "runtime_profile", None)
+            if callable(runtime_probe):
+                try:
+                    runtime_probe(child_model, seed=int(self.seed))
+                except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                    runtime_probe_error = str(exc)
+            sampling_steps = getattr(self.adapter, "sampling_steps", None)
+            if callable(sampling_steps):
+                try:
+                    sampling_steps(child_model, tuple(range(16, 0, -1)))
+                except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                    runtime_probe_error = runtime_probe_error or str(exc)
             child_structure = self.adapter.inspect(child_model)
             runtime_execution = _runtime_execution_evidence(child_model, child_structure)
+            if runtime_probe_error:
+                runtime_execution = {**dict(runtime_execution), "probe_error": runtime_probe_error}
             if self.calibration_manifest is not None:
                 output = self._measure_tica_outputs(child_model, result.plan)
             else:

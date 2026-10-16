@@ -26,6 +26,7 @@
 - Token 当前包含 Self-Attention 输入选择/恢复和 `token_merge` 路径；后者同时支持兼容旧配置的 1-D adjacent 以及 `(T,H,W)` cuboid TokenMap，保存 anchor/group shape，在合并后的序列上执行 Attention，再 unmerge 回残差长度。三维专用 CUDA Kernel 仍未宣称完成。
 - FLOPs 为 adapter 的结构估计；真实性能结论必须使用 WanVideoEvaluator 的固定 GPU、Prompt、Seed、Scheduler 和 warm-up/repeat 结果。
 - 候选级 `runtime_execution` 是 post-forward trace，用于证明 Token/KV/Window/Timestep 等策略确实改变执行；GPU kernel、端到端延迟和显存仍由独立真实 Wan Evaluator 提供。
+- 最新 10 轮 Full RSI 重跑（`fake-rsi-final8-20261016`）返回 `failed_rounds=0`，SearchSpace 从 `S0001` 演化到 `S0003`；产物中的 Token/KV/Sparse/Timestep/Sampling 候选出现非零实际削减比例，说明 runtime trace 已由真实三维 mixed-timestep probe 触发，而非零值占位。
 
 ## 测试证据
 

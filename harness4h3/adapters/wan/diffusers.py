@@ -910,7 +910,14 @@ class DiffusersWanAdapter:
     def sampling_steps(self, model: Any, timesteps: Sequence[Any]) -> tuple[Any, ...]:
         transformer = self._transformer(model)
         policy = getattr(transformer, "_harness4h3_sampling_step_policy", {})
-        return select_sampling_steps(timesteps, policy) if policy else tuple(timesteps)
+        selected = select_sampling_steps(timesteps, policy) if policy else tuple(timesteps)
+        if policy:
+            transformer._harness4h3_sampling_step_stats = {
+                "requested_steps": len(tuple(timesteps)),
+                "effective_steps": len(selected),
+                "strategy": str(policy.get("strategy", "uniform")),
+            }
+        return selected
 
     def estimate_flops(self, model: Any) -> int:
         """Estimate Wan transformer work from the inspected live modules.

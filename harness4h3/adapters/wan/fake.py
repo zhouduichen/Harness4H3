@@ -640,7 +640,14 @@ class FakeWanDiTAdapter:
 
     def sampling_steps(self, model: FakeWanDiT, timesteps: Sequence[Any]) -> tuple[Any, ...]:
         policy = model._harness4h3_sampling_step_policy
-        return select_sampling_steps(timesteps, policy) if policy else tuple(timesteps)
+        selected = select_sampling_steps(timesteps, policy) if policy else tuple(timesteps)
+        if policy:
+            model._harness4h3_sampling_step_stats = {
+                "requested_steps": len(tuple(timesteps)),
+                "effective_steps": len(selected),
+                "strategy": str(policy.get("strategy", "uniform")),
+            }
+        return selected
 
     def save_model(self, model: FakeWanDiT, output_dir: Path) -> CheckpointArtifact:
         torch, _ = _torch()
@@ -697,6 +704,16 @@ class FakeWanDiTAdapter:
         torch, _ = _torch()
         generator = torch.Generator(device="cpu").manual_seed(int(seed))
         return torch.randn(2, int(model.hidden_size), generator=generator)
+
+    def runtime_profile(self, model: FakeWanDiT, seed: int = 7) -> Any:
+        """Exercise sequence-aware runtime policies with mixed timesteps."""
+
+        torch, _ = _torch()
+        generator = torch.Generator(device="cpu").manual_seed(int(seed) + 1009)
+        sample = torch.randn((2, 8, int(model.hidden_size)), generator=generator)
+        timesteps = torch.tensor([100, 900], dtype=torch.long)
+        with torch.no_grad():
+            return model(sample, timestep=timesteps)
 
     def forward_profile(self, model: FakeWanDiT, sample: Any) -> Any:
         torch, _ = _torch()

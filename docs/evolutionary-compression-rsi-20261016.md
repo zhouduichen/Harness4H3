@@ -27,6 +27,8 @@ Full RSI 的反馈文件记录了 `pareto_stagnation`、`repeated_algorithm_plan
 
 标准搜索 trace 现在还为每个已执行候选保存 `runtime_execution`：包括实际 forward 后的策略计数、Token/KV 选中比例、Timestep 跳过比例、结构/FLOPs/参数证据，以及明确的 CPU-only 硬件边界。该字段用于比较候选执行行为，不替代真实 GPU latency、显存或视频质量。
 
+随后使用同一固定协议进行 10 轮 Full RSI 重跑，详见 [`final8 重跑记录`](evolutionary-compression-rsi-final8-20261016.md)：10 轮均完成（`failed_rounds=0`），SearchSpace 由 `S0001` 扩展至 `S0003`，并验证了 `prune_tokens` 约 25% token reduction、`kv_token_select`/`sparse_runtime` 非零 K/V reduction、`timestep_attention_policy` 混合 timestep reduction 和 `sampling_step_skip` 50% schedule reduction。上述均为 CPU Fake 执行计数，不是 GPU speedup。
+
 本轮六组配置（`final6`，均启用 `channel_method: output_perturbation`）：
 
 - [`fixed-final6 config`](../configs/evolutionary-compression.fake-protocol-fixed-final6-20261016.yaml)
