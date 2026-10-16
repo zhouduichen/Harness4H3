@@ -42,6 +42,7 @@ class TokenMergePolicy:
     keep_ratio: float
     block_ids: tuple[str, ...] = ()
     mode: str = "adjacent"
+    grid_shape: tuple[int, int, int] = ()
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "TokenMergePolicy":
@@ -49,12 +50,19 @@ class TokenMergePolicy:
         if not isinstance(block_ids, (list, tuple)) or not all(isinstance(item, str) for item in block_ids):
             raise ValueError("token_merge.block_ids must be a list of strings")
         mode = str(raw.get("mode", "adjacent"))
-        if mode not in {"adjacent"}:
+        if mode not in {"adjacent", "spatiotemporal"}:
             raise ValueError("unsupported token merge mode")
-        return cls(_ratio(raw.get("keep_ratio"), "token_merge.keep_ratio"), tuple(block_ids), mode)
+        grid_shape = raw.get("grid_shape", ())
+        if grid_shape in (None, []):
+            grid_shape = ()
+        if not isinstance(grid_shape, (list, tuple)) or len(grid_shape) not in {0, 3} or any(isinstance(item, bool) or not isinstance(item, int) or int(item) <= 0 for item in grid_shape):
+            raise ValueError("token_merge.grid_shape must be three positive integers")
+        if mode == "spatiotemporal" and len(grid_shape) != 3:
+            raise ValueError("spatiotemporal token merge requires grid_shape")
+        return cls(_ratio(raw.get("keep_ratio"), "token_merge.keep_ratio"), tuple(block_ids), mode, tuple(int(item) for item in grid_shape))
 
     def to_dict(self) -> dict[str, Any]:
-        return {**asdict(self), "block_ids": list(self.block_ids)}
+        return {**asdict(self), "block_ids": list(self.block_ids), "grid_shape": list(self.grid_shape)}
 
 
 @dataclass(frozen=True)
@@ -105,6 +113,8 @@ class AttentionWindowPolicy:
 
     window_size: int
     attention: str = "attn1"
+    grid_shape: tuple[int, int, int] = ()
+    window_radius: tuple[int, int, int] = ()
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "AttentionWindowPolicy":
@@ -114,10 +124,22 @@ class AttentionWindowPolicy:
         attention = str(raw.get("attention", "attn1"))
         if attention not in {"attn1", "self"}:
             raise ValueError("attention window supports self-attention only")
-        return cls(int(value), attention)
+        grid_shape = raw.get("grid_shape", ())
+        window_radius = raw.get("window_radius", ())
+        if grid_shape in (None, []):
+            grid_shape = ()
+        if window_radius in (None, []):
+            window_radius = ()
+        for name, shape in (("grid_shape", grid_shape), ("window_radius", window_radius)):
+            minimum = 1 if name == "grid_shape" else 0
+            if not isinstance(shape, (list, tuple)) or len(shape) not in {0, 3} or any(isinstance(item, bool) or not isinstance(item, int) or int(item) < minimum for item in shape):
+                raise ValueError("attention_window.%s must contain three positive integers" % name)
+        if bool(grid_shape) != bool(window_radius):
+            raise ValueError("3-D attention window requires grid_shape and window_radius together")
+        return cls(int(value), attention, tuple(int(item) for item in grid_shape), tuple(int(item) for item in window_radius))
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "grid_shape": list(self.grid_shape), "window_radius": list(self.window_radius)}
 
 
 @dataclass(frozen=True)

@@ -5,11 +5,12 @@
 ## 代码验证
 
 ```text
-focused algorithm/runtime tests: 36 passed
-full regression: 1035 passed, 4 skipped
+focused algorithm/runtime tests: 38 passed
+focused profiler/config/runtime selection: 54 passed
+full regression: 1037 passed, 4 skipped
 ```
 
-完整回归的 4 个 skip 是真实 Wan checkpoint、CUDA、CUDA RNG parity 和训练运行条件未满足，不是实现失败。新增的 KV 路径覆盖 Fake 执行与重载、按 Block 目标选择、KV + Sparse 组合，以及 Diffusers Tiny Wan 的真实注意力张量形状/统计检查；本轮还覆盖 Head + Sparse、Layer + Sampling 的有序组合、Provider 对 Active SearchSpace 的读取，以及 Head/FFN 的输出扰动敏感度测量和显式回退。
+完整回归的 4 个 skip 是真实 Wan checkpoint、CUDA、CUDA RNG parity 和训练运行条件未满足，不是实现失败。新增的 KV 路径覆盖 Fake 执行与重载、按 Block 目标选择、KV + Sparse 组合，以及 Diffusers Tiny Wan 的真实注意力张量形状/统计检查；本轮还覆盖 Head + Sparse、Layer + Sampling 的有序组合、Provider 对 Active SearchSpace 的读取，Head/FFN 的输出扰动敏感度测量和显式回退，以及 3-D TokenMap/Local Window 的重载 smoke。
 
 ## 六组实验
 

@@ -18,6 +18,7 @@ from .contracts import (
 )
 from ...operators.wan.runtime_gating import TimestepGateRule, normalized_timesteps, rule_matches, validate_timestep_gate_plan
 from ...operators.wan.runtime_policy import AttentionWindowPolicy, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
+from ...operators.wan.token_geometry import merge_token_sequence
 from .attention import prune_attention_module_heads
 
 
@@ -84,23 +85,25 @@ def _fake_attention_module(hidden_size: int, heads: int, head_dim: int | None = 
             merge = getattr(self, "_harness4h3_token_merge_policy", None)
             block_id = str(getattr(self, "_harness4h3_block_id", ""))
             if merge and encoder_hidden_states is None and hidden.ndim >= 3 and hidden.shape[1] > 1 and (not merge.get("block_ids") or block_id in merge["block_ids"]):
-                keep = max(1, min(int(hidden.shape[1]), int(round(float(hidden.shape[1]) * float(merge["keep_ratio"])))) )
-                positions = torch.arange(int(hidden.shape[1]), device=hidden.device)
-                merge_groups = torch.div(positions * keep, int(hidden.shape[1]), rounding_mode="floor")
-                merged = hidden.new_zeros((hidden.shape[0], keep, hidden.shape[2]))
-                merged.scatter_add_(1, merge_groups.view(1, -1, 1).expand(hidden.shape[0], -1, hidden.shape[2]), hidden)
-                counts = torch.bincount(merge_groups, minlength=keep).clamp_min(1).to(hidden.dtype).view(1, keep, 1)
-                hidden = merged / counts
-                context = hidden
-                anchors = torch.empty(keep, device=hidden.device, dtype=torch.long)
-                for group in range(keep):
-                    anchors[group] = positions[merge_groups == group][0]
-                self._harness4h3_token_merge_stats = {
-                    "input_tokens": int(positions.numel()),
-                    "merged_tokens": int(keep),
-                    "groups": int(keep),
-                    "anchors": anchors.detach().cpu().tolist(),
-                }
+                grid_shape = tuple(merge.get("grid_shape", ())) if str(merge.get("mode", "adjacent")) == "spatiotemporal" else ()
+                merged, source_groups, anchors, group_shape = merge_token_sequence(
+                    hidden,
+                    float(merge["keep_ratio"]),
+                    torch,
+                    grid_shape=grid_shape,
+                )
+                if source_groups is not None:
+                    merge_groups = source_groups
+                    hidden = merged
+                    context = hidden
+                    self._harness4h3_token_merge_stats = {
+                        "input_tokens": int(source_groups.numel()),
+                        "merged_tokens": int(merged.shape[1]),
+                        "groups": int(merged.shape[1]),
+                        "anchors": anchors.detach().cpu().tolist(),
+                        "grid_shape": list(grid_shape),
+                        "group_shape": list(group_shape) if group_shape is not None else None,
+                    }
             policy = getattr(self, "_harness4h3_sparse_policy", None)
             kv_policy = getattr(self, "_harness4h3_kv_token_selection_policy", None)
             if kv_policy and encoder_hidden_states is None and hidden.ndim >= 3 and hidden.shape[1] > 1 and (not kv_policy.get("block_ids") or block_id in kv_policy["block_ids"]):
@@ -122,15 +125,44 @@ def _fake_attention_module(hidden_size: int, heads: int, head_dim: int | None = 
                 self._harness4h3_sparse_stats = {"full_tokens": int(hidden.shape[1]), "selected_tokens": int(keep)}
             window = getattr(self, "_harness4h3_attention_window_policy", None)
             if window and encoder_hidden_states is None and hidden.ndim >= 3 and hidden.shape[1] > 1:
-                width = int(window["window_size"])
-                pieces = []
-                selected = 0
-                for start in range(0, int(hidden.shape[1]), width):
-                    stop = min(int(hidden.shape[1]), start + width)
-                    pieces.append(self._attend(hidden[:, start:stop], hidden[:, start:stop]))
-                    selected += stop - start
-                result = torch.cat(pieces, dim=1)
-                self._harness4h3_window_stats = {"query_tokens": int(hidden.shape[1]), "selected_kv_tokens": int(selected), "windows": len(pieces)}
+                grid_shape = tuple(window.get("grid_shape", ()))
+                if grid_shape:
+                    if grid_shape[0] * grid_shape[1] * grid_shape[2] != int(hidden.shape[1]):
+                        raise ValueError("attention_window.grid_shape product must equal sequence length")
+                    radius = torch.tensor(tuple(window["window_radius"]), device=hidden.device)
+                    positions = torch.arange(int(hidden.shape[1]), device=hidden.device)
+                    coordinates = torch.stack(
+                        (
+                            positions // (grid_shape[1] * grid_shape[2]),
+                            (positions // grid_shape[2]) % grid_shape[1],
+                            positions % grid_shape[2],
+                        ),
+                        dim=1,
+                    )
+                    pieces = []
+                    selected = 0
+                    for query_index in range(int(hidden.shape[1])):
+                        key_indices = torch.nonzero((coordinates - coordinates[query_index]).abs().le(radius).all(dim=1), as_tuple=False).flatten()
+                        pieces.append(self._attend(hidden[:, query_index:query_index + 1], hidden.index_select(1, key_indices)))
+                        selected += int(key_indices.numel())
+                    result = torch.cat(pieces, dim=1)
+                    self._harness4h3_window_stats = {
+                        "query_tokens": int(hidden.shape[1]),
+                        "selected_kv_tokens": int(selected),
+                        "windows": int(hidden.shape[1]),
+                        "grid_shape": list(grid_shape),
+                        "window_radius": list(window["window_radius"]),
+                    }
+                else:
+                    width = int(window["window_size"])
+                    pieces = []
+                    selected = 0
+                    for start in range(0, int(hidden.shape[1]), width):
+                        stop = min(int(hidden.shape[1]), start + width)
+                        pieces.append(self._attend(hidden[:, start:stop], hidden[:, start:stop]))
+                        selected += stop - start
+                    result = torch.cat(pieces, dim=1)
+                    self._harness4h3_window_stats = {"query_tokens": int(hidden.shape[1]), "selected_kv_tokens": int(selected), "windows": len(pieces), "grid_shape": [], "window_radius": []}
             else:
                 result = self._attend(hidden, context)
             if merge_groups is not None:

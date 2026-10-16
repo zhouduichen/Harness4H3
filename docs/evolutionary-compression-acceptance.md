@@ -19,16 +19,17 @@
 
 - Diffusers Wan 的 Head/Token/Sparse/Attention Window 代码已按当前安装版本（Diffusers 0.39.0）的真实模块签名实现，并有 Tiny Wan 结构 smoke；完整 Wan2.1-1.3B 视频、GPU Kernel、显存和端到端延迟尚未在本机执行。
 - Sparse Runtime 当前是可执行的 Top-k KV 选择后端；它保留 Wan Q/K 归一化、RoPE 位置和输出投影，并确实缩短 K/V 输入，不宣称 SVOO/SparseVideo CUDA Kernel。独立的 KV Token Selection 也通过同一真实 K/V gather 路径执行，可与 Sparse Runtime 合并，但不会与 Token Merge 或 Attention Window 静默叠加。
-- Attention Window 当前是保留 Q 长度的 block-local Self-Attention，按原始扁平 Token 位置切 RoPE，实际把每个 Q block 的 K/V 限制在同一局部块；尚未宣称三维时空 BlockMask 或专用 CUDA Kernel。
+- Attention Window 当前同时支持历史 flat contiguous window 与可选 `(grid_shape, window_radius)` 的 3-D local Self-Attention；3-D 路径保持完整 Q，按原始 `(T,H,W)` 位置选择邻域 K/V 并切 RoPE，网格不匹配会显式失败。它仍未宣称 Flex/SVOO 三维 BlockMask 或专用 CUDA Kernel。
 - Timestep Gate 对 batch 内不同 timestep 使用 active-subset 执行；`Sparse Runtime + Attention Window` 当前明确拒绝，因为尚未实现两种 Attention wrapper 的联合编译，不会静默忽略其中一个。
-- Token 当前包含 Self-Attention 输入选择/恢复和 `token_merge` 路径；后者保存连续分组的 anchor/TokenMap 语义，在合并后的序列上执行 Attention，再 unmerge 回残差长度。三维 BlockMask 和自定义 CUDA Kernel 仍未宣称完成。
+- Token 当前包含 Self-Attention 输入选择/恢复和 `token_merge` 路径；后者同时支持兼容旧配置的 1-D adjacent 以及 `(T,H,W)` cuboid TokenMap，保存 anchor/group shape，在合并后的序列上执行 Attention，再 unmerge 回残差长度。三维专用 CUDA Kernel 仍未宣称完成。
 - FLOPs 为 adapter 的结构估计；真实性能结论必须使用 WanVideoEvaluator 的固定 GPU、Prompt、Seed、Scheduler 和 warm-up/repeat 结果。
 
 ## 测试证据
 
 ```text
-focused algorithm/runtime tests: 36 passed
-full regression: 1035 passed, 4 skipped
+focused algorithm/runtime tests: 38 passed
+focused profiler/config/runtime selection: 54 passed
+full regression: 1037 passed, 4 skipped
 ```
 
 4 个 skip 分别是未设置真实 Wan checkpoint、CUDA 不可用或 CUDA RNG parity 条件，不是实现失败。

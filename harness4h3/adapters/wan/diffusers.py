@@ -10,6 +10,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange
 from .attention import prune_attention_module_heads
+from ...operators.wan.token_geometry import merge_token_sequence
 from ...operators.wan.runtime_gating import normalized_timesteps, rule_matches, rules_to_dict, validate_timestep_gate_plan
 from ...operators.wan.runtime_policy import AttentionWindowPolicy, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
 
@@ -112,33 +113,17 @@ def _slice_rotary(rotary: Any, indices: Any, sequence_length: int) -> Any:
     return tuple(result)
 
 
-def _merge_token_sequence(hidden_states: Any, keep_ratio: float, torch: Any) -> tuple[Any, Any, Any]:
-    """Merge contiguous token groups and return (merged, source_groups, anchors).
+def _merge_token_sequence(hidden_states: Any, keep_ratio: float, torch: Any, grid_shape: Sequence[int] = ()) -> tuple[Any, Any, Any, tuple[int, int, int] | None]:
+    """Merge token groups and return (merged, source_groups, anchors, group_shape).
 
-    The groups are a deterministic TokenMap over the flattened Wan token order.
-    This keeps the first token in every group as the positional/RoPE anchor and
-    averages only the pre-RoPE hidden states.  ``source_groups`` is the
-    unmerge map from every original position to its merged destination.
+    Adjacent mode uses the historical 1-D TokenMap.  Spatiotemporal mode uses
+    a deterministic ``(T, H, W)`` cuboid map.  Both keep the first token in
+    every group as the positional/RoPE anchor and average only pre-RoPE hidden
+    states.  ``source_groups`` is the unmerge map from every original position
+    to its merged destination.
     """
 
-    sequence_length = int(hidden_states.shape[1])
-    target = max(1, min(sequence_length, int(round(sequence_length * float(keep_ratio)))))
-    if target >= sequence_length:
-        return hidden_states, None, None
-    positions = torch.arange(sequence_length, device=hidden_states.device)
-    source_groups = torch.div(positions * target, sequence_length, rounding_mode="floor")
-    merged = hidden_states.new_zeros((hidden_states.shape[0], target, hidden_states.shape[2]))
-    merged.scatter_add_(1, source_groups.view(1, -1, 1).expand(hidden_states.shape[0], -1, hidden_states.shape[2]), hidden_states)
-    counts = torch.bincount(source_groups, minlength=target).clamp_min(1).to(hidden_states.dtype).view(1, target, 1)
-    merged = merged / counts
-    anchors = torch.empty(target, device=hidden_states.device, dtype=torch.long)
-    if hasattr(anchors, "scatter_reduce_"):
-        anchors.fill_(sequence_length)
-        anchors.scatter_reduce_(0, source_groups, positions, reduce="amin", include_self=True)
-    else:  # pragma: no cover - supported by the target torch runtime
-        for group in range(target):
-            anchors[group] = positions[source_groups == group][0]
-    return merged, source_groups, anchors
+    return merge_token_sequence(hidden_states, keep_ratio, torch, grid_shape=grid_shape)
 
 
 def _select_kv_indices(hidden_states: Any, keep_ratio: float, score: str, torch: Any) -> Any:
@@ -165,7 +150,17 @@ def _apply_wan_rotary(hidden_states: Any, rotary_emb: Any) -> Any:
     return output.type_as(hidden_states)
 
 
-def _wan_sparse_self_attention(attention: Any, hidden_states: Any, keys: Any, indices: Any, rotary_emb: Any, torch: Any) -> Any:
+def _wan_sparse_self_attention(
+    attention: Any,
+    hidden_states: Any,
+    keys: Any,
+    indices: Any,
+    rotary_emb: Any,
+    torch: Any,
+    *,
+    query_indices: Any = None,
+    sequence_length: Optional[int] = None,
+) -> Any:
     """Run Wan self-attention with full Q and selected K/V tokens.
 
     The stock Wan processor accepts one RoPE tuple for both Q and K.  This
@@ -192,8 +187,10 @@ def _wan_sparse_self_attention(attention: Any, hidden_states: Any, keys: Any, in
     query = query.unflatten(2, (heads, -1))
     key = key.unflatten(2, (heads, -1))
     value = value.unflatten(2, (heads, -1))
-    query = _apply_wan_rotary(query, rotary_emb)
-    key = _apply_wan_rotary(key, _slice_rotary(rotary_emb, indices, int(hidden_states.shape[1])))
+    total_length = int(sequence_length or hidden_states.shape[1])
+    query_rotary = _slice_rotary(rotary_emb, query_indices, total_length) if query_indices is not None else rotary_emb
+    query = _apply_wan_rotary(query, query_rotary)
+    key = _apply_wan_rotary(key, _slice_rotary(rotary_emb, indices, total_length))
     output = torch.nn.functional.scaled_dot_product_attention(
         query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), dropout_p=0.0, is_causal=False
     ).transpose(1, 2)
@@ -637,6 +634,8 @@ class DiffusersWanAdapter:
             "groups": 0,
             "calls": 0,
             "last_anchors": [],
+            "grid_shape": [],
+            "group_shape": None,
         }
         for index, block in enumerate(blocks):
             block_id = "block.%d" % index
@@ -655,7 +654,9 @@ class DiffusersWanAdapter:
                     or (active.get("block_ids") and _block_id not in active["block_ids"])
                 ):
                     return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
-                merged, source_groups, anchors = _merge_token_sequence(hidden_states, float(active["keep_ratio"]), torch)
+                mode = str(active.get("mode", "adjacent"))
+                grid_shape = tuple(active.get("grid_shape", ())) if mode == "spatiotemporal" else ()
+                merged, source_groups, anchors, group_shape = _merge_token_sequence(hidden_states, float(active["keep_ratio"]), torch, grid_shape)
                 if source_groups is None:
                     return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
                 merged_rotary = _slice_rotary(rotary_emb, anchors, int(hidden_states.shape[1]))
@@ -667,6 +668,8 @@ class DiffusersWanAdapter:
                 stats["groups"] = int(merged.shape[1])
                 stats["calls"] += 1
                 stats["last_anchors"] = anchors.detach().cpu().tolist()
+                stats["grid_shape"] = list(grid_shape)
+                stats["group_shape"] = list(group_shape) if group_shape is not None else None
                 return restored
 
             attention._harness4h3_token_merge_base_forward = base
@@ -778,7 +781,13 @@ class DiffusersWanAdapter:
             raise ValueError("incompatible_runtime_attention_composition: sparse_runtime and attention_window")
         _register_config(transformer, "harness4h3_attention_window", parsed.to_dict())
         transformer._harness4h3_attention_window_policy = parsed.to_dict()
-        transformer._harness4h3_attention_window_stats = {"query_tokens": 0, "selected_kv_tokens": 0, "windows": 0}
+        transformer._harness4h3_attention_window_stats = {
+            "query_tokens": 0,
+            "selected_kv_tokens": 0,
+            "windows": 0,
+            "grid_shape": [],
+            "window_radius": [],
+        }
         _path, blocks = self._blocks(model)
         for block in blocks:
             attention = getattr(block, "attn1", None)
@@ -790,6 +799,46 @@ class DiffusersWanAdapter:
                 active = getattr(transformer, "_harness4h3_attention_window_policy", parsed.to_dict())
                 if encoder_hidden_states is not None or hidden_states.ndim < 3 or hidden_states.shape[1] <= 1:
                     return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
+                grid_shape = tuple(active.get("grid_shape", ()))
+                if grid_shape:
+                    if grid_shape[0] * grid_shape[1] * grid_shape[2] != int(hidden_states.shape[1]):
+                        raise ValueError("attention_window.grid_shape product must equal sequence length")
+                    radius = torch.tensor(tuple(active["window_radius"]), device=hidden_states.device)
+                    positions = torch.arange(int(hidden_states.shape[1]), device=hidden_states.device)
+                    coordinates = torch.stack(
+                        (
+                            positions // (grid_shape[1] * grid_shape[2]),
+                            (positions // grid_shape[2]) % grid_shape[1],
+                            positions % grid_shape[2],
+                        ),
+                        dim=1,
+                    )
+                    pieces = []
+                    selected = 0
+                    for query_index in range(int(hidden_states.shape[1])):
+                        query_indices = positions[query_index:query_index + 1]
+                        key_indices = torch.nonzero((coordinates - coordinates[query_index]).abs().le(radius).all(dim=1), as_tuple=False).flatten()
+                        query = hidden_states.index_select(1, query_indices)
+                        keys = hidden_states.index_select(1, key_indices)
+                        pieces.append(
+                            _wan_sparse_self_attention(
+                                attention_self,
+                                query,
+                                keys,
+                                key_indices,
+                                rotary_emb,
+                                torch,
+                                query_indices=query_indices,
+                                sequence_length=int(hidden_states.shape[1]),
+                            )
+                        )
+                        selected += int(key_indices.numel())
+                    transformer._harness4h3_attention_window_stats["query_tokens"] += int(hidden_states.shape[1])
+                    transformer._harness4h3_attention_window_stats["selected_kv_tokens"] += int(selected)
+                    transformer._harness4h3_attention_window_stats["windows"] += int(hidden_states.shape[1])
+                    transformer._harness4h3_attention_window_stats["grid_shape"] = list(grid_shape)
+                    transformer._harness4h3_attention_window_stats["window_radius"] = list(active["window_radius"])
+                    return torch.cat(pieces, dim=1)
                 width = int(active["window_size"])
                 pieces = []
                 selected = 0

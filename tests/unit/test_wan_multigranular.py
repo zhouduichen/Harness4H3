@@ -83,6 +83,27 @@ def test_attention_window_reduces_fake_attention_context(tmp_path):
     assert stats["windows"] == 4
 
 
+def test_spatiotemporal_attention_window_reduces_grid_neighbors(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "attention_window",
+        adapter,
+        parent,
+        {"window_size": 8, "attention": "attn1", "grid_shape": [2, 2, 2], "window_radius": [0, 1, 1]},
+        tmp_path / "window-3d",
+    )
+    assert result.status == "success", result.message
+    child = adapter.reload_model(result.child_checkpoint)
+    with torch.no_grad():
+        output = child.blocks[0].attn1(torch.randn(1, 8, 8))
+    stats = child.blocks[0].attn1._harness4h3_window_stats
+    assert tuple(output.shape) == (1, 8, 8)
+    assert stats["query_tokens"] == 8
+    assert stats["selected_kv_tokens"] < 8 * 8
+    assert stats["grid_shape"] == [2, 2, 2]
+    assert stats["window_radius"] == [0, 1, 1]
+
+
 def test_token_merge_reduces_fake_attention_and_unmerges_after_reload(tmp_path):
     adapter, parent = _parent(tmp_path)
     result = build_wan_compression_registry(include_multigranular=True).execute(
@@ -111,6 +132,31 @@ def test_token_merge_ratio_one_is_dense_equivalent():
         expected = plain.blocks[0].attn1(hidden)
         actual = merged.blocks[0].attn1(hidden)
     assert torch.equal(expected, actual)
+
+
+def test_spatiotemporal_token_merge_uses_grid_token_map_and_unmerges_after_reload(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=2, hidden_size=8, ffn_width=12)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "token_merge",
+        adapter,
+        parent,
+        {"keep_ratio": 0.5, "mode": "spatiotemporal", "grid_shape": [2, 2, 2]},
+        tmp_path / "merge-3d",
+    )
+
+    assert result.status == "success", result.message
+    child = adapter.reload_model(result.child_checkpoint)
+    with torch.no_grad():
+        output = child.blocks[0].attn1(torch.randn(2, 8, 8))
+
+    stats = child.blocks[0].attn1._harness4h3_token_merge_stats
+    assert tuple(output.shape) == (2, 8, 8)
+    assert stats["input_tokens"] == 8
+    assert stats["merged_tokens"] == 4
+    assert stats["grid_shape"] == [2, 2, 2]
+    assert stats["group_shape"] == [2, 2, 1]
+    assert child._harness4h3_token_merge_policy["mode"] == "spatiotemporal"
 
 
 def test_kv_token_selection_keeps_full_queries_and_reduces_kv_after_reload(tmp_path):
@@ -294,6 +340,15 @@ def test_diffusers_wan_attention_contract_is_structurally_executable():
     assert tuple(merge_output.shape) == (1, 5, 8)
     assert merge_model._harness4h3_token_merge_stats["merged_tokens"] == 2
 
+    grid_model = TinyWan()
+    adapter.apply_token_merge(grid_model, {"keep_ratio": 0.5, "mode": "spatiotemporal", "grid_shape": [2, 2, 2]})
+    grid_rotary = (torch.ones(1, 8, 1, 2), torch.zeros(1, 8, 1, 2))
+    with torch.no_grad():
+        grid_output = grid_model.blocks[0].attn1(torch.randn(1, 8, 8), None, None, grid_rotary)
+    assert tuple(grid_output.shape) == (1, 8, 8)
+    assert grid_model._harness4h3_token_merge_stats["grid_shape"] == [2, 2, 2]
+    assert grid_model._harness4h3_token_merge_stats["group_shape"] == [2, 2, 1]
+
     kv_model = TinyWan()
     adapter.apply_kv_token_selection(kv_model, {"keep_ratio": 0.5, "score": "l2_norm"})
     with torch.no_grad():
@@ -307,6 +362,16 @@ def test_diffusers_wan_attention_contract_is_structurally_executable():
         window_output = window_model.blocks[0].attn1(torch.randn(1, 5, 8), None, None, rotary)
     assert tuple(window_output.shape) == (1, 5, 8)
     assert window_model._harness4h3_attention_window_stats["selected_kv_tokens"] == 5
+
+    grid_window_model = TinyWan()
+    adapter.apply_attention_window(
+        grid_window_model,
+        {"window_size": 8, "attention": "attn1", "grid_shape": [2, 2, 2], "window_radius": [0, 1, 1]},
+    )
+    with torch.no_grad():
+        grid_window_output = grid_window_model.blocks[0].attn1(torch.randn(1, 8, 8), None, None, grid_rotary)
+    assert tuple(grid_window_output.shape) == (1, 8, 8)
+    assert grid_window_model._harness4h3_attention_window_stats["selected_kv_tokens"] < 8 * 8
     adapter.apply_timestep_block_gating(
         model,
         [{"block_id": "block.0", "min_timestep": 0.0, "max_timestep": 0.3}],
