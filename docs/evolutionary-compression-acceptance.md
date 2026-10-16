@@ -16,6 +16,7 @@
 - 对照实验：新增 `RSI Fixed Space` 与 `Frozen Expanded Space`；后者固定版本 `S0001`，但下一代实际读取并生成扩展算子候选，用于区分“算子更多”和“空间动态演化”的收益。
 - Provider Agent：初始算法生成请求现在携带当前 SearchSpace 的 operator/schema/约束摘要，提示词不再把候选限制为 Block/FFN；因此真实 Provider 路径也能提出 Head、KV、Sparse、Window、Timestep 和 Sampling 计划。
 - Sensitivity：Head profiling 在有 Attention-shaped 序列样本时逐个复制 Attention、执行真实 Head surgery 并测量输出 leave-one-out 差异；真实 Wan 的 5-D latent 会先通过一次模型 forward 捕获每个 Attention 的真实参数，再只复制 Attention 做 probe，避免复制 1.3B 模型。FFN channel 支持 `channel_method: output_perturbation`，通过实际 `up_proj` hook 和完整模型输出差异评分。没有可用样本或 hook 时仍明确返回 unavailable/weight proxy，不填零分。
+- 远程真实 Wan 基础设施 smoke：`f082f19` 在 CUDA1 上完成真实 Diffusers Wan 加载、单轮生成、结构 checkpoint 保存/重载和独立视频评测；另以同一远程 1.3B Transformer 执行 `Token + Head + Sparse K/V + Window` 组合 probe，四类统计均显示实际 selected/executed 工作量下降，输出形状保持不变。
 
 ## 部分完成 / 有条件完成
 
@@ -30,9 +31,9 @@
 
 ## 最新基础设施回归
 
-在 `658b54c` 基础上，本轮多粒度执行路径和组合修复后的本地全量回归为 `1055 passed, 4 skipped`。4 个 skip 仍是本机未提供真实 Wan checkpoint、CUDA 或 CUDA RNG parity 条件；真实 Wan smoke 只在远程执行。
+在 `f082f19` 基础上，本轮多粒度执行路径和组合修复后的本地全量回归为 `1055 passed, 4 skipped`。4 个 skip 仍是本机未提供真实 Wan checkpoint、CUDA 或 CUDA RNG parity 条件；真实 Wan smoke 只在远程执行。
 
-远程单轮 Wan smoke 已在独立 output root 完成：`failed_rounds=0`、`offline_simulation=false`、真实视频与 visual-structure gate 均有效；候选因质量/效率门槛未达标而 rejected。远程证据详见 [`evolutionary-compression-wan-remote-20261016.md`](evolutionary-compression-wan-remote-20261016.md)。
+远程单轮 Wan smoke 和多粒度 runtime probe 均已在独立 output root 完成：`failed_rounds=0`、`offline_simulation=false`、真实视频与 visual-structure gate 均有效；Block 候选因质量/效率门槛未达标而 rejected，但 Token/Head/Sparse/Window 组合 probe 的真实执行统计均有效。远程证据详见 [`evolutionary-compression-wan-remote-20261016.md`](evolutionary-compression-wan-remote-20261016.md)。
 
 之前的 `1043 passed, 4 skipped` 和 CPU Fake RSI 结果保留为历史记录，不覆盖本次回归结果。
 

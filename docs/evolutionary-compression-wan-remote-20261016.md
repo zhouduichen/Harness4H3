@@ -61,3 +61,44 @@ HF_HUB_OFFLINE=1 /home/intern/miniconda3/envs/comfy/bin/python -m harness4h3 evo
 首次使用带伪终端的前台 SSH 运行曾产生 `[Errno 32] Broken pipe`，产物保留在独立目录 `remote-infra-smoke-c2788a5`，不计入有效评测；改用非交互 SSH 后链路成功。
 
 本次远程真实配置暂未开启 TICA：远程主机未发现可用的真实 Wan calibration tensor manifest，因此不能伪造 TICA 证据。TICA 仍需单独准备远程 calibration/validation/test 缓存后再执行。
+
+## 多粒度 runtime 基础设施 smoke（`f082f19`）
+
+按“先完成基础设施、只跑短 smoke”的要求，未启动长时间 RSI。代码从
+`codex/algorithm-discovery-rsi` 的 `f082f19` 同步到新的远程 staging：
+
+`/home/intern/huangjiahao/Harness4H3-rsi/work/codex-algorithm-discovery-rsi-f082f19/`
+
+使用独立配置
+`configs/evolutionary-compression.wan-remote-multigranular-smoke-20261016.yaml`
+执行一轮真实 Wan smoke，输出位于：
+
+`/data/models/harness4h3-evolutionary-compression-20261016/remote-multigranular-smoke-f082f19/`
+
+本轮结果：
+
+- `failed_rounds=0`，`source_revision=f082f19`，`offline_simulation=false`，真实生成设备为 `cuda:1`。
+- baseline/candidate 均完成 256×256×81 视频生成；candidate 视频有效、visual-structure gate 通过。
+- 确定性搜索本轮选择已有的 `prune_blocks(block.17)`，候选按质量/效率 promotion policy rejected；这不是基础设施失败，也没有继续启动 RSI。
+- 新增配置、runtime manifest、结构 checkpoint 和完整评测证据均保留在上述 output root 的 `rounds/R0001/`。
+
+### 真实 Wan 多粒度 runtime probe
+
+为确保确定性 Block 候选没有掩盖新增运行时路径，在同一远程 Wan2.1-1.3B Transformer 上执行了一个单次短 probe，依次安装并执行：
+
+`prune_tokens(0.75) → head_gating(0.5) → sparse_runtime(0.5) → attention_window(4)`。
+
+证据文件：
+
+`/data/models/harness4h3-evolutionary-compression-20261016/remote-multigranular-smoke-f082f19/multigranular-runtime-probe.json`
+
+实际结果：
+
+| 运行时统计 | Full | Selected/Executed |
+|---|---:|---:|
+| Token selection | 480 | 360 |
+| Self-Attention heads | 2160 | 1080 |
+| Sparse K/V tokens | 720 | 360 |
+| Window Attention K/V | 720 | 360 |
+
+输出形状保持 `[2, 16, 1, 8, 8]`，并且 runtime manifest 保存了四个操作及其参数。该 probe 证明执行路径确实缩短了后续张量/Head/KV 工作，不是完成 dense 计算后再置零；它不是长时间质量实验，不能替代后续完整视频级 kernel/latency 对照。
