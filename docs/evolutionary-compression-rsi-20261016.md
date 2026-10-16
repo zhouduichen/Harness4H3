@@ -34,6 +34,8 @@ Full RSI 的反馈文件记录了 `pareto_stagnation`、`repeated_algorithm_plan
 - [`rsi-fixed-space-final6 config`](../configs/evolutionary-compression.fake-protocol-rsi-fixed-space-final6-20261016.yaml)
 - [`frozen-expanded-final6 config`](../configs/evolutionary-compression.fake-frozen-expanded-final6-20261016.yaml)
 
+Supplemental schema smoke（不计入六臂预算）：[`spatiotemporal smoke config`](../configs/evolutionary-compression.fake-rsi-spatiotemporal-smoke-20261016.yaml)，1 轮 promoted；其 `S0001` 已被 Agent 读取并暴露 `token_merge` v2 / `attention_window` v2 的 `grid_shape` / `window_radius` schema。
+
 ## 可复核证据
 
 - Fixed：[`R0003 decision`](../var/evolutionary-compression-fake-fixed-final6-20261016/rounds/R0003/decision.json)
@@ -46,6 +48,7 @@ Full RSI 的反馈文件记录了 `pareto_stagnation`、`repeated_algorithm_plan
 - Head/FFN 输出扰动 profile：[`R0001 profile.json`](../var/evolutionary-compression-fake-rsi-final6-20261016/rounds/R0001/profile.json)
 - RSI Fixed Space：[`R0003 decision`](../var/evolutionary-compression-fake-rsi-fixed-space-final6-20261016/rounds/R0003/decision.json)
 - Frozen Expanded Space：[`R0003 search trace`](../var/evolutionary-compression-fake-frozen-expanded-final6-20261016/rounds/R0003/algorithm-program-trace.json)
+- 3-D schema smoke：[`R0001 search-space.json`](../var/evolutionary-compression-fake-rsi-spatiotemporal-smoke-20261016/rounds/R0001/search-space.json)
 
 ## 真实性边界与 GPU 阻塞
 
