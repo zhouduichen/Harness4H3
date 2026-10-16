@@ -10,9 +10,9 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, ModelStructure, StructuralChange
 from .attention import prune_attention_module_heads
-from ...operators.wan.token_geometry import merge_token_sequence
+from ...operators.wan.token_geometry import merge_token_sequence, select_token_indices
 from ...operators.wan.runtime_gating import TimestepAttentionRule, normalized_timesteps, rule_matches, rules_to_dict, validate_timestep_attention_plan, validate_timestep_gate_plan
-from ...operators.wan.runtime_policy import AttentionWindowPolicy, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
+from ...operators.wan.runtime_policy import AttentionWindowPolicy, HeadGatingPolicy, HeadGatingRule, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
 
 
 def _torch_modules() -> tuple[Any, Any]:
@@ -155,6 +155,278 @@ def _select_kv_indices(hidden_states: Any, keep_ratio: float, score: str, torch:
     return torch.topk(scores, count).indices.sort().values
 
 
+def _head_rows(head_indices: Sequence[int], head_dim: int, torch: Any, device: Any) -> Any:
+    """Expand retained head ids into Q/K/V and output-projection rows."""
+
+    return torch.tensor(
+        tuple(head * int(head_dim) + offset for head in head_indices for offset in range(int(head_dim))),
+        device=device,
+        dtype=torch.long,
+    )
+
+
+def _select_head_indices(attention: Any, hidden_states: Any, rule: Mapping[str, Any], torch: Any) -> tuple[int, ...]:
+    """Resolve a retained-head set without materializing all Q/K/V heads."""
+
+    heads = int(getattr(attention, "heads", 0))
+    inner_dim = int(getattr(attention, "inner_dim", 0))
+    if heads <= 0 or inner_dim <= 0 or inner_dim % heads:
+        raise ValueError("unsupported_attention_layout: head geometry unavailable")
+    explicit = tuple(int(item) for item in rule.get("head_indices", ()))
+    if explicit:
+        if any(item < 0 or item >= heads for item in explicit) or len(set(explicit)) != len(explicit):
+            raise ValueError("head_gating_head_index_out_of_range")
+        selected = explicit
+    else:
+        ratio = rule.get("keep_ratio")
+        if ratio is None:
+            ratio = 1.0
+        count = max(1, min(heads, int(round(heads * float(ratio)))))
+        head_dim = inner_dim // heads
+        rows = _head_rows(range(heads), head_dim, torch, hidden_states.device)
+        projection = getattr(attention, "to_q", None)
+        if projection is None or not hasattr(projection, "weight"):
+            raise ValueError("unsupported_attention_layout: head gating requires unfused to_q")
+        weights = projection.weight.index_select(0, rows).reshape(heads, head_dim, -1)
+        score_name = str(rule.get("score", "weight_l2"))
+        if score_name in {"activation_l2", "l2_norm"}:
+            activation = hidden_states.detach().float().pow(2).mean(dim=(0, 1))
+            scores = weights.detach().float().pow(2).mean(dim=1).mean(dim=1) * activation.mean()
+        elif score_name in {"activation_abs", "mean_abs"}:
+            activation = hidden_states.detach().float().abs().mean(dim=(0, 1))
+            scores = weights.detach().float().abs().mean(dim=1).mean(dim=1) * activation.mean()
+        else:
+            scores = weights.detach().float().pow(2).mean(dim=(1, 2))
+        selected = tuple(int(item) for item in torch.topk(scores, count).indices.sort().values.detach().cpu().tolist())
+    if not selected:
+        raise ValueError("head_gating_cannot_remove_all_heads")
+    return tuple(selected)
+
+
+def _head_rule_for_timestep(policy: Mapping[str, Any], timestep: Any) -> Mapping[str, Any]:
+    """Return the explicit timestep rule or the policy-wide default."""
+
+    value = normalized_timesteps(timestep, 1)[0]
+    for raw in policy.get("rules", ()):
+        if float(raw["min_timestep"]) <= value <= float(raw["max_timestep"]):
+            return raw
+    return policy
+
+
+def _runtime_head_groups(transformer: Any, attention: Any, hidden_states: Any, block_id: str, torch: Any, timestep_override: Any = None) -> tuple[tuple[Any, tuple[int, ...] | None], ...]:
+    """Group a batch by the head budget that should actually execute."""
+
+    policy = getattr(transformer, "_harness4h3_head_gating_policy", None)
+    if not policy or (policy.get("block_ids") and block_id not in policy["block_ids"]):
+        indices = torch.arange(int(hidden_states.shape[0]), device=hidden_states.device, dtype=torch.long)
+        return ((indices, None),)
+    batch_size = int(hidden_states.shape[0])
+    current = timestep_override if timestep_override is not None else getattr(transformer, "_harness4h3_current_timestep", None)
+    timesteps = normalized_timesteps(current, batch_size) if current is not None else (0.5,) * batch_size
+    selections = tuple(
+        _select_head_indices(
+            attention,
+            hidden_states[index : index + 1],
+            _head_rule_for_timestep(policy, timestep),
+            torch,
+        )
+        for index, timestep in enumerate(timesteps)
+    )
+    grouped: dict[tuple[int, ...], list[int]] = {}
+    for index, selected in enumerate(selections):
+        grouped.setdefault(tuple(selected), []).append(index)
+    return tuple(
+        (torch.tensor(indices, device=hidden_states.device, dtype=torch.long), selected)
+        for selected, indices in grouped.items()
+    )
+
+
+def _runtime_kv_indices(
+    transformer: Any,
+    hidden_states: Any,
+    candidate_indices: Any,
+    block_id: str,
+    torch: Any,
+    kv_override: Mapping[str, Any] | None = None,
+) -> Any:
+    """Intersect sparse/KV budgets inside the current local attention window."""
+
+    sparse = getattr(transformer, "_harness4h3_sparse_runtime_policy", None)
+    kv_policies = []
+    for item in (getattr(transformer, "_harness4h3_kv_token_selection_policy", None), kv_override):
+        if item and (not item.get("block_ids") or block_id in item["block_ids"]):
+            kv_policies.append(item)
+    policies = [item for item in (sparse, *kv_policies) if item]
+    if not policies:
+        return candidate_indices
+    ratios = []
+    scores = []
+    if sparse and str(sparse.get("attention", "attn1")) in {"attn1", "self", "all"}:
+        ratios.append(float(sparse["keep_ratio"]))
+        scores.append(str(sparse.get("score", "l2_norm")))
+    for kv in kv_policies:
+        ratios.append(float(kv["keep_ratio"]))
+        scores.append(str(kv.get("score", "l2_norm")))
+    if not ratios:
+        return candidate_indices
+    keep_ratio = min(ratios)
+    values = hidden_states.index_select(1, candidate_indices)
+    score = scores[-1]
+    values = values.detach().float()
+    scores_tensor = values.pow(2).mean(dim=(0, 2)) if score == "l2_norm" else values.abs().mean(dim=(0, 2))
+    count = max(1, min(int(candidate_indices.numel()), int(round(int(candidate_indices.numel()) * keep_ratio))))
+    local = torch.topk(scores_tensor, count).indices.sort().values
+    return candidate_indices.index_select(0, local)
+
+
+def _runtime_attention_call(
+    transformer: Any,
+    attention: Any,
+    hidden_states: Any,
+    rotary_emb: Any,
+    block_id: str,
+    torch: Any,
+    *,
+    candidate_indices: Any,
+    query_indices: Any = None,
+    sequence_length: Optional[int] = None,
+    position_indices: Any = None,
+    kv_override: Mapping[str, Any] | None = None,
+    timestep_override: Any = None,
+) -> tuple[Any, int, int]:
+    """Execute one self-attention region with all active runtime budgets."""
+
+    groups = _runtime_head_groups(transformer, attention, hidden_states, block_id, torch, timestep_override)
+    query_hidden = hidden_states if query_indices is None else hidden_states.index_select(1, query_indices)
+    output = query_hidden.new_empty(query_hidden.shape)
+    selected_total = 0
+    full_total = int(candidate_indices.numel()) * int(hidden_states.shape[0])
+    for batch_indices, head_indices in groups:
+        local_hidden = hidden_states.index_select(0, batch_indices)
+        local_candidates = _runtime_kv_indices(transformer, local_hidden, candidate_indices, block_id, torch, kv_override)
+        keys = local_hidden.index_select(1, local_candidates)
+        positions = position_indices if position_indices is not None else torch.arange(int(hidden_states.shape[1]), device=hidden_states.device)
+        key_positions = positions.index_select(0, local_candidates)
+        query_positions = positions if query_indices is None else positions.index_select(0, query_indices)
+        local_output = _wan_sparse_self_attention(
+            attention,
+            local_hidden if query_indices is None else local_hidden.index_select(1, query_indices),
+            keys,
+            key_positions,
+            rotary_emb,
+            torch,
+            query_indices=query_positions,
+            sequence_length=sequence_length or int(hidden_states.shape[1]),
+            head_indices=head_indices,
+        )
+        output.index_copy_(0, batch_indices, local_output)
+        selected_total += int(local_candidates.numel()) * int(batch_indices.numel())
+        if head_indices is not None:
+            stats = getattr(transformer, "_harness4h3_head_gating_stats", None)
+            if isinstance(stats, dict):
+                stats["calls"] = int(stats.get("calls", 0)) + 1
+                stats["full_heads"] = int(stats.get("full_heads", 0)) + int(getattr(attention, "heads", 0)) * int(batch_indices.numel())
+                stats["selected_heads"] = int(stats.get("selected_heads", 0)) + len(head_indices) * int(batch_indices.numel())
+                key = repr({"block_id": block_id, "head_indices": list(head_indices)})
+                stats.setdefault("by_rule", {})[key] = int(stats["by_rule"].get(key, 0)) + int(batch_indices.numel())
+    sparse_stats = getattr(transformer, "_harness4h3_sparse_runtime_stats", None)
+    if isinstance(sparse_stats, dict) and getattr(transformer, "_harness4h3_sparse_runtime_policy", None):
+        sparse_stats["full_tokens"] = int(sparse_stats.get("full_tokens", 0)) + full_total
+        sparse_stats["selected_tokens"] = int(sparse_stats.get("selected_tokens", 0)) + selected_total
+    kv_stats = getattr(transformer, "_harness4h3_kv_token_selection_stats", None)
+    if isinstance(kv_stats, dict) and getattr(transformer, "_harness4h3_kv_token_selection_policy", None):
+        kv_stats["query_tokens"] = int(kv_stats.get("query_tokens", 0)) + int(query_hidden.shape[1]) * int(hidden_states.shape[0])
+        kv_stats["full_kv_tokens"] = int(kv_stats.get("full_kv_tokens", 0)) + full_total
+        kv_stats["selected_kv_tokens"] = int(kv_stats.get("selected_kv_tokens", 0)) + selected_total
+        kv_stats["calls"] = int(kv_stats.get("calls", 0)) + 1
+    return output, full_total, selected_total
+
+
+def _runtime_window_attention(
+    transformer: Any,
+    attention: Any,
+    hidden_states: Any,
+    rotary_emb: Any,
+    block_id: str,
+    active: Mapping[str, Any],
+    torch: Any,
+    position_indices: Any = None,
+    kv_override: Mapping[str, Any] | None = None,
+    timestep_override: Any = None,
+) -> tuple[Any, int, int, int]:
+    """Run local attention while preserving original flattened token positions."""
+
+    sequence_length = int(hidden_states.shape[1])
+    grid_shape = tuple(active.get("grid_shape", ()))
+    pieces = []
+    full_total = 0
+    selected_total = 0
+    windows = 0
+    positions = torch.arange(sequence_length, device=hidden_states.device)
+    position_indices = positions if position_indices is None else position_indices
+    if grid_shape:
+        if grid_shape[0] * grid_shape[1] * grid_shape[2] != sequence_length:
+            raise ValueError("attention_window.grid_shape product must equal sequence length")
+        radius = torch.tensor(tuple(active["window_radius"]), device=hidden_states.device)
+        coordinates = torch.stack(
+            (
+                positions // (grid_shape[1] * grid_shape[2]),
+                (positions // grid_shape[2]) % grid_shape[1],
+                positions % grid_shape[2],
+            ),
+            dim=1,
+        )
+        for query_index in range(sequence_length):
+            query_indices = positions[query_index : query_index + 1]
+            candidate_indices = torch.nonzero(
+                (coordinates - coordinates[query_index]).abs().le(radius).all(dim=1),
+                as_tuple=False,
+            ).flatten()
+            output, full_count, selected_count = _runtime_attention_call(
+                transformer,
+                attention,
+                hidden_states,
+                rotary_emb,
+                block_id,
+                torch,
+                candidate_indices=candidate_indices,
+                query_indices=query_indices,
+                sequence_length=sequence_length,
+                position_indices=position_indices,
+                kv_override=kv_override,
+                timestep_override=timestep_override,
+            )
+            pieces.append(output)
+            full_total += full_count
+            selected_total += selected_count
+            windows += 1
+        return torch.cat(pieces, dim=1), full_total, selected_total, windows
+
+    width = int(active["window_size"])
+    for start in range(0, sequence_length, width):
+        stop = min(sequence_length, start + width)
+        query_indices = positions[start:stop]
+        output, full_count, selected_count = _runtime_attention_call(
+            transformer,
+            attention,
+            hidden_states,
+            rotary_emb,
+            block_id,
+            torch,
+            candidate_indices=query_indices,
+            query_indices=query_indices,
+            sequence_length=sequence_length,
+            position_indices=position_indices,
+            kv_override=kv_override,
+            timestep_override=timestep_override,
+        )
+        pieces.append(output)
+        full_total += full_count
+        selected_total += selected_count
+        windows += 1
+    return torch.cat(pieces, dim=1), full_total, selected_total, windows
+
+
 def _apply_wan_rotary(hidden_states: Any, rotary_emb: Any) -> Any:
     """Apply Wan's real-valued RoPE tuple to Q/K tensors."""
 
@@ -180,6 +452,7 @@ def _wan_sparse_self_attention(
     *,
     query_indices: Any = None,
     sequence_length: Optional[int] = None,
+    head_indices: Optional[Sequence[int]] = None,
 ) -> Any:
     """Run Wan self-attention with full Q and selected K/V tokens.
 
@@ -190,20 +463,53 @@ def _wan_sparse_self_attention(
     """
 
     fused = bool(getattr(attention, "fused_projections", False))
+    if fused and head_indices is not None:
+        unfuse = getattr(attention, "unfuse_projections", None)
+        if not callable(unfuse):
+            raise ValueError("unsupported_attention_layout: fused projections cannot be unfused for head gating")
+        unfuse()
+        fused = bool(getattr(attention, "fused_projections", False))
     if fused:
         query = attention.to_qkv(hidden_states).chunk(3, dim=-1)[0]
         key, value = attention.to_qkv(keys).chunk(3, dim=-1)[1:]
     else:
-        query = attention.to_q(hidden_states)
-        key = attention.to_k(keys)
-        value = attention.to_v(keys)
+        if head_indices is None:
+            query = attention.to_q(hidden_states)
+            key = attention.to_k(keys)
+            value = attention.to_v(keys)
+        else:
+            heads = int(getattr(attention, "heads", 0))
+            inner_dim = int(getattr(attention, "inner_dim", 0))
+            if heads <= 0 or inner_dim <= 0 or inner_dim % heads:
+                raise ValueError("unsupported_attention_layout: head geometry unavailable")
+            head_dim = inner_dim // heads
+            rows = _head_rows(head_indices, head_dim, torch, hidden_states.device)
+            functional = torch.nn.functional
+            query = functional.linear(hidden_states, attention.to_q.weight.index_select(0, rows), attention.to_q.bias.index_select(0, rows) if attention.to_q.bias is not None else None)
+            key = functional.linear(keys, attention.to_k.weight.index_select(0, rows), attention.to_k.bias.index_select(0, rows) if attention.to_k.bias is not None else None)
+            value = functional.linear(keys, attention.to_v.weight.index_select(0, rows), attention.to_v.bias.index_select(0, rows) if attention.to_v.bias is not None else None)
     norm_q = getattr(attention, "norm_q", None)
     norm_k = getattr(attention, "norm_k", None)
-    if callable(norm_q):
-        query = norm_q(query)
-    if callable(norm_k):
-        key = norm_k(key)
-    heads = int(attention.heads)
+    if head_indices is not None and not fused:
+        heads = len(tuple(head_indices))
+        if callable(norm_q) and hasattr(norm_q, "weight"):
+            norm_weight = norm_q.weight.index_select(0, _head_rows(head_indices, query.shape[-1] // heads, torch, query.device))
+            eps = float(getattr(norm_q, "eps", 1e-6))
+            query = torch.nn.functional.rms_norm(query, (int(query.shape[-1]),), weight=norm_weight, eps=eps) if hasattr(torch.nn.functional, "rms_norm") else query * torch.rsqrt(query.float().pow(2).mean(dim=-1, keepdim=True) + eps).to(query.dtype) * norm_weight
+        elif callable(norm_q):
+            query = norm_q(query)
+        if callable(norm_k) and hasattr(norm_k, "weight"):
+            norm_weight = norm_k.weight.index_select(0, _head_rows(head_indices, key.shape[-1] // heads, torch, key.device))
+            eps = float(getattr(norm_k, "eps", 1e-6))
+            key = torch.nn.functional.rms_norm(key, (int(key.shape[-1]),), weight=norm_weight, eps=eps) if hasattr(torch.nn.functional, "rms_norm") else key * torch.rsqrt(key.float().pow(2).mean(dim=-1, keepdim=True) + eps).to(key.dtype) * norm_weight
+        elif callable(norm_k):
+            key = norm_k(key)
+    else:
+        if callable(norm_q):
+            query = norm_q(query)
+        if callable(norm_k):
+            key = norm_k(key)
+        heads = int(attention.heads)
     query = query.unflatten(2, (heads, -1))
     key = key.unflatten(2, (heads, -1))
     value = value.unflatten(2, (heads, -1))
@@ -215,7 +521,16 @@ def _wan_sparse_self_attention(
         query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), dropout_p=0.0, is_causal=False
     ).transpose(1, 2)
     output = output.flatten(2, 3).type_as(query)
-    output = attention.to_out[0](output)
+    if head_indices is not None and not fused:
+        head_dim = int(output.shape[-1]) // max(1, len(tuple(head_indices)))
+        rows = _head_rows(head_indices, head_dim, torch, output.device)
+        output = torch.nn.functional.linear(
+            output,
+            attention.to_out[0].weight.index_select(1, rows),
+            attention.to_out[0].bias,
+        )
+    else:
+        output = attention.to_out[0](output)
     return attention.to_out[1](output)
 
 
@@ -395,6 +710,8 @@ class DiffusersWanAdapter:
                     self.apply_sparse_runtime(model, args)
                 elif operator == "attention_window":
                     self.apply_attention_window(model, args)
+                elif operator == "head_gating":
+                    self.apply_head_gating(model, args)
                 elif operator == "sampling_step_skip":
                     self.apply_sampling_step_policy(model, args)
                 else:
@@ -424,6 +741,9 @@ class DiffusersWanAdapter:
         window_policy = config.get("harness4h3_attention_window")
         if window_policy:
             self.apply_attention_window(model, window_policy)
+        head_policy = config.get("harness4h3_head_gating")
+        if head_policy:
+            self.apply_head_gating(model, head_policy)
         sampling_policy = config.get("harness4h3_sampling_step")
         if sampling_policy:
             self.apply_sampling_step_policy(model, sampling_policy)
@@ -505,6 +825,7 @@ class DiffusersWanAdapter:
                 "kv_token_selection_policy": dict(getattr(transformer, "_harness4h3_kv_token_selection_policy", {}) or {}),
                 "sparse_runtime_policy": dict(getattr(transformer, "_harness4h3_sparse_runtime_policy", {}) or {}),
                 "attention_window_policy": dict(getattr(transformer, "_harness4h3_attention_window_policy", {}) or {}),
+                "head_gating_policy": dict(getattr(transformer, "_harness4h3_head_gating_policy", {}) or {}),
                 "sampling_step_policy": dict(getattr(transformer, "_harness4h3_sampling_step_policy", {}) or {}),
                 "runtime_operations": [dict(item) for item in getattr(transformer, "_harness4h3_runtime_operations", []) or []],
             },
@@ -623,6 +944,119 @@ class DiffusersWanAdapter:
         after = _param_count(self._transformer(model))
         return StructuralChange("attention_head_pruning", {"attention_names": list(names), "head_indices": list(removed_heads), "changes": changes, "remaining_heads": remaining_heads, "parameter_reduction_ratio": 1.0 - float(after) / max(float(before), 1.0)})
 
+    def apply_head_gating(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
+        """Install a real self-attention head gate.
+
+        The gate projects only the retained Q/K/V rows and only the retained
+        input columns of ``to_out``.  It therefore changes executed head
+        work, rather than calculating all heads and multiplying their output
+        by zero.  Timestep rules are grouped by batch item so mixed-timestep
+        batches never inherit the first sample's head budget.
+        """
+
+        torch, _ = _torch_modules()
+        parsed = HeadGatingPolicy.from_mapping(policy)
+        transformer = self._transformer(model)
+        _path, blocks = self._blocks(model)
+        known = {"block.%d" % index for index in range(len(blocks))}
+        unknown = sorted(set(parsed.block_ids) - known)
+        if unknown:
+            raise ValueError("head_gating_unknown_block: %s" % unknown[0])
+        _register_config(transformer, "harness4h3_head_gating", parsed.to_dict())
+        transformer._harness4h3_head_gating_policy = parsed.to_dict()
+        transformer._harness4h3_head_gating_stats = {
+            "calls": 0,
+            "full_heads": 0,
+            "selected_heads": 0,
+            "by_rule": {},
+        }
+
+        if not hasattr(transformer, "_harness4h3_head_gating_base_forward"):
+            base_transformer_forward = transformer.forward
+
+            def head_gating_transformer_forward(transformer_self: Any, hidden_states: Any, timestep: Any, *args: Any, _base: Any = base_transformer_forward, **kwargs: Any) -> Any:
+                transformer_self._harness4h3_current_timestep = timestep
+                try:
+                    return _base(hidden_states, timestep, *args, **kwargs)
+                finally:
+                    transformer_self._harness4h3_current_timestep = None
+
+            transformer._harness4h3_head_gating_base_forward = base_transformer_forward
+            transformer.forward = MethodType(head_gating_transformer_forward, transformer)
+
+        for index, block in enumerate(blocks):
+            block_id = "block.%d" % index
+            if parsed.block_ids and block_id not in parsed.block_ids:
+                continue
+            attention = getattr(block, "attn1", None)
+            if attention is None:
+                continue
+            if bool(getattr(attention, "fused_projections", False)):
+                unfuse = getattr(attention, "unfuse_projections", None)
+                if not callable(unfuse):
+                    raise ValueError("unsupported_attention_layout: fused projections cannot be unfused for head gating")
+                unfuse()
+            if hasattr(attention, "_harness4h3_head_gating_base_forward"):
+                continue
+            base = attention.forward
+
+            def head_gating_forward(
+                attention_self: Any,
+                hidden_states: Any,
+                encoder_hidden_states: Any = None,
+                attention_mask: Any = None,
+                rotary_emb: Any = None,
+                *args: Any,
+                _block_id: str = block_id,
+                _base: Any = base,
+                **kwargs: Any,
+            ) -> Any:
+                active = getattr(transformer, "_harness4h3_head_gating_policy", parsed.to_dict())
+                if (
+                    encoder_hidden_states is not None
+                    or attention_mask is not None
+                    or getattr(hidden_states, "ndim", 0) < 3
+                    or int(hidden_states.shape[1]) <= 1
+                    or (active.get("block_ids") and _block_id not in active["block_ids"])
+                    or getattr(transformer, "_harness4h3_token_merge_policy", None)
+                    or getattr(transformer, "_harness4h3_timestep_attention_policy", None)
+                ):
+                    return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
+                window = getattr(transformer, "_harness4h3_attention_window_policy", None)
+                if window:
+                    output, _full, _selected, _windows = _runtime_window_attention(
+                        transformer, attention_self, hidden_states, rotary_emb, _block_id, window, torch
+                    )
+                    return output
+                positions = torch.arange(int(hidden_states.shape[1]), device=hidden_states.device)
+                output, _full, _selected = _runtime_attention_call(
+                    transformer,
+                    attention_self,
+                    hidden_states,
+                    rotary_emb,
+                    _block_id,
+                    torch,
+                    candidate_indices=positions,
+                    sequence_length=int(hidden_states.shape[1]),
+                )
+                return output
+
+            attention._harness4h3_head_gating_base_forward = base
+            attention.forward = MethodType(head_gating_forward, attention)
+
+        _record_runtime_operation(transformer, "head_gating", parsed.to_dict())
+        return StructuralChange(
+            "runtime_head_gating",
+            {
+                "runtime_operator": "head_gating",
+                "policy": parsed.to_dict(),
+                "dynamic_compute": True,
+                "parameter_reduction_ratio": 0.0,
+                "executed_head_selection": True,
+                "child_reload_verified": False,
+            },
+        )
+
     def apply_token_sparsity(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
         torch, _ = _torch_modules()
         parsed = TokenSparsityPolicy.from_mapping(policy)
@@ -645,9 +1079,14 @@ class DiffusersWanAdapter:
                 active = getattr(transformer, "_harness4h3_token_sparsity_policy", parsed.to_dict())
                 if hidden_states.ndim < 3 or hidden_states.shape[1] <= 1 or (active.get("block_ids") and _block_id not in active["block_ids"]):
                     return _base(hidden_states, encoder_hidden_states, temb, rotary_emb, *args, **kwargs)
-                count = max(1, min(int(hidden_states.shape[1]), int(round(float(hidden_states.shape[1]) * float(active["keep_ratio"])))) )
-                scores = hidden_states.detach().float().pow(2).mean(dim=(0, 2))
-                indices = torch.topk(scores, count).indices.sort().values
+                indices = select_token_indices(
+                    hidden_states,
+                    float(active["keep_ratio"]),
+                    torch,
+                    score=str(active.get("score", "l2_norm")),
+                    grid_shape=active.get("grid_shape", ()),
+                )
+                count = int(indices.numel())
                 reduced = hidden_states.index_select(1, indices)
                 reduced_rotary = _slice_rotary(rotary_emb, indices, int(hidden_states.shape[1]))
                 output = _base(reduced, encoder_hidden_states, temb, reduced_rotary, *args, **kwargs)
@@ -704,8 +1143,34 @@ class DiffusersWanAdapter:
                 merged, source_groups, anchors, group_shape = _merge_token_sequence(hidden_states, float(active["keep_ratio"]), torch, grid_shape)
                 if source_groups is None:
                     return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
-                merged_rotary = _slice_rotary(rotary_emb, anchors, int(hidden_states.shape[1]))
-                output = _base(merged, None, None, merged_rotary, *args, **kwargs)
+                runtime_window = getattr(transformer, "_harness4h3_attention_window_policy", None)
+                if runtime_window:
+                    window = dict(runtime_window)
+                    if window.get("grid_shape"):
+                        window["grid_shape"] = list(group_shape or ())
+                    output, _full, _selected, _windows = _runtime_window_attention(
+                        transformer,
+                        attention_self,
+                        merged,
+                        rotary_emb,
+                        _block_id,
+                        window,
+                        torch,
+                        position_indices=anchors,
+                    )
+                else:
+                    positions = torch.arange(int(merged.shape[1]), device=merged.device)
+                    output, _full, _selected = _runtime_attention_call(
+                        transformer,
+                        attention_self,
+                        merged,
+                        rotary_emb,
+                        _block_id,
+                        torch,
+                        candidate_indices=positions,
+                        sequence_length=int(hidden_states.shape[1]),
+                        position_indices=anchors,
+                    )
                 restored = output.index_select(1, source_groups)
                 stats = transformer._harness4h3_token_merge_stats
                 stats["input_tokens"] += int(hidden_states.shape[1])
@@ -726,10 +1191,6 @@ class DiffusersWanAdapter:
         torch, _ = _torch_modules()
         parsed = KVTokenSelectionPolicy.from_mapping(policy)
         transformer = self._transformer(model)
-        if getattr(transformer, "_harness4h3_token_merge_policy", None):
-            raise ValueError("incompatible_runtime_attention_composition: kv_token_select and token_merge")
-        if getattr(transformer, "_harness4h3_attention_window_policy", None):
-            raise ValueError("incompatible_runtime_attention_composition: kv_token_select and attention_window")
         _register_config(transformer, "harness4h3_kv_token_selection", parsed.to_dict())
         transformer._harness4h3_kv_token_selection_policy = parsed.to_dict()
         transformer._harness4h3_kv_token_selection_stats = {
@@ -743,9 +1204,14 @@ class DiffusersWanAdapter:
         # If sparse_runtime was installed first, its wrapper is the combined
         # execution point.  It reads this policy and applies one K/V gather;
         # adding another wrapper would silently replace the operation order.
-        if getattr(transformer, "_harness4h3_sparse_runtime_policy", None):
+        if (
+            getattr(transformer, "_harness4h3_sparse_runtime_policy", None)
+            or getattr(transformer, "_harness4h3_attention_window_policy", None)
+            or getattr(transformer, "_harness4h3_head_gating_policy", None)
+            or getattr(transformer, "_harness4h3_token_merge_policy", None)
+        ):
             _record_runtime_operation(transformer, "kv_token_select", parsed.to_dict())
-            return StructuralChange("runtime_kv_token_selection", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0, "full_query_length_preserved": True, "combined_with_sparse_runtime": True})
+            return StructuralChange("runtime_kv_token_selection", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0, "full_query_length_preserved": True, "combined_with_runtime_attention": True})
         for index, block in enumerate(blocks):
             block_id = "block.%d" % index
             attention = getattr(block, "attn1", None)
@@ -763,15 +1229,17 @@ class DiffusersWanAdapter:
                     or (active.get("block_ids") and _block_id not in active["block_ids"])
                 ):
                     return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
-                indices = _select_kv_indices(hidden_states, float(active["keep_ratio"]), str(active.get("score", "l2_norm")), torch)
-                keys = hidden_states.index_select(1, indices)
-                output = _wan_sparse_self_attention(attention_self, hidden_states, keys, indices, rotary_emb, torch)
-                stats = transformer._harness4h3_kv_token_selection_stats
-                stats["query_tokens"] += int(hidden_states.shape[1])
-                stats["full_kv_tokens"] += int(hidden_states.shape[1])
-                stats["selected_kv_tokens"] += int(indices.numel())
-                stats["calls"] += 1
-                stats["last_indices"] = indices.detach().cpu().tolist()
+                positions = torch.arange(int(hidden_states.shape[1]), device=hidden_states.device)
+                output, full_count, selected_count = _runtime_attention_call(
+                    transformer,
+                    attention_self,
+                    hidden_states,
+                    rotary_emb,
+                    _block_id,
+                    torch,
+                    candidate_indices=positions,
+                    sequence_length=int(hidden_states.shape[1]),
+                )
                 return output
 
             attention._harness4h3_kv_token_base_forward = base
@@ -783,34 +1251,44 @@ class DiffusersWanAdapter:
         torch, _ = _torch_modules()
         parsed = SparseRuntimePolicy.from_mapping(policy)
         transformer = self._transformer(model)
-        if getattr(transformer, "_harness4h3_attention_window_policy", None):
-            raise ValueError("incompatible_runtime_attention_composition: attention_window and sparse_runtime")
         _register_config(transformer, "harness4h3_sparse_runtime", parsed.to_dict())
         transformer._harness4h3_sparse_runtime_policy = parsed.to_dict()
         transformer._harness4h3_sparse_runtime_stats = {"full_tokens": 0, "selected_tokens": 0}
         _path, blocks = self._blocks(model)
-        for block in blocks:
+        for index, block in enumerate(blocks):
+            block_id = "block.%d" % index
             attention = getattr(block, "attn1", None)
             if attention is None or hasattr(attention, "_harness4h3_sparse_base_forward"):
                 continue
             base = attention.forward
 
-            def sparse_forward(attention_self: Any, hidden_states: Any, encoder_hidden_states: Any = None, attention_mask: Any = None, rotary_emb: Any = None, *args: Any, _base: Any = base, **kwargs: Any) -> Any:
+            def sparse_forward(attention_self: Any, hidden_states: Any, encoder_hidden_states: Any = None, attention_mask: Any = None, rotary_emb: Any = None, *args: Any, _block_id: str = block_id, _base: Any = base, **kwargs: Any) -> Any:
                 active = getattr(transformer, "_harness4h3_sparse_runtime_policy", parsed.to_dict())
                 if encoder_hidden_states is not None or hidden_states.ndim < 3 or hidden_states.shape[1] <= 1:
                     return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
-                kv_policy = getattr(transformer, "_harness4h3_kv_token_selection_policy", None)
-                keep_ratio = min(float(active["keep_ratio"]), float(kv_policy["keep_ratio"])) if kv_policy else float(active["keep_ratio"])
-                score = str(kv_policy.get("score", active.get("score", "l2_norm"))) if kv_policy else str(active.get("score", "l2_norm"))
-                indices = _select_kv_indices(hidden_states, keep_ratio, score, torch)
-                keys = hidden_states.index_select(1, indices)
+                if (
+                    attention_mask is not None
+                    or getattr(transformer, "_harness4h3_head_gating_policy", None)
+                    or getattr(transformer, "_harness4h3_attention_window_policy", None)
+                    or getattr(transformer, "_harness4h3_token_merge_policy", None)
+                    or getattr(transformer, "_harness4h3_timestep_attention_policy", None)
+                ):
+                    return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
+                positions = torch.arange(int(hidden_states.shape[1]), device=hidden_states.device)
                 # Keep full Q, reduce K/V, and slice K's original RoPE
                 # positions independently.  Calling the stock processor with
                 # a shared tuple would either misalign positions or disable
                 # RoPE for the sparse branch.
-                result = _wan_sparse_self_attention(attention_self, hidden_states, keys, indices, rotary_emb, torch)
-                transformer._harness4h3_sparse_runtime_stats["full_tokens"] += int(hidden_states.shape[1])
-                transformer._harness4h3_sparse_runtime_stats["selected_tokens"] += int(indices.numel())
+                result, full_count, selected_count = _runtime_attention_call(
+                    transformer,
+                    attention_self,
+                    hidden_states,
+                    rotary_emb,
+                    _block_id,
+                    torch,
+                    candidate_indices=positions,
+                    sequence_length=int(hidden_states.shape[1]),
+                )
                 return result
 
             attention._harness4h3_sparse_base_forward = base
@@ -822,8 +1300,6 @@ class DiffusersWanAdapter:
         torch, _ = _torch_modules()
         parsed = AttentionWindowPolicy.from_mapping(policy)
         transformer = self._transformer(model)
-        if getattr(transformer, "_harness4h3_sparse_runtime_policy", None):
-            raise ValueError("incompatible_runtime_attention_composition: sparse_runtime and attention_window")
         _register_config(transformer, "harness4h3_attention_window", parsed.to_dict())
         transformer._harness4h3_attention_window_policy = parsed.to_dict()
         transformer._harness4h3_attention_window_stats = {
@@ -834,83 +1310,35 @@ class DiffusersWanAdapter:
             "window_radius": [],
         }
         _path, blocks = self._blocks(model)
-        for block in blocks:
+        for index, block in enumerate(blocks):
+            block_id = "block.%d" % index
             attention = getattr(block, "attn1", None)
             if attention is None or hasattr(attention, "_harness4h3_window_base_forward"):
                 continue
             base = attention.forward
 
-            def window_forward(attention_self: Any, hidden_states: Any, encoder_hidden_states: Any = None, attention_mask: Any = None, rotary_emb: Any = None, *args: Any, _base: Any = base, **kwargs: Any) -> Any:
+            def window_forward(attention_self: Any, hidden_states: Any, encoder_hidden_states: Any = None, attention_mask: Any = None, rotary_emb: Any = None, *args: Any, _block_id: str = block_id, _base: Any = base, **kwargs: Any) -> Any:
                 active = getattr(transformer, "_harness4h3_attention_window_policy", parsed.to_dict())
-                if encoder_hidden_states is not None or hidden_states.ndim < 3 or hidden_states.shape[1] <= 1:
+                if (
+                    encoder_hidden_states is not None
+                    or attention_mask is not None
+                    or hidden_states.ndim < 3
+                    or hidden_states.shape[1] <= 1
+                    or getattr(transformer, "_harness4h3_token_merge_policy", None)
+                    or getattr(transformer, "_harness4h3_timestep_attention_policy", None)
+                ):
                     return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
-                grid_shape = tuple(active.get("grid_shape", ()))
-                if grid_shape:
-                    if grid_shape[0] * grid_shape[1] * grid_shape[2] != int(hidden_states.shape[1]):
-                        raise ValueError("attention_window.grid_shape product must equal sequence length")
-                    radius = torch.tensor(tuple(active["window_radius"]), device=hidden_states.device)
-                    positions = torch.arange(int(hidden_states.shape[1]), device=hidden_states.device)
-                    coordinates = torch.stack(
-                        (
-                            positions // (grid_shape[1] * grid_shape[2]),
-                            (positions // grid_shape[2]) % grid_shape[1],
-                            positions % grid_shape[2],
-                        ),
-                        dim=1,
-                    )
-                    pieces = []
-                    selected = 0
-                    for query_index in range(int(hidden_states.shape[1])):
-                        query_indices = positions[query_index:query_index + 1]
-                        key_indices = torch.nonzero((coordinates - coordinates[query_index]).abs().le(radius).all(dim=1), as_tuple=False).flatten()
-                        query = hidden_states.index_select(1, query_indices)
-                        keys = hidden_states.index_select(1, key_indices)
-                        pieces.append(
-                            _wan_sparse_self_attention(
-                                attention_self,
-                                query,
-                                keys,
-                                key_indices,
-                                rotary_emb,
-                                torch,
-                                query_indices=query_indices,
-                                sequence_length=int(hidden_states.shape[1]),
-                            )
-                        )
-                        selected += int(key_indices.numel())
-                    transformer._harness4h3_attention_window_stats["query_tokens"] += int(hidden_states.shape[1])
-                    transformer._harness4h3_attention_window_stats["selected_kv_tokens"] += int(selected)
-                    transformer._harness4h3_attention_window_stats["windows"] += int(hidden_states.shape[1])
-                    transformer._harness4h3_attention_window_stats["grid_shape"] = list(grid_shape)
-                    transformer._harness4h3_attention_window_stats["window_radius"] = list(active["window_radius"])
-                    return torch.cat(pieces, dim=1)
-                width = int(active["window_size"])
-                pieces = []
-                selected = 0
-                for start in range(0, int(hidden_states.shape[1]), width):
-                    stop = min(int(hidden_states.shape[1]), start + width)
-                    query = hidden_states[:, start:stop]
-                    # Wan's processor applies one RoPE tuple to both Q and K.
-                    # Use non-overlapping local blocks so the same slice is
-                    # valid for both tensors and preserves the original
-                    # flattened video-token positions.
-                    keys = hidden_states[:, start:stop]
-                    local_rotary = rotary_emb
-                    if isinstance(rotary_emb, (tuple, list)) and len(rotary_emb) == 2:
-                        sliced = []
-                        for frequencies in rotary_emb:
-                            if getattr(frequencies, "ndim", 0) >= 2 and int(frequencies.shape[1]) >= stop:
-                                sliced.append(frequencies[:, start:stop, ...])
-                            else:
-                                sliced = []
-                                break
-                        local_rotary = tuple(sliced) if len(sliced) == 2 else None
-                    pieces.append(_base(query, keys, None, local_rotary, *args, **kwargs))
-                    selected += stop - start
-                transformer._harness4h3_attention_window_stats["query_tokens"] += int(hidden_states.shape[1])
-                transformer._harness4h3_attention_window_stats["selected_kv_tokens"] += int(selected)
-                transformer._harness4h3_attention_window_stats["windows"] += len(pieces)
-                return torch.cat(pieces, dim=1)
+                output, full_count, selected_count, windows = _runtime_window_attention(
+                    transformer, attention_self, hidden_states, rotary_emb, _block_id, active, torch
+                )
+                stats = transformer._harness4h3_attention_window_stats
+                stats["query_tokens"] += int(hidden_states.shape[1])
+                stats["selected_kv_tokens"] += int(selected_count)
+                stats["windows"] += int(windows)
+                stats["full_kv_tokens"] = int(stats.get("full_kv_tokens", 0)) + int(full_count)
+                stats["grid_shape"] = list(active.get("grid_shape", ()))
+                stats["window_radius"] = list(active.get("window_radius", ()))
+                return output
 
             attention._harness4h3_window_base_forward = base
             attention.forward = MethodType(window_forward, attention)
@@ -994,6 +1422,7 @@ class DiffusersWanAdapter:
         kv_policy = getattr(transformer, "_harness4h3_kv_token_selection_policy", {})
         sparse_policy = getattr(transformer, "_harness4h3_sparse_runtime_policy", {})
         window_policy = getattr(transformer, "_harness4h3_attention_window_policy", {})
+        head_policy = getattr(transformer, "_harness4h3_head_gating_policy", {})
         sampling_policy = getattr(transformer, "_harness4h3_sampling_step_policy", {})
         if token_policy:
             total *= float(token_policy.get("keep_ratio", 1.0))
@@ -1005,6 +1434,8 @@ class DiffusersWanAdapter:
             total *= float(sparse_policy.get("keep_ratio", 1.0))
         if window_policy:
             total *= min(1.0, float(window_policy.get("window_size", 64)) / 64.0)
+        if head_policy:
+            total *= float(head_policy.get("keep_ratio", 1.0))
         if sampling_policy:
             total *= float(sampling_policy.get("target_steps", 16)) / 16.0
         return int(max(0.0, round(total)))
@@ -1334,23 +1765,54 @@ class DiffusersWanAdapter:
                     local_args = tuple(select_batch(item, indices) for item in args)
                     local_kwargs = {name: select_batch(item, indices) for name, item in kwargs.items()}
                     rule = rule_by_key[key]
+                    local_timestep = select_batch(current_timestep, indices)
                     if rule is None:
-                        local_output = _base(local_hidden, local_encoder, local_mask, local_rotary, *local_args, **local_kwargs)
+                        runtime_window = getattr(transformer, "_harness4h3_attention_window_policy", None)
+                        if runtime_window:
+                            local_output, _full, _selected, _windows = _runtime_window_attention(
+                                transformer,
+                                attention_self,
+                                local_hidden,
+                                local_rotary,
+                                _block_id,
+                                runtime_window,
+                                torch,
+                                timestep_override=local_timestep,
+                            )
+                        else:
+                            local_output = _base(local_hidden, local_encoder, local_mask, local_rotary, *local_args, **local_kwargs)
                     else:
-                        kv_indices = _select_kv_indices(local_hidden, rule.keep_ratio, rule.score, torch)
-                        keys = local_hidden.index_select(1, kv_indices)
-                        local_output = _wan_sparse_self_attention(
-                            attention_self,
-                            local_hidden,
-                            keys,
-                            kv_indices,
-                            local_rotary,
-                            torch,
-                        )
+                        runtime_window = getattr(transformer, "_harness4h3_attention_window_policy", None)
+                        if runtime_window:
+                            local_output, full_count, selected_count, _windows = _runtime_window_attention(
+                                transformer,
+                                attention_self,
+                                local_hidden,
+                                local_rotary,
+                                _block_id,
+                                runtime_window,
+                                torch,
+                                kv_override={"keep_ratio": rule.keep_ratio, "score": rule.score},
+                                timestep_override=local_timestep,
+                            )
+                        else:
+                            positions = torch.arange(int(local_hidden.shape[1]), device=local_hidden.device)
+                            local_output, full_count, selected_count = _runtime_attention_call(
+                                transformer,
+                                attention_self,
+                                local_hidden,
+                                local_rotary,
+                                _block_id,
+                                torch,
+                                candidate_indices=positions,
+                                sequence_length=int(local_hidden.shape[1]),
+                                kv_override={"keep_ratio": rule.keep_ratio, "score": rule.score},
+                                timestep_override=local_timestep,
+                            )
                         stats = transformer._harness4h3_timestep_attention_stats[_block_id]
                         stats["calls"] += 1
-                        stats["full_kv_tokens"] += int(local_hidden.shape[1]) * int(local_hidden.shape[0])
-                        stats["selected_kv_tokens"] += int(kv_indices.numel()) * int(local_hidden.shape[0])
+                        stats["full_kv_tokens"] += int(full_count)
+                        stats["selected_kv_tokens"] += int(selected_count)
                         rule_key = "%s:%s" % (rule.min_timestep, rule.max_timestep)
                         stats["by_rule"][rule_key] = int(stats["by_rule"].get(rule_key, 0)) + int(local_hidden.shape[0])
                     output.index_copy_(0, indices, local_output)

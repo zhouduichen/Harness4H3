@@ -17,8 +17,8 @@ from .contracts import (
     checkpoint_content_sha256,
 )
 from ...operators.wan.runtime_gating import TimestepAttentionRule, TimestepGateRule, normalized_timesteps, rule_matches, validate_timestep_attention_plan, validate_timestep_gate_plan
-from ...operators.wan.runtime_policy import AttentionWindowPolicy, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
-from ...operators.wan.token_geometry import merge_token_sequence
+from ...operators.wan.runtime_policy import AttentionWindowPolicy, HeadGatingPolicy, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
+from ...operators.wan.token_geometry import merge_token_sequence, select_token_indices
 from .attention import prune_attention_module_heads
 
 
@@ -66,16 +66,42 @@ def _fake_attention_module(hidden_size: int, heads: int, head_dim: int | None = 
             self.to_out = nn.ModuleList([nn.Linear(self.inner_dim, hidden_size), nn.Dropout(0.0)])
 
         def _attend(self, query: Any, context: Any) -> Any:
+            head_policy = getattr(self, "_harness4h3_head_gating_policy", None)
             heads_now = int(self.heads)
             dim = int(self.inner_dim) // heads_now
+            selected_heads = tuple(range(heads_now))
+            if head_policy:
+                explicit = tuple(int(item) for item in head_policy.get("head_indices", []))
+                if explicit:
+                    selected_heads = explicit
+                else:
+                    count = max(1, min(heads_now, int(round(heads_now * float(head_policy.get("keep_ratio", 1.0))))))
+                    weights = self.to_q.weight.detach().float().reshape(heads_now, dim, -1)
+                    scores = weights.pow(2).mean(dim=(1, 2))
+                    selected_heads = tuple(int(item) for item in torch.topk(scores, count).indices.sort().values.tolist())
+                if any(item < 0 or item >= heads_now for item in selected_heads) or not selected_heads:
+                    raise ValueError("head_gating_head_index_out_of_range")
+                stats = getattr(self, "_harness4h3_head_gating_stats", None)
+                if isinstance(stats, dict):
+                    stats["calls"] = int(stats.get("calls", 0)) + 1
+                    stats["full_heads"] = int(stats.get("full_heads", 0)) + heads_now * int(query.shape[0])
+                    stats["selected_heads"] = int(stats.get("selected_heads", 0)) + len(selected_heads) * int(query.shape[0])
+            rows = torch.tensor(tuple(head * dim + offset for head in selected_heads for offset in range(dim)), device=query.device, dtype=torch.long)
+            q_weight = self.to_q.weight.index_select(0, rows)
+            k_weight = self.to_k.weight.index_select(0, rows)
+            v_weight = self.to_v.weight.index_select(0, rows)
+            q_bias = self.to_q.bias.index_select(0, rows) if self.to_q.bias is not None else None
+            k_bias = self.to_k.bias.index_select(0, rows) if self.to_k.bias is not None else None
+            v_bias = self.to_v.bias.index_select(0, rows) if self.to_v.bias is not None else None
             query_tokens = int(query.shape[1])
-            query = self.to_q(query).reshape(query.shape[0], query.shape[1], heads_now, dim).transpose(1, 2)
-            key = self.to_k(context).reshape(context.shape[0], context.shape[1], heads_now, dim).transpose(1, 2)
-            val = self.to_v(context).reshape(context.shape[0], context.shape[1], heads_now, dim).transpose(1, 2)
+            query = torch.nn.functional.linear(query, q_weight, q_bias).reshape(query.shape[0], query.shape[1], len(selected_heads), dim).transpose(1, 2)
+            key = torch.nn.functional.linear(context, k_weight, k_bias).reshape(context.shape[0], context.shape[1], len(selected_heads), dim).transpose(1, 2)
+            val = torch.nn.functional.linear(context, v_weight, v_bias).reshape(context.shape[0], context.shape[1], len(selected_heads), dim).transpose(1, 2)
             scores = torch.matmul(query, key.transpose(-2, -1)) / max(dim, 1) ** 0.5
             weights = torch.softmax(scores, dim=-1)
-            result = torch.matmul(weights, val).transpose(1, 2).reshape(query.shape[0], query_tokens, heads_now * dim)
-            return self.to_out[0](result)
+            result = torch.matmul(weights, val).transpose(1, 2).reshape(query.shape[0], query_tokens, len(selected_heads) * dim)
+            out_weight = self.to_out[0].weight.index_select(1, rows)
+            return torch.nn.functional.linear(result, out_weight, self.to_out[0].bias)
 
         def forward(self, value: Any, encoder_hidden_states: Any = None, **kwargs: Any) -> Any:
             squeeze = value.ndim == 2
@@ -214,7 +240,7 @@ def _copy_module(module: Any) -> Any:
 class FakeWanDiT:
     """Small Torch module kept separate so the adapter owns structure policy."""
 
-    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None, num_heads: int = 4, attention_head_dim: int | None = None, runtime_gate_rules: Sequence[Mapping[str, Any]] | None = None, timestep_attention_rules: Sequence[Mapping[str, Any]] | None = None, token_sparsity_policy: Mapping[str, Any] | None = None, token_merge_policy: Mapping[str, Any] | None = None, kv_token_selection_policy: Mapping[str, Any] | None = None, sparse_runtime_policy: Mapping[str, Any] | None = None, attention_window_policy: Mapping[str, Any] | None = None, sampling_step_policy: Mapping[str, Any] | None = None, runtime_operations: Sequence[Mapping[str, Any]] | None = None) -> None:
+    def __init__(self, block_count: int, hidden_size: int, ffn_width: int, *, block_ids: Sequence[str] | None = None, ffn_widths: Sequence[int] | None = None, num_heads: int = 4, attention_head_dim: int | None = None, runtime_gate_rules: Sequence[Mapping[str, Any]] | None = None, timestep_attention_rules: Sequence[Mapping[str, Any]] | None = None, token_sparsity_policy: Mapping[str, Any] | None = None, token_merge_policy: Mapping[str, Any] | None = None, kv_token_selection_policy: Mapping[str, Any] | None = None, sparse_runtime_policy: Mapping[str, Any] | None = None, attention_window_policy: Mapping[str, Any] | None = None, head_gating_policy: Mapping[str, Any] | None = None, sampling_step_policy: Mapping[str, Any] | None = None, runtime_operations: Sequence[Mapping[str, Any]] | None = None) -> None:
         _, nn = _torch()
         widths = list(ffn_widths or [ffn_width] * block_count)
         if len(widths) != block_count:
@@ -242,6 +268,7 @@ class FakeWanDiT:
         self._harness4h3_kv_token_selection_policy = dict(kv_token_selection_policy or {})
         self._harness4h3_sparse_runtime_policy = dict(sparse_runtime_policy or {})
         self._harness4h3_attention_window_policy = dict(attention_window_policy or {})
+        self._harness4h3_head_gating_policy = dict(head_gating_policy or {})
         self._harness4h3_sampling_step_policy = dict(sampling_step_policy or {})
         self._harness4h3_runtime_operations = [dict(item) for item in (runtime_operations or [])]
         if self._harness4h3_sparse_runtime_policy:
@@ -256,6 +283,10 @@ class FakeWanDiT:
         if self._harness4h3_attention_window_policy:
             for block in self.blocks:
                 block.attn1._harness4h3_attention_window_policy = dict(self._harness4h3_attention_window_policy)
+        if self._harness4h3_head_gating_policy:
+            for block in self.blocks:
+                block.attn1._harness4h3_head_gating_policy = dict(self._harness4h3_head_gating_policy)
+                block.attn1._harness4h3_head_gating_stats = {"calls": 0, "full_heads": 0, "selected_heads": 0}
         self.runtime_gate_stats = {
             str(block_id): {"executed": 0, "skipped": 0}
             for block_id in self.block_ids
@@ -270,6 +301,7 @@ class FakeWanDiT:
         return self.forward(value, timestep=timestep)
 
     def forward(self, value: Any, timestep: Any = None) -> Any:
+        torch, _ = _torch()
         batch_size = int(value.shape[0]) if getattr(value, "ndim", 0) >= 1 else 1
         current_timesteps = (0.5,) * batch_size if timestep is None else normalized_timesteps(timestep, batch_size)
         rules = {str(item["block_id"]): TimestepGateRule.from_mapping(item) for item in self.runtime_gate_rules}
@@ -278,13 +310,18 @@ class FakeWanDiT:
 
         def run_block(inputs: Any, block: Any, current_block_id: str) -> Any:
             if token_policy is not None and (not token_policy.block_ids or current_block_id in token_policy.block_ids) and inputs.ndim >= 3 and inputs.shape[1] > 1:
-                count = max(1, min(int(inputs.shape[1]), int(round(float(inputs.shape[1]) * token_policy.keep_ratio))))
-                scores = inputs.detach().float().pow(2).mean(dim=-1)
-                indices = scores.topk(count, dim=1).indices
-                selected = inputs.gather(1, indices.unsqueeze(-1).expand(-1, -1, inputs.shape[-1]))
+                indices = select_token_indices(
+                    inputs,
+                    token_policy.keep_ratio,
+                    torch,
+                    score=token_policy.score,
+                    grid_shape=token_policy.grid_shape,
+                )
+                count = int(indices.numel())
+                selected = inputs.index_select(1, indices)
                 updated = selected + block(selected)
                 result = inputs.clone()
-                result.scatter_(1, indices.unsqueeze(-1).expand_as(updated), updated)
+                result.index_copy_(1, indices, updated)
                 self.runtime_token_stats[str(current_block_id)]["selected"] += int(count * inputs.shape[0])
                 self.runtime_token_stats[str(current_block_id)]["skipped"] += int((inputs.shape[1] - count) * inputs.shape[0])
                 return result
@@ -439,6 +476,7 @@ class FakeWanDiTAdapter:
                 kv_token_selection_policy=config.get("kv_token_selection_policy", {}),
                 sparse_runtime_policy=config.get("sparse_runtime_policy", {}),
                 attention_window_policy=config.get("attention_window_policy", {}),
+                head_gating_policy=config.get("head_gating_policy", {}),
                 sampling_step_policy=config.get("sampling_step_policy", {}),
                 runtime_operations=config.get("runtime_operations", []),
             )
@@ -477,6 +515,7 @@ class FakeWanDiTAdapter:
                 "kv_token_selection_policy": dict(model._harness4h3_kv_token_selection_policy),
                 "sparse_runtime_policy": dict(model._harness4h3_sparse_runtime_policy),
                 "attention_window_policy": dict(model._harness4h3_attention_window_policy),
+                "head_gating_policy": dict(model._harness4h3_head_gating_policy),
                 "sampling_step_policy": dict(model._harness4h3_sampling_step_policy),
                 "runtime_operations": [dict(item) for item in model._harness4h3_runtime_operations],
             },
@@ -602,8 +641,6 @@ class FakeWanDiTAdapter:
         unknown = sorted(set(parsed.block_ids) - set(model.block_ids))
         if unknown:
             raise ValueError("invalid_token_selection: unknown block %s" % unknown[0])
-        if model._harness4h3_attention_window_policy:
-            raise ValueError("incompatible_runtime_attention_composition: kv_token_select and attention_window")
         model._harness4h3_kv_token_selection_policy = parsed.to_dict()
         for block in model.blocks:
             block.attn1._harness4h3_kv_token_selection_policy = parsed.to_dict()
@@ -612,8 +649,6 @@ class FakeWanDiTAdapter:
 
     def apply_sparse_runtime(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
         parsed = SparseRuntimePolicy.from_mapping(policy)
-        if model._harness4h3_attention_window_policy:
-            raise ValueError("incompatible_runtime_attention_composition: attention_window and sparse_runtime")
         for block in model.blocks:
             if parsed.attention in {"attn1", "self", "all"}:
                 block.attn1._harness4h3_sparse_policy = parsed.to_dict()
@@ -623,14 +658,41 @@ class FakeWanDiTAdapter:
 
     def apply_attention_window(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
         parsed = AttentionWindowPolicy.from_mapping(policy)
-        if model._harness4h3_sparse_runtime_policy:
-            raise ValueError("incompatible_runtime_attention_composition: sparse_runtime and attention_window")
         for block in model.blocks:
             if parsed.attention in {"attn1", "self"}:
                 block.attn1._harness4h3_attention_window_policy = parsed.to_dict()
         model._harness4h3_attention_window_policy = parsed.to_dict()
         model._harness4h3_runtime_operations.append({"operator": "attention_window", "args": parsed.to_dict()})
         return StructuralChange("runtime_attention_window", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
+
+    def apply_head_gating(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
+        parsed = HeadGatingPolicy.from_mapping(policy)
+        unknown = sorted(set(parsed.block_ids) - set(model.block_ids))
+        if unknown:
+            raise ValueError("head_gating_unknown_block: %s" % unknown[0])
+        for block_id, block in zip(model.block_ids, model.blocks):
+            if parsed.block_ids and block_id not in parsed.block_ids:
+                continue
+            attention = block.attn1
+            heads = int(attention.heads)
+            for item in parsed.head_indices:
+                if item < 0 or item >= heads:
+                    raise ValueError("head_gating_head_index_out_of_range")
+            attention._harness4h3_head_gating_policy = parsed.to_dict()
+            attention._harness4h3_head_gating_stats = {"calls": 0, "full_heads": 0, "selected_heads": 0}
+        model._harness4h3_head_gating_policy = parsed.to_dict()
+        model._harness4h3_head_gating_stats = {"calls": 0, "full_heads": 0, "selected_heads": 0}
+        model._harness4h3_runtime_operations.append({"operator": "head_gating", "args": parsed.to_dict()})
+        return StructuralChange(
+            "runtime_head_gating",
+            {
+                "runtime_operator": "head_gating",
+                "policy": parsed.to_dict(),
+                "dynamic_compute": True,
+                "parameter_reduction_ratio": 0.0,
+                "executed_head_selection": True,
+            },
+        )
 
     def apply_sampling_step_policy(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
         parsed = SamplingStepPolicy.from_mapping(policy)
@@ -674,6 +736,7 @@ class FakeWanDiTAdapter:
             "kv_token_selection_policy": dict(model._harness4h3_kv_token_selection_policy),
             "sparse_runtime_policy": dict(model._harness4h3_sparse_runtime_policy),
             "attention_window_policy": dict(model._harness4h3_attention_window_policy),
+            "head_gating_policy": dict(model._harness4h3_head_gating_policy),
             "sampling_step_policy": dict(model._harness4h3_sampling_step_policy),
             "runtime_operations": [dict(item) for item in model._harness4h3_runtime_operations],
         }
@@ -736,6 +799,7 @@ class FakeWanDiTAdapter:
         kv_policy = getattr(model, "_harness4h3_kv_token_selection_policy", {})
         sparse_policy = getattr(model, "_harness4h3_sparse_runtime_policy", {})
         window_policy = getattr(model, "_harness4h3_attention_window_policy", {})
+        head_policy = getattr(model, "_harness4h3_head_gating_policy", {})
         sampling_policy = getattr(model, "_harness4h3_sampling_step_policy", {})
         if token_policy:
             estimate *= float(token_policy.get("keep_ratio", 1.0))
@@ -747,6 +811,8 @@ class FakeWanDiTAdapter:
             estimate *= float(sparse_policy.get("keep_ratio", 1.0))
         if window_policy:
             estimate *= min(1.0, float(window_policy.get("window_size", 64)) / 64.0)
+        if head_policy:
+            estimate *= float(head_policy.get("keep_ratio", 1.0))
         if sampling_policy:
             estimate *= float(sampling_policy.get("target_steps", 16)) / 16.0
         return int(round(estimate))

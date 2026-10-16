@@ -113,3 +113,51 @@ def merge_token_sequence(
     merged.scatter_add_(1, source_groups.view(1, -1, 1).expand(hidden_states.shape[0], -1, hidden_states.shape[2]), hidden_states)
     counts = torch.bincount(source_groups, minlength=int(anchors.numel())).clamp_min(1).to(hidden_states.dtype).view(1, -1, 1)
     return merged / counts, source_groups, anchors, group_shape
+
+
+def select_token_indices(
+    hidden_states: Any,
+    keep_ratio: float,
+    torch: Any,
+    *,
+    score: str = "l2_norm",
+    grid_shape: Optional[Sequence[int]] = None,
+) -> Any:
+    """Select real token positions while preserving temporal coverage.
+
+    A flat top-k selector can erase an entire video frame.  When a patch grid
+    is supplied, reserve the highest-scoring token in each temporal slice and
+    fill the remaining budget by the global score.  Returned indices remain in
+    the original flattened `(t, y, x)` order, so residual scatter and RoPE
+    position lookup stay reversible.
+    """
+
+    length = int(hidden_states.shape[1])
+    target = max(1, min(length, int(round(length * float(keep_ratio)))))
+    values = hidden_states.detach().float()
+    scores = values.pow(2).mean(dim=(0, 2)) if score == "l2_norm" else values.abs().mean(dim=(0, 2))
+    grid = _validated_grid(grid_shape)
+    if grid is None:
+        return torch.topk(scores, target).indices.sort().values
+    if grid[0] * grid[1] * grid[2] != length:
+        raise ValueError("token grid_shape product must equal sequence length")
+    # Keep at least one anchor per frame.  This is an explicit temporal
+    # coverage constraint, so an aggressive ratio is rounded up rather than
+    # silently dropping a complete frame.
+    target = max(target, grid[0])
+    temporal = torch.arange(length, device=hidden_states.device) // (grid[1] * grid[2])
+    anchors = []
+    for frame in range(grid[0]):
+        frame_indices = torch.nonzero(temporal == frame, as_tuple=False).flatten()
+        anchors.append(frame_indices[torch.argmax(scores.index_select(0, frame_indices))])
+    anchor_indices = torch.stack(anchors).to(device=hidden_states.device, dtype=torch.long)
+    remaining_mask = torch.ones(length, device=hidden_states.device, dtype=torch.bool)
+    remaining_mask[anchor_indices] = False
+    remaining = torch.nonzero(remaining_mask, as_tuple=False).flatten()
+    extra_count = min(int(remaining.numel()), target - int(anchor_indices.numel()))
+    if extra_count > 0:
+        extra = remaining.index_select(0, torch.topk(scores.index_select(0, remaining), extra_count).indices)
+        selected = torch.cat((anchor_indices, extra))
+    else:
+        selected = anchor_indices
+    return selected.sort().values

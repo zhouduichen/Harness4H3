@@ -321,6 +321,8 @@ class ModelVariant:
                 adapter.apply_sparse_runtime(model, args)
             elif name == "attention_window":
                 adapter.apply_attention_window(model, args)
+            elif name == "head_gating":
+                adapter.apply_head_gating(model, args)
             elif name == "sampling_step_skip":
                 adapter.apply_sampling_step_policy(model, args)
             else:
@@ -351,7 +353,7 @@ class ModelVariant:
 
         ordered = tuple(operations(plan))
         structural_names = {"prune_blocks", "prune_layers", "prune_ffn_channels", "prune_ffn_by_weight_threshold", "prune_attention_heads", "prune_heads", "tica_prune"}
-        runtime_names = {"timestep_block_gate", "timestep_attention_policy", "prune_tokens", "token_merge", "kv_token_select", "sparse_runtime", "attention_window"}
+        runtime_names = {"timestep_block_gate", "timestep_attention_policy", "prune_tokens", "token_merge", "kv_token_select", "sparse_runtime", "attention_window", "head_gating"}
         sampler_names = {"sampling_step_skip"}
 
         def has_parameter_change(value: Any) -> bool:
@@ -461,6 +463,9 @@ class WanModelAdapter(Protocol):
         ...
 
     def apply_attention_window(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
+        ...
+
+    def apply_head_gating(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
         ...
 
     def apply_sampling_step_policy(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:

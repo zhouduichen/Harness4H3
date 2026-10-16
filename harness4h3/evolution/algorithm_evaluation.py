@@ -119,6 +119,7 @@ def _runtime_execution_evidence(model: Any, structure: Any = None) -> Mapping[st
         "kv_token_selection": ("_harness4h3_kv_token_selection_stats",),
         "sparse_runtime": ("_harness4h3_sparse_runtime_stats",),
         "attention_window": ("_harness4h3_attention_window_stats",),
+        "head_gating": ("_harness4h3_head_gating_stats",),
         "sampling": ("_harness4h3_sampling_step_stats",),
     }
     stats: dict[str, Any] = {}
@@ -140,6 +141,7 @@ def _runtime_execution_evidence(model: Any, structure: Any = None) -> Mapping[st
         "kv_token_selection": ("_harness4h3_kv_token_selection_stats",),
         "sparse_runtime": ("_harness4h3_sparse_stats",),
         "attention_window": ("_harness4h3_window_stats",),
+        "head_gating": ("_harness4h3_head_gating_stats",),
     }
     blocks = getattr(root, "blocks", None)
     if blocks is None:
@@ -168,6 +170,7 @@ def _runtime_execution_evidence(model: Any, structure: Any = None) -> Mapping[st
         "kv_token_selection": "_harness4h3_kv_token_selection_policy",
         "sparse_runtime": "_harness4h3_sparse_runtime_policy",
         "attention_window": "_harness4h3_attention_window_policy",
+        "head_gating": "_harness4h3_head_gating_policy",
         "sampling": "_harness4h3_sampling_step_policy",
         "timestep_attention": "_harness4h3_timestep_attention_policy",
     }.items():
@@ -188,6 +191,7 @@ def _runtime_execution_evidence(model: Any, structure: Any = None) -> Mapping[st
                 "kv_token_selection_policy",
                 "sparse_runtime_policy",
                 "attention_window_policy",
+                "head_gating_policy",
                 "sampling_step_policy",
             ):
                 value = metadata.get(name)
@@ -208,6 +212,12 @@ def _runtime_execution_evidence(model: Any, structure: Any = None) -> Mapping[st
         if full > 0:
             derived[name + "_selected_ratio"] = float(selected) / float(full)
             derived[name + "_reduction_ratio"] = 1.0 - float(selected) / float(full)
+    if "head_gating" in stats:
+        full = _sum_counter(stats["head_gating"], "full_heads")
+        selected = _sum_counter(stats["head_gating"], "selected_heads")
+        if full > 0:
+            derived["head_gating_selected_ratio"] = float(selected) / float(full)
+            derived["head_gating_reduction_ratio"] = 1.0 - float(selected) / float(full)
     if "token_sparsity" in stats:
         selected = _sum_counter(stats["token_sparsity"], "selected") + _sum_counter(stats["token_sparsity"], "selected_tokens")
         skipped = _sum_counter(stats["token_sparsity"], "skipped") + _sum_counter(stats["token_sparsity"], "skipped_tokens")

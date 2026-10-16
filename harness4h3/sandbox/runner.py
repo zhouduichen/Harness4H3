@@ -44,6 +44,7 @@ class CompressionPlan:
         "prune_attention_heads",
         "prune_heads",
         "prune_tokens",
+        "head_gating",
         "token_merge",
         "kv_token_select",
         "sparse_runtime",
@@ -60,6 +61,7 @@ class CompressionPlan:
         "prune_attention_heads",
         "prune_heads",
         "prune_tokens",
+        "head_gating",
         "token_merge",
         "kv_token_select",
         "sparse_runtime",
@@ -140,7 +142,20 @@ class CompressionPlan:
             if "attention_names" in args and (not isinstance(args["attention_names"], list) or not args["attention_names"] or not all(isinstance(item, str) for item in args["attention_names"])):
                 raise ValueError("algorithm_output_invalid: attention_names must contain strings")
         if operator in {"prune_tokens", "sparse_runtime"}:
-            if set(args) not in ({"keep_ratio"}, {"keep_ratio", "block_ids"}, {"keep_ratio", "attention"}):
+            if operator == "prune_tokens":
+                allowed_token_args = {
+                    frozenset({"keep_ratio"}),
+                    frozenset({"keep_ratio", "block_ids"}),
+                    frozenset({"keep_ratio", "score"}),
+                    frozenset({"keep_ratio", "grid_shape"}),
+                    frozenset({"keep_ratio", "block_ids", "score"}),
+                    frozenset({"keep_ratio", "block_ids", "grid_shape"}),
+                    frozenset({"keep_ratio", "score", "grid_shape"}),
+                    frozenset({"keep_ratio", "block_ids", "score", "grid_shape"}),
+                }
+                if frozenset(args) not in allowed_token_args:
+                    raise ValueError("algorithm_output_invalid: prune_tokens has unsupported arguments")
+            elif set(args) not in ({"keep_ratio"}, {"keep_ratio", "block_ids"}, {"keep_ratio", "attention"}):
                 raise ValueError("algorithm_output_invalid: %s has unsupported arguments" % operator)
             if not isinstance(args["keep_ratio"], (int, float)) or isinstance(args["keep_ratio"], bool) or not 0.0 < float(args["keep_ratio"]) <= 1.0:
                 raise ValueError("algorithm_output_invalid: keep_ratio must be in (0, 1]")
@@ -148,6 +163,74 @@ class CompressionPlan:
                 raise ValueError("algorithm_output_invalid: block_ids must contain strings")
             if "attention" in args and not isinstance(args["attention"], str):
                 raise ValueError("algorithm_output_invalid: attention must be a string")
+            if "score" in args and args["score"] not in {"l2_norm", "mean_abs"}:
+                raise ValueError("algorithm_output_invalid: unsupported token score")
+            if "grid_shape" in args and (
+                not isinstance(args["grid_shape"], list)
+                or len(args["grid_shape"]) != 3
+                or not all(isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in args["grid_shape"])
+            ):
+                raise ValueError("algorithm_output_invalid: token grid_shape must contain three positive integers")
+        if operator == "head_gating":
+            allowed = {
+                "attention",
+                "block_ids",
+                "keep_ratio",
+                "head_indices",
+                "score",
+                "rules",
+            }
+            if not set(args) <= allowed or "attention" not in args:
+                raise ValueError("algorithm_output_invalid: head_gating requires attention and supported arguments")
+            if not ({"keep_ratio", "head_indices", "rules"} & set(args)):
+                raise ValueError("algorithm_output_invalid: head_gating requires a head selection")
+            if not isinstance(args["attention"], str) or args["attention"] not in {"attn1", "self"}:
+                raise ValueError("algorithm_output_invalid: head_gating supports self-attention only")
+            if "block_ids" in args and (
+                not isinstance(args["block_ids"], list)
+                or not all(isinstance(item, str) and item for item in args["block_ids"])
+            ):
+                raise ValueError("algorithm_output_invalid: head_gating block_ids must contain strings")
+            if "keep_ratio" in args and (
+                not isinstance(args["keep_ratio"], (int, float))
+                or isinstance(args["keep_ratio"], bool)
+                or not 0.0 < float(args["keep_ratio"]) <= 1.0
+            ):
+                raise ValueError("algorithm_output_invalid: head_gating keep_ratio must be in (0, 1]")
+            if "head_indices" in args and (
+                not isinstance(args["head_indices"], list)
+                or not args["head_indices"]
+                or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in args["head_indices"])
+            ):
+                raise ValueError("algorithm_output_invalid: head_gating head_indices must contain non-negative integers")
+            if "score" in args and args["score"] not in {"weight_l2", "activation_l2", "activation_abs", "mean_abs", "l2_norm"}:
+                raise ValueError("algorithm_output_invalid: unsupported head gating score")
+            if "rules" in args:
+                if not isinstance(args["rules"], list) or not all(isinstance(item, Mapping) for item in args["rules"]):
+                    raise ValueError("algorithm_output_invalid: head_gating rules must contain objects")
+                for rule in args["rules"]:
+                    required_rule = {"min_timestep", "max_timestep"}
+                    allowed_rule = required_rule | {"keep_ratio", "head_indices", "score"}
+                    if not required_rule <= set(rule) or not set(rule) <= allowed_rule:
+                        raise ValueError("algorithm_output_invalid: invalid head gating rule")
+                    if not all(isinstance(rule[name], (int, float)) and not isinstance(rule[name], bool) for name in required_rule):
+                        raise ValueError("algorithm_output_invalid: head gating timestep bounds must be numeric")
+                    if not 0.0 <= float(rule["min_timestep"]) <= float(rule["max_timestep"]) <= 1.0:
+                        raise ValueError("algorithm_output_invalid: head gating timestep bounds invalid")
+                    if "keep_ratio" in rule and (
+                        not isinstance(rule["keep_ratio"], (int, float))
+                        or isinstance(rule["keep_ratio"], bool)
+                        or not 0.0 < float(rule["keep_ratio"]) <= 1.0
+                    ):
+                        raise ValueError("algorithm_output_invalid: head gating rule keep_ratio invalid")
+                    if "head_indices" in rule and (
+                        not isinstance(rule["head_indices"], list)
+                        or not rule["head_indices"]
+                        or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in rule["head_indices"])
+                    ):
+                        raise ValueError("algorithm_output_invalid: head gating rule head_indices invalid")
+                    if "score" in rule and rule["score"] not in {"weight_l2", "activation_l2", "activation_abs", "mean_abs", "l2_norm"}:
+                        raise ValueError("algorithm_output_invalid: head gating rule score invalid")
         if operator == "token_merge":
             allowed = (
                 {"keep_ratio"},

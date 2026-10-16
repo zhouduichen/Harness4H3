@@ -20,6 +20,7 @@ class TokenSparsityPolicy:
     keep_ratio: float
     block_ids: tuple[str, ...] = ()
     score: str = "l2_norm"
+    grid_shape: tuple[int, int, int] = ()
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "TokenSparsityPolicy":
@@ -29,10 +30,17 @@ class TokenSparsityPolicy:
         score = str(raw.get("score", "l2_norm"))
         if score not in {"l2_norm", "mean_abs"}:
             raise ValueError("unsupported token sparsity score")
-        return cls(_ratio(raw.get("keep_ratio"), "token_sparsity.keep_ratio"), tuple(block_ids), score)
+        grid_shape = raw.get("grid_shape", ())
+        if grid_shape in (None, []):
+            grid_shape = ()
+        if not isinstance(grid_shape, (list, tuple)) or len(grid_shape) not in {0, 3} or any(
+            isinstance(item, bool) or not isinstance(item, int) or int(item) <= 0 for item in grid_shape
+        ):
+            raise ValueError("token_sparsity.grid_shape must be three positive integers")
+        return cls(_ratio(raw.get("keep_ratio"), "token_sparsity.keep_ratio"), tuple(block_ids), score, tuple(int(item) for item in grid_shape))
 
     def to_dict(self) -> dict[str, Any]:
-        return {**asdict(self), "block_ids": list(self.block_ids)}
+        return {**asdict(self), "block_ids": list(self.block_ids), "grid_shape": list(self.grid_shape)}
 
 
 @dataclass(frozen=True)
@@ -105,6 +113,115 @@ class SparseRuntimePolicy:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class HeadGatingRule:
+    """One timestep-conditioned retained-head rule.
+
+    ``head_indices`` are retained indices, rather than removed indices.  This
+    makes the runtime executor explicit about the work it is allowed to
+    perform and avoids the common ``compute-all-then-zero`` fake gate.
+    """
+
+    min_timestep: float
+    max_timestep: float
+    keep_ratio: float | None = None
+    head_indices: tuple[int, ...] = ()
+    score: str = "weight_l2"
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "HeadGatingRule":
+        if not isinstance(raw, Mapping):
+            raise ValueError("head_gating_rule_schema_invalid")
+        required = {"min_timestep", "max_timestep"}
+        if not required <= set(raw):
+            raise ValueError("head_gating_rule_schema_invalid")
+        try:
+            minimum = float(raw["min_timestep"])
+            maximum = float(raw["max_timestep"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("head_gating_bounds_invalid") from exc
+        if not 0.0 <= minimum <= maximum <= 1.0:
+            raise ValueError("head_gating_bounds_invalid")
+        raw_indices = raw.get("head_indices", [])
+        if not isinstance(raw_indices, (list, tuple)) or any(
+            isinstance(item, bool) or not isinstance(item, int) or int(item) < 0 for item in raw_indices
+        ):
+            raise ValueError("head_gating_head_indices_invalid")
+        indices = tuple(dict.fromkeys(int(item) for item in raw_indices))
+        ratio = raw.get("keep_ratio")
+        parsed_ratio = None if ratio is None else _ratio(ratio, "head_gating.keep_ratio")
+        if not indices and parsed_ratio is None:
+            raise ValueError("head_gating_requires_indices_or_ratio")
+        score = str(raw.get("score", "weight_l2"))
+        if score not in {"weight_l2", "activation_l2", "activation_abs", "mean_abs", "l2_norm"}:
+            raise ValueError("unsupported head gating score")
+        return cls(minimum, maximum, parsed_ratio, indices, score)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "min_timestep": float(self.min_timestep),
+            "max_timestep": float(self.max_timestep),
+            "keep_ratio": None if self.keep_ratio is None else float(self.keep_ratio),
+            "head_indices": list(self.head_indices),
+            "score": str(self.score),
+        }
+
+
+@dataclass(frozen=True)
+class HeadGatingPolicy:
+    """Dynamic head selection policy for real self-attention execution."""
+
+    attention: str = "attn1"
+    block_ids: tuple[str, ...] = ()
+    keep_ratio: float | None = None
+    head_indices: tuple[int, ...] = ()
+    score: str = "weight_l2"
+    rules: tuple[HeadGatingRule, ...] = ()
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "HeadGatingPolicy":
+        if not isinstance(raw, Mapping):
+            raise ValueError("head_gating_policy_schema_invalid")
+        attention = str(raw.get("attention", "attn1"))
+        if attention not in {"attn1", "self"}:
+            raise ValueError("head_gating supports self-attention only")
+        block_ids = raw.get("block_ids", [])
+        if not isinstance(block_ids, (list, tuple)) or not all(isinstance(item, str) and item for item in block_ids):
+            raise ValueError("head_gating.block_ids must be a list of strings")
+        raw_indices = raw.get("head_indices", [])
+        if not isinstance(raw_indices, (list, tuple)) or any(
+            isinstance(item, bool) or not isinstance(item, int) or int(item) < 0 for item in raw_indices
+        ):
+            raise ValueError("head_gating.head_indices must be a list of non-negative integers")
+        indices = tuple(dict.fromkeys(int(item) for item in raw_indices))
+        ratio = raw.get("keep_ratio")
+        parsed_ratio = None if ratio is None else _ratio(ratio, "head_gating.keep_ratio")
+        raw_rules = raw.get("rules", [])
+        if not isinstance(raw_rules, (list, tuple)):
+            raise ValueError("head_gating.rules must be a list")
+        rules = tuple(HeadGatingRule.from_mapping(item) for item in raw_rules)
+        if not indices and parsed_ratio is None and not rules:
+            raise ValueError("head_gating_requires_indices_ratio_or_rules")
+        score = str(raw.get("score", "weight_l2"))
+        if score not in {"weight_l2", "activation_l2", "activation_abs", "mean_abs", "l2_norm"}:
+            raise ValueError("unsupported head gating score")
+        for left_index, left in enumerate(rules):
+            for right in rules[left_index + 1 :]:
+                if max(left.min_timestep, right.min_timestep) <= min(left.max_timestep, right.max_timestep):
+                    raise ValueError("head_gating_overlapping_rules")
+        return cls(attention, tuple(dict.fromkeys(str(item) for item in block_ids)), parsed_ratio, indices, score, rules)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attention": str(self.attention),
+            "block_ids": list(self.block_ids),
+            "keep_ratio": None if self.keep_ratio is None else float(self.keep_ratio),
+            "head_indices": list(self.head_indices),
+            "score": str(self.score),
+            "rules": [rule.to_dict() for rule in self.rules],
+        }
 
 
 @dataclass(frozen=True)

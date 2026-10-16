@@ -25,6 +25,7 @@ def _parent(tmp_path):
         ("prune_layers", {"block_ids": ["block.0"]}),
         ("prune_attention_heads", {"head_indices": [0]}),
         ("prune_heads", {"head_indices": [0]}),
+        ("head_gating", {"attention": "attn1", "keep_ratio": 0.5, "score": "weight_l2"}),
         ("prune_tokens", {"keep_ratio": 0.5}),
         ("token_merge", {"keep_ratio": 0.5, "mode": "adjacent"}),
         ("kv_token_select", {"keep_ratio": 0.5, "score": "l2_norm"}),
@@ -248,6 +249,48 @@ def test_head_pruning_and_sparse_runtime_compose_after_reload(tmp_path):
     assert child.blocks[0].attn1._harness4h3_sparse_stats["selected_tokens"] < 8
 
 
+def test_head_gating_reduces_executed_qkv_heads_and_reloads(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "head_gating",
+        adapter,
+        parent,
+        {"attention": "attn1", "keep_ratio": 0.5, "score": "weight_l2"},
+        tmp_path / "head-gating",
+    )
+    assert result.status == "success", result.message
+    child = adapter.reload_model(result.child_checkpoint)
+    with torch.no_grad():
+        output = child.blocks[0].attn1(torch.randn(2, 8, 8))
+    assert tuple(output.shape) == (2, 8, 8)
+    stats = child.blocks[0].attn1._harness4h3_head_gating_stats
+    assert stats["selected_heads"] < stats["full_heads"]
+    assert child._harness4h3_head_gating_policy["keep_ratio"] == 0.5
+
+
+def test_head_gating_composes_with_sparse_runtime(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "compose",
+        adapter,
+        parent,
+        {
+            "steps": [
+                {"operator": "head_gating", "args": {"attention": "attn1", "keep_ratio": 0.5}},
+                {"operator": "sparse_runtime", "args": {"keep_ratio": 0.5, "attention": "attn1"}},
+            ]
+        },
+        tmp_path / "head-gating-sparse",
+    )
+    assert result.status == "success", result.message
+    child = adapter.reload_model(result.child_checkpoint)
+    with torch.no_grad():
+        output = child.blocks[0].attn1(torch.randn(1, 8, 8))
+    assert tuple(output.shape) == (1, 8, 8)
+    assert child.blocks[0].attn1._harness4h3_sparse_stats["selected_tokens"] < 8
+    assert child.blocks[0].attn1._harness4h3_head_gating_stats["selected_heads"] < child.blocks[0].attn1._harness4h3_head_gating_stats["full_heads"]
+
+
 def test_layer_pruning_and_sampling_schedule_compose_in_order(tmp_path):
     adapter, parent = _parent(tmp_path)
     result = build_wan_compression_registry(include_multigranular=True).execute(
@@ -269,7 +312,7 @@ def test_layer_pruning_and_sampling_schedule_compose_in_order(tmp_path):
     assert [item["operator"] for item in child._harness4h3_runtime_operations] == ["sampling_step_skip"]
 
 
-def test_attention_window_rejects_cross_attention_and_sparse_composition(tmp_path):
+def test_attention_window_rejects_cross_attention_and_composes_sparse_and_kv(tmp_path):
     adapter, parent = _parent(tmp_path)
     model = adapter.load_model("fake://baseline")
     with pytest.raises(ValueError, match="self-attention only"):
@@ -285,10 +328,23 @@ def test_attention_window_rejects_cross_attention_and_sparse_composition(tmp_pat
                 {"operator": "attention_window", "args": {"window_size": 2, "attention": "attn1"}},
             ]
         },
-        tmp_path / "incompatible",
+        tmp_path / "combined",
     )
-    assert result.status == "failed"
-    assert "incompatible_runtime_attention_composition" in result.message
+    assert result.status == "success", result.message
+    child = adapter.reload_model(result.child_checkpoint)
+    sample = torch.randn(1, 8, 8)
+    with torch.no_grad():
+        output = child(sample)
+    assert tuple(output.shape) == tuple(sample.shape)
+    assert child.blocks[0].attn1._harness4h3_window_stats["selected_kv_tokens"] < 8 * 8
+
+    kv_window = adapter.load_model("fake://baseline")
+    adapter.apply_attention_window(kv_window, {"window_size": 2, "attention": "attn1"})
+    adapter.apply_kv_token_selection(kv_window, {"keep_ratio": 0.5, "score": "l2_norm"})
+    with torch.no_grad():
+        kv_output = kv_window(torch.randn(1, 8, 8))
+    assert tuple(kv_output.shape) == (1, 8, 8)
+    assert kv_window._harness4h3_kv_token_selection_policy["keep_ratio"] == 0.5
 
 
 def test_runtime_operation_order_survives_fake_checkpoint_reload(tmp_path):
@@ -308,6 +364,14 @@ def test_runtime_operation_order_survives_fake_checkpoint_reload(tmp_path):
     assert reloaded._harness4h3_sampling_step_policy["target_steps"] == 8
     assert reloaded._harness4h3_sparse_runtime_policy["keep_ratio"] == 0.5
     assert reloaded._harness4h3_token_sparsity_policy["block_ids"] == ["block.1"]
+
+    grid_tokens = adapter.load_model("fake://baseline")
+    adapter.apply_token_sparsity(grid_tokens, {"keep_ratio": 0.25, "grid_shape": [2, 2, 2]})
+    with torch.no_grad():
+        grid_token_output = grid_tokens(torch.randn(2, 8, 8), timestep=torch.tensor([100, 900]))
+    assert tuple(grid_token_output.shape) == (2, 8, 8)
+    assert all(item["selected"] >= 2 for item in grid_tokens.runtime_token_stats.values())
+    assert sum(item["skipped"] for item in grid_tokens.runtime_token_stats.values()) > 0
 
 
 def test_diffusers_runtime_replay_reads_raw_transformer_config(tmp_path):
@@ -376,12 +440,32 @@ def test_diffusers_wan_attention_contract_is_structurally_executable():
     output = model(torch.randn(1, 5, 8), torch.tensor([500]), torch.randn(1, 4, 8))
     assert tuple(output.shape) == (1, 5, 8)
 
+    runtime_hybrid = TinyWan()
+    adapter.apply_head_gating(runtime_hybrid, {"attention": "attn1", "keep_ratio": 0.5})
+    adapter.apply_sparse_runtime(runtime_hybrid, {"keep_ratio": 0.5, "attention": "attn1"})
+    adapter.apply_attention_window(runtime_hybrid, {"window_size": 2, "attention": "attn1"})
+    with torch.no_grad():
+        runtime_output = runtime_hybrid(torch.randn(2, 5, 8), torch.tensor([100, 900]), torch.randn(2, 4, 8))
+    assert tuple(runtime_output.shape) == (2, 5, 8)
+    assert runtime_hybrid._harness4h3_head_gating_stats["selected_heads"] < runtime_hybrid._harness4h3_head_gating_stats["full_heads"]
+    assert runtime_hybrid._harness4h3_sparse_runtime_stats["selected_tokens"] < runtime_hybrid._harness4h3_sparse_runtime_stats["full_tokens"]
+
     merge_model = TinyWan()
     adapter.apply_token_merge(merge_model, {"keep_ratio": 0.5, "mode": "adjacent"})
     with torch.no_grad():
         merge_output = merge_model.blocks[0].attn1(torch.randn(1, 5, 8), None, None, rotary)
     assert tuple(merge_output.shape) == (1, 5, 8)
     assert merge_model._harness4h3_token_merge_stats["merged_tokens"] == 2
+
+    hybrid_model = TinyWan()
+    adapter.apply_token_merge(hybrid_model, {"keep_ratio": 0.5, "mode": "spatiotemporal", "grid_shape": [1, 2, 4]})
+    adapter.apply_sparse_runtime(hybrid_model, {"keep_ratio": 0.5, "attention": "attn1"})
+    hybrid_rotary = (torch.ones(1, 8, 1, 2), torch.zeros(1, 8, 1, 2))
+    with torch.no_grad():
+        hybrid_output = hybrid_model.blocks[0].attn1(torch.randn(1, 8, 8), None, None, hybrid_rotary)
+    assert tuple(hybrid_output.shape) == (1, 8, 8)
+    assert hybrid_model._harness4h3_token_merge_stats["merged_tokens"] == 4
+    assert hybrid_model._harness4h3_sparse_runtime_stats["selected_tokens"] < hybrid_model._harness4h3_sparse_runtime_stats["full_tokens"]
 
     grid_model = TinyWan()
     adapter.apply_token_merge(grid_model, {"keep_ratio": 0.5, "mode": "spatiotemporal", "grid_shape": [2, 2, 2]})

@@ -2324,9 +2324,12 @@ class EvolutionLoop:
                     runtime_ratio *= float(args.get("keep_ratio", 1.0)) ** 2
                 elif operator == "attention_window":
                     runtime_ratio *= min(1.0, float(args.get("window_size", 64)) / 64.0)
+                elif operator == "head_gating":
+                    runtime_ratio *= float(args.get("keep_ratio", 1.0))
                 elif operator == "sampling_step_skip":
                     runtime_ratio *= min(1.0, float(args.get("target_steps", 16)) / 16.0)
-        ratio = max(0.01, min(1.0, ratio * runtime_ratio))
+        static_ratio = max(0.01, min(1.0, ratio))
+        ratio = max(0.01, min(1.0, static_ratio * runtime_ratio))
         baseline_quality = 0.99
         quality = max(0.0, baseline_quality - (1.0 - ratio) * 0.01)
         baseline_hardware = {"latency_s": 1.0, "peak_memory_gb": 1.0, "model_size_gb": 1.0}
@@ -2337,8 +2340,12 @@ class EvolutionLoop:
             "baseline_hardware_metrics": baseline_hardware,
             "latency_s": 1.0 * ratio,
             "peak_memory_gb": 1.0 * ratio,
-            "model_size_gb": max(0.01, 1.0 * ratio),
-            "hardware_metrics": {"latency_s": 1.0 * ratio, "peak_memory_gb": 1.0 * ratio, "model_size_gb": max(0.01, 1.0 * ratio)},
+            # Runtime-only policies reduce executed work but do not remove
+            # checkpoint bytes.  Keep the model-size proxy tied to the
+            # structural ratio so a head/token gate cannot claim parameter
+            # or storage reduction.
+            "model_size_gb": max(0.01, 1.0 * static_ratio),
+            "hardware_metrics": {"latency_s": 1.0 * ratio, "peak_memory_gb": 1.0 * ratio, "model_size_gb": max(0.01, 1.0 * static_ratio)},
             "parameter_reduction_ratio": max(0.0, 1.0 - parameter_ratio),
             "estimated_compute_ratio": ratio,
             "valid": True,

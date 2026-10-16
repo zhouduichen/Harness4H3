@@ -6,7 +6,7 @@ from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, ChannelPruningConfig, CompressionResult, WanModelAdapter
 from .runtime_gating import validate_timestep_attention_plan, validate_timestep_gate_plan
-from .runtime_policy import AttentionWindowPolicy, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy
+from .runtime_policy import AttentionWindowPolicy, HeadGatingPolicy, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy
 
 
 class CompressionOperator(Protocol):
@@ -103,6 +103,24 @@ class HeadPruningOperator(AttentionHeadPruningOperator):
     """Short alias kept for Agent-authored head-level plans."""
 
     name = "prune_heads"
+
+
+class HeadGatingOperator:
+    """Dynamic self-attention head selection with actual reduced projections."""
+
+    name = "head_gating"
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        return _execute_runtime_policy(
+            adapter,
+            parent,
+            plan,
+            output_dir,
+            policy_name="head_gating",
+            parser=HeadGatingPolicy.from_mapping,
+            adapter_method="apply_head_gating",
+            failure_type="head_gating_failed",
+        )
 
 
 def _execute_runtime_policy(
@@ -351,6 +369,7 @@ class CompositeCompressionOperator:
         "prune_ffn_channels": FFNChannelPruningOperator,
         "prune_attention_heads": AttentionHeadPruningOperator,
         "prune_heads": HeadPruningOperator,
+        "head_gating": HeadGatingOperator,
         "prune_tokens": TokenPruningOperator,
         "token_merge": TokenMergeOperator,
         "kv_token_select": KVTokenSelectionOperator,
@@ -496,6 +515,7 @@ def build_wan_compression_registry(*, include_tica: bool = False, include_multig
                 LayerPruningOperator(),
                 AttentionHeadPruningOperator(),
                 HeadPruningOperator(),
+                HeadGatingOperator(),
                 TokenPruningOperator(),
                 TokenMergeOperator(),
                 KVTokenSelectionOperator(),
