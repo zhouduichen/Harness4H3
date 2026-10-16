@@ -11,6 +11,7 @@
 - `ModelVariant`：通过 sidecar manifest 区分结构 checkpoint、runtime policy、sampler policy、算法版本和 SearchSpace 版本；runtime-only 变体不填写 structural checkpoint，参数减少固定为 0。
 - Algorithm Discovery：Sandbox 中执行 Agent 的 `search()`，轨迹记录候选集合、排序和选中计划；搜索源码纳入逻辑摘要，递归子代保留父子源码差异。
 - Search-Space Evolution：提案经过 Sandbox、真实 adapter 执行、保存/重载、finite 检查后注册；下一代 Program 读取新版本并能生成新算子计划。执行器通过受限的 `implementation_ref` loader 恢复，不要求为每个新类修改管理器分支。
+- 新增的 timestep attention 扩展在激活后的 SearchSpace smoke 中进入 `max_candidates=8` 的实测预算，候选结果 `valid=true`；候选未被 Pareto 选择不等于未执行，搜索轨迹保留了该评测结果。
 - 对照实验：新增 `RSI Fixed Space` 与 `Frozen Expanded Space`；后者固定版本 `S0001`，但下一代实际读取并生成扩展算子候选，用于区分“算子更多”和“空间动态演化”的收益。
 - Provider Agent：初始算法生成请求现在携带当前 SearchSpace 的 operator/schema/约束摘要，提示词不再把候选限制为 Block/FFN；因此真实 Provider 路径也能提出 Head、KV、Sparse、Window、Timestep 和 Sampling 计划。
 - Sensitivity：Head profiling 在有 Attention-shaped 序列样本时逐个复制 Attention、执行真实 Head surgery 并测量输出 leave-one-out 差异；真实 Wan 的 5-D latent 会先通过一次模型 forward 捕获每个 Attention 的真实参数，再只复制 Attention 做 probe，避免复制 1.3B 模型。FFN channel 支持 `channel_method: output_perturbation`，通过实际 `up_proj` hook 和完整模型输出差异评分。没有可用样本或 hook 时仍明确返回 unavailable/weight proxy，不填零分。
@@ -29,7 +30,7 @@
 ```text
 focused algorithm/runtime tests: 38 passed
 focused profiler/config/runtime selection: 54 passed
-full regression: 1040 passed, 4 skipped
+full regression: 1041 passed, 4 skipped
 ```
 
 4 个 skip 分别是未设置真实 Wan checkpoint、CUDA 不可用或 CUDA RNG parity 条件，不是实现失败。
