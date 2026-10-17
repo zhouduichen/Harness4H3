@@ -14,7 +14,7 @@ Make Block-only Algorithm Program evolution adapt to measured candidate outcomes
 
 ## Design
 
-1. Build a compact, recent `algorithm_search_feedback` history item from each saved measured-search trace. Include the immutable parent checkpoint hash, quality floor, and each Block plan's digest, validity, measured quality, floor feasibility, efficiency proxy, and failure/recovery information.
+1. Build a bounded, recent `algorithm_search_feedback` history from measured-search traces for the same immutable parent. Give the Agent up to four recent rounds, all tested Block sets, and the four most informative measured outcomes per round, including quality floor/basis, probe-vs-video coverage, feasibility, and efficiency. Keep complete traces on disk for parent scoring and exact deduplication.
 2. Supply that evidence to the existing Agent improvement and search entrypoints. Keep the Agent responsible for proposing Block subsets and restore/replace actions. The prompt must explicitly require using measured outcomes and avoiding plans already tested against the same parent.
 3. Select the algorithm parent using measured search evidence when no algorithm has a validated result. Prefer a quality-feasible candidate, then quality, measured score, efficiency, and the more recent algorithm on ties. This ranks algorithm search behavior only; it does not promote an under-floor model.
 4. Seed each round's local duplicate set with plan digests measured against the same parent checkpoint. Report skipped plans as previously measured; do not spend full-evaluation budget on them. Measurements against a different parent remain eligible.
@@ -27,6 +27,7 @@ Make Block-only Algorithm Program evolution adapt to measured candidate outcomes
 - Do not train or fine-tune weights. Recovery remains plan revision from the same immutable parent checkpoint.
 - Preserve AlgorithmStore identity and duplicate checks. Retry duplicate generation instead of bypassing them.
 - All model/GPU/video experiments remain remote. Local work is limited to code and tests.
+- Start each new run in an isolated output root seeded only with prior algorithm candidate records and measured trace/decision artifacts. Do not copy model checkpoints, model-store state, or generated videos; initialize a clean M0000 baseline from the existing remote checkpoint.
 
 ## Verification
 

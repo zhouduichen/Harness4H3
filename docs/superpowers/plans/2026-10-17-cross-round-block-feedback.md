@@ -10,8 +10,8 @@
 
 **Files:** `harness4h3/evolution/loop.py`, `harness4h3/evolution/agent.py`; unit tests in `tests/unit/test_algorithm_evolution.py`.
 
-- [ ] Add a bounded history reader that extracts recent Block candidate plans, digests, quality/floor results, efficiency proxy, validity, recovery action, and parent checkpoint identity from saved traces.
-- [ ] Include this evidence ahead of selection-only history in the Agent context; compact it without dropping the candidate result fields.
+- [ ] Add a bounded history reader that extracts recent same-parent Block candidate plans, digests, quality/floor results, efficiency proxy, validity, recovery action, and parent checkpoint identity from saved traces.
+- [ ] Include all tested Block sets and the four most informative results from up to four recent rounds ahead of selection-only history; preserve complete traces for internal scoring/deduplication.
 - [ ] Update the standard improvement/search instruction to use the evidence, never claim an under-floor result is feasible, and avoid previously measured same-parent plans.
 - [ ] Test trace extraction, context compaction, and prompt payload with representative measured candidates.
 
@@ -37,8 +37,9 @@
 
 - [ ] Run syntax/diff checks locally; sync only source/tests/config to an isolated remote directory, never model weights.
 - [ ] Run focused unit and integration tests remotely.
-- [ ] Run a short real-Wan remote smoke in a fresh output directory and verify the structured feedback, same-parent dedupe, quality floor, and terminal trace.
-- [ ] If smoke passes, launch a fresh full ten-round remote RSI in a new output directory. Do not continuously poll; capture PID/log/start status and expected duration, then report completion status based on the saved run summary.
+- [ ] Seed isolated smoke/full output roots with only prior algorithm candidates and R0001-R0010 decision/trace evidence; keep the model baseline clean and do not copy checkpoints/videos.
+- [ ] Run a short real-Wan remote smoke in its seeded output directory and verify the structured feedback, same-parent dedupe, quality floor, and terminal trace.
+- [ ] If smoke passes, launch ten new RSI rounds in a separate seeded output directory (R0011-R0020 IDs are acceptable). Do not continuously poll; capture PID/log/start status and expected duration, then report completion status based on the saved run summary.
 
 ## Non-goals
 
