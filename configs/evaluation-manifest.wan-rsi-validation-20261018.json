@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "split": "validation",
+  "cases": [
+    {
+      "case_id": "validation_airplane",
+      "caption": "A red paper airplane glides slowly through a sunlit blue sky, smooth natural motion, cinematic.",
+      "seeds": [20261008, 20261009]
+    },
+    {
+      "case_id": "validation_cat",
+      "caption": "A small orange cat walks across a quiet garden path with leaves moving in a gentle breeze, realistic.",
+      "seeds": [20261008, 20261009]
+    },
+    {
+      "case_id": "validation_train",
+      "caption": "A yellow train travels through green mountains under changing clouds, wide establishing shot, realistic.",
+      "seeds": [20261008, 20261009]
+    }
+  ]
+}
