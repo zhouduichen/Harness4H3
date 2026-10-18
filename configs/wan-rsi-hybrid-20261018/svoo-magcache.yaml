@@ -1,0 +1,39 @@
+backend: diffusers
+checkpoint: ../../models/wan21-t2v-1.3b
+output_root: ../../experiments/wan-rsi-hybrid-20261018/svoo-magcache
+device: cuda:3
+dtype: bfloat16
+local_files_only: true
+seed: 7
+evaluator:
+  backend: wan_video
+  wan_config: wan-student-832x480-16.yaml
+  evaluation_manifest: evaluation-manifest.json
+  clip_model_path: ../../models/clip-vit-large-patch14-336
+  device: cuda:3
+  pipeline_device: cuda:3
+  quality_device: cuda:3
+  dtype: bfloat16
+  local_files_only: true
+  max_cases: 3
+  seed_count: 2
+  sample_frames: 4
+  latency_warmup: 1
+  latency_repeats: 3
+  evaluation_split: validation
+  source_revision: 1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580
+  max_quality_drop: 0.05
+  execution_profile: ../../experiments/wan-rsi-hybrid-20261018/profile.json
+  runtime_attention:
+    method: svoo
+    model_key: wan21-t2v-1.3b
+    config: {}
+  runtime_cache:
+    method: magcache
+    config:
+      threshold: 0.12
+      max_skip_steps: 4
+      retention_ratio: 0.2
+      num_inference_steps: 16
+      mag_ratios: [1.0, 1.0043765903, 0.9673218131, 0.9690133333, 0.9731017649, 0.9714230895, 0.9706552029, 0.9636064172, 0.9583126307, 0.9527728260, 0.9466742873, 0.9315682659, 0.9141220748, 0.8960618079, 0.8554908037, 0.7984179854]
+      calibrate: false

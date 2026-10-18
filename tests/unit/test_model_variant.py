@@ -121,3 +121,26 @@ def test_head_sparse_hybrid_executes_in_declared_order(tmp_path):
     ]
     child = adapter.reload_model(result.child_checkpoint)
     assert child.blocks[0].attn1.heads == 3
+
+
+def test_svoo_magcache_variant_is_runtime_only_and_restorable(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    plan = {
+        "operator": "compose",
+        "args": {
+            "steps": [
+                {"operator": "svoo_attention", "args": {"method": "svoo", "model_key": "wan21-t2v-1.3b", "config": {}}},
+                {"operator": "magcache", "args": {"method": "magcache", "config": {"threshold": 0.12}}},
+            ]
+        },
+    }
+    result = build_wan_compression_registry(include_multigranular=True).execute(
+        "compose", adapter, parent, plan["args"], tmp_path / "external-runtime"
+    )
+    assert result.status == "success", result.message
+    variant = ModelVariant.from_compression("M0004", parent, result, plan)
+    assert variant.runtime_only is True
+    assert variant.structural_checkpoint is None
+    assert variant.runtime_policy == {"svoo_attention": plan["args"]["steps"][0]["args"], "magcache": plan["args"]["steps"][1]["args"]}
+    restored = variant.restore(adapter)
+    assert [item["operator"] for item in restored._harness4h3_external_runtime_policies] == ["svoo_attention", "magcache"]

@@ -37,6 +37,51 @@ def test_unavailable_peak_memory_is_none():
     assert evaluator._peak_memory_gb(Torch) is None
 
 
+def test_candidate_external_policy_installation_preserves_order_and_provenance(monkeypatch):
+    installed = []
+
+    class Handle:
+        def summary(self):
+            return {"calls": 12}
+
+    sparsevideo = SimpleNamespace(
+        default_method_config=lambda method, **kwargs: {"method": method, **kwargs},
+        apply=lambda pipeline, **kwargs: (installed.append("svoo"), Handle())[1],
+    )
+    diffusers = SimpleNamespace(__version__="test-diffusers")
+
+    class MagCacheConfig:
+        def __init__(self, **kwargs):
+            self.values = kwargs
+
+    hooks = SimpleNamespace(MagCacheConfig=MagCacheConfig)
+    monkeypatch.setitem(sys.modules, "sparsevideo", sparsevideo)
+    monkeypatch.setitem(sys.modules, "diffusers", diffusers)
+    monkeypatch.setitem(sys.modules, "diffusers.hooks", hooks)
+
+    class Transformer:
+        def enable_cache(self, config):
+            installed.append("magcache")
+
+    pipeline = SimpleNamespace(
+        transformer=Transformer(),
+        _harness4h3_external_runtime_policies=[
+            {"operator": "svoo_attention", "args": {"method": "svoo", "model_key": "wan21-t2v-1.3b", "config": {}}},
+            {"operator": "magcache", "args": {"method": "magcache", "config": {"threshold": 0.12}}},
+        ],
+    )
+    evaluator = object.__new__(WanVideoEvaluator)
+    evaluator.config = SimpleNamespace(runtime_attention={}, runtime_cache={})
+    evaluator._wan_spec = {"num_inference_steps": 16}
+    returned = evaluator._install_persisted_external_policies(pipeline)
+
+    assert returned is pipeline
+    assert installed == ["svoo", "magcache"]
+    assert pipeline._harness4h3_runtime_policy_provenance["installation_order"] == ["svoo_attention", "magcache"]
+    assert WanVideoEvaluator._runtime_attention_summary(pipeline)["handle"] == {"calls": 12}
+    assert pipeline._harness4h3_runtime_cache["diffusers_version"] == "test-diffusers"
+
+
 def test_real_evaluator_config_requires_trusted_inputs(tmp_path):
     try:
         WanVideoEvaluationConfig.from_mapping({}, tmp_path / "out")

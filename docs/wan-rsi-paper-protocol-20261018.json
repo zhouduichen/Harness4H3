@@ -1,0 +1,1562 @@
+{
+  "arms": {
+    "agent-memory": {
+      "adapt_search_policy": false,
+      "algorithm_improvement": true,
+      "algorithm_probe_samples": 3,
+      "assets": {
+        "checkpoint": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+          "sha256": null
+        },
+        "clip_model_path": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+          "sha256": null
+        },
+        "evaluation_manifest": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/evaluation-manifest.json",
+          "sha256": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c"
+        },
+        "wan_config": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml",
+          "sha256": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+        }
+      },
+      "backend": "diffusers",
+      "candidate_screening": false,
+      "checkpoint": "../../models/wan21-t2v-1.3b",
+      "checkpoint_asset": {
+        "exists": false,
+        "kind": "missing",
+        "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+        "sha256": null
+      },
+      "config_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-paper-20261018/agent-memory.yaml",
+      "config_sha256": "bf70800e39087cc91d9732531e97e98cd299670a927c06e69a3114e625aae81b",
+      "controller": {
+        "api_key_env": "",
+        "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+        "model": "qwen3.5-controller",
+        "model_version": "Qwen3.5-35B-A3B-FP8",
+        "provider": "vllm",
+        "timeout_s": 180
+      },
+      "device": "cuda:3",
+      "dtype": "bfloat16",
+      "evaluator": {
+        "clip_model_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+        "device": "cuda:3",
+        "dtype": "bfloat16",
+        "evaluation_manifest": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c",
+        "evaluation_split": "validation",
+        "execution_profile": {
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-hybrid-20261018/profile.json",
+          "sha256": null
+        },
+        "latency_repeats": 3,
+        "latency_warmup": 1,
+        "local_files_only": true,
+        "max_cases": 3,
+        "max_quality_drop": 0.05,
+        "pipeline_device": "cuda:3",
+        "quality_device": "cuda:3",
+        "runtime_attention": {},
+        "runtime_cache": {},
+        "sample_frames": 4,
+        "seed_count": 2,
+        "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580",
+        "visual_quality_gate": {
+          "enabled": true,
+          "max_low_texture_frame_ratio": 0.75,
+          "min_block_variance": 1.0,
+          "min_frame_difference": 0.001,
+          "min_laplacian_std": 0.5,
+          "min_spatial_gradient": 0.05,
+          "version": "visual-structure-v1"
+        },
+        "wan_config": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+      },
+      "exploit_ratio": 0.7,
+      "frozen_expanded_search_space": false,
+      "memory_enabled": true,
+      "model": "qwen3.5-controller",
+      "name": "agent-memory",
+      "output_root": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-paper-20261018/agent-memory",
+      "provider": "vllm",
+      "search_space_evolution": false,
+      "seed": 7,
+      "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580"
+    },
+    "coding-agent": {
+      "adapt_search_policy": false,
+      "algorithm_improvement": true,
+      "algorithm_probe_samples": 3,
+      "assets": {
+        "checkpoint": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+          "sha256": null
+        },
+        "clip_model_path": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+          "sha256": null
+        },
+        "evaluation_manifest": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/evaluation-manifest.json",
+          "sha256": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c"
+        },
+        "wan_config": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml",
+          "sha256": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+        }
+      },
+      "backend": "diffusers",
+      "candidate_screening": false,
+      "checkpoint": "../../models/wan21-t2v-1.3b",
+      "checkpoint_asset": {
+        "exists": false,
+        "kind": "missing",
+        "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+        "sha256": null
+      },
+      "config_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-paper-20261018/coding-agent.yaml",
+      "config_sha256": "691356e18b8f8081e7f1a3dd82cc0f5644b3cbf1245de1842b6871d90853a251",
+      "controller": {
+        "api_key_env": "",
+        "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+        "model": "qwen3.5-controller",
+        "model_version": "Qwen3.5-35B-A3B-FP8",
+        "provider": "vllm",
+        "timeout_s": 180
+      },
+      "device": "cuda:3",
+      "dtype": "bfloat16",
+      "evaluator": {
+        "clip_model_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+        "device": "cuda:3",
+        "dtype": "bfloat16",
+        "evaluation_manifest": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c",
+        "evaluation_split": "validation",
+        "execution_profile": {
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-hybrid-20261018/profile.json",
+          "sha256": null
+        },
+        "latency_repeats": 3,
+        "latency_warmup": 1,
+        "local_files_only": true,
+        "max_cases": 3,
+        "max_quality_drop": 0.05,
+        "pipeline_device": "cuda:3",
+        "quality_device": "cuda:3",
+        "runtime_attention": {},
+        "runtime_cache": {},
+        "sample_frames": 4,
+        "seed_count": 2,
+        "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580",
+        "visual_quality_gate": {
+          "enabled": true,
+          "max_low_texture_frame_ratio": 0.75,
+          "min_block_variance": 1.0,
+          "min_frame_difference": 0.001,
+          "min_laplacian_std": 0.5,
+          "min_spatial_gradient": 0.05,
+          "version": "visual-structure-v1"
+        },
+        "wan_config": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+      },
+      "exploit_ratio": 0.7,
+      "frozen_expanded_search_space": false,
+      "memory_enabled": false,
+      "model": "qwen3.5-controller",
+      "name": "coding-agent",
+      "output_root": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-paper-20261018/coding-agent",
+      "provider": "vllm",
+      "search_space_evolution": false,
+      "seed": 7,
+      "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580"
+    },
+    "fixed": {
+      "adapt_search_policy": false,
+      "algorithm_improvement": false,
+      "algorithm_probe_samples": 3,
+      "assets": {
+        "checkpoint": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+          "sha256": null
+        },
+        "clip_model_path": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+          "sha256": null
+        },
+        "evaluation_manifest": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/evaluation-manifest.json",
+          "sha256": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c"
+        },
+        "wan_config": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml",
+          "sha256": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+        }
+      },
+      "backend": "diffusers",
+      "candidate_screening": false,
+      "checkpoint": "../../models/wan21-t2v-1.3b",
+      "checkpoint_asset": {
+        "exists": false,
+        "kind": "missing",
+        "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+        "sha256": null
+      },
+      "config_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-paper-20261018/fixed.yaml",
+      "config_sha256": "c9f8a9b16d432305cb17a128ccb026f9aa7810e9c5c518a5936bfc5f1f4464b6",
+      "controller": {
+        "api_key_env": "",
+        "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+        "model": "deterministic-fixed",
+        "model_version": "Qwen3.5-35B-A3B-FP8",
+        "provider": "deterministic",
+        "timeout_s": 180
+      },
+      "device": "cuda:3",
+      "dtype": "bfloat16",
+      "evaluator": {
+        "clip_model_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+        "device": "cuda:3",
+        "dtype": "bfloat16",
+        "evaluation_manifest": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c",
+        "evaluation_split": "validation",
+        "execution_profile": {
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-hybrid-20261018/profile.json",
+          "sha256": null
+        },
+        "latency_repeats": 3,
+        "latency_warmup": 1,
+        "local_files_only": true,
+        "max_cases": 3,
+        "max_quality_drop": 0.05,
+        "pipeline_device": "cuda:3",
+        "quality_device": "cuda:3",
+        "runtime_attention": {},
+        "runtime_cache": {},
+        "sample_frames": 4,
+        "seed_count": 2,
+        "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580",
+        "visual_quality_gate": {
+          "enabled": true,
+          "max_low_texture_frame_ratio": 0.75,
+          "min_block_variance": 1.0,
+          "min_frame_difference": 0.001,
+          "min_laplacian_std": 0.5,
+          "min_spatial_gradient": 0.05,
+          "version": "visual-structure-v1"
+        },
+        "wan_config": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+      },
+      "exploit_ratio": 1.0,
+      "frozen_expanded_search_space": false,
+      "memory_enabled": false,
+      "model": "deterministic-fixed",
+      "name": "fixed",
+      "output_root": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-paper-20261018/fixed",
+      "provider": "deterministic",
+      "search_space_evolution": false,
+      "seed": 7,
+      "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580"
+    },
+    "rsi": {
+      "adapt_search_policy": true,
+      "algorithm_improvement": true,
+      "algorithm_probe_samples": 3,
+      "assets": {
+        "checkpoint": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+          "sha256": null
+        },
+        "clip_model_path": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+          "sha256": null
+        },
+        "evaluation_manifest": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/evaluation-manifest.json",
+          "sha256": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c"
+        },
+        "wan_config": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml",
+          "sha256": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+        }
+      },
+      "backend": "diffusers",
+      "candidate_screening": false,
+      "checkpoint": "../../models/wan21-t2v-1.3b",
+      "checkpoint_asset": {
+        "exists": false,
+        "kind": "missing",
+        "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+        "sha256": null
+      },
+      "config_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-paper-20261018/rsi.yaml",
+      "config_sha256": "970866a745c5845094b21fd3491585d60e444664faaed731393ec8b18af0590e",
+      "controller": {
+        "api_key_env": "",
+        "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+        "model": "qwen3.5-controller",
+        "model_version": "Qwen3.5-35B-A3B-FP8",
+        "provider": "vllm",
+        "timeout_s": 180
+      },
+      "device": "cuda:3",
+      "dtype": "bfloat16",
+      "evaluator": {
+        "clip_model_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+        "device": "cuda:3",
+        "dtype": "bfloat16",
+        "evaluation_manifest": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c",
+        "evaluation_split": "validation",
+        "execution_profile": {
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-hybrid-20261018/profile.json",
+          "sha256": null
+        },
+        "latency_repeats": 3,
+        "latency_warmup": 1,
+        "local_files_only": true,
+        "max_cases": 3,
+        "max_quality_drop": 0.05,
+        "pipeline_device": "cuda:3",
+        "quality_device": "cuda:3",
+        "runtime_attention": {},
+        "runtime_cache": {},
+        "sample_frames": 4,
+        "seed_count": 2,
+        "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580",
+        "visual_quality_gate": {
+          "enabled": true,
+          "max_low_texture_frame_ratio": 0.75,
+          "min_block_variance": 1.0,
+          "min_frame_difference": 0.001,
+          "min_laplacian_std": 0.5,
+          "min_spatial_gradient": 0.05,
+          "version": "visual-structure-v1"
+        },
+        "wan_config": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+      },
+      "exploit_ratio": 0.7,
+      "frozen_expanded_search_space": false,
+      "memory_enabled": true,
+      "model": "qwen3.5-controller",
+      "name": "rsi",
+      "output_root": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-paper-20261018/rsi",
+      "provider": "vllm",
+      "search_space_evolution": true,
+      "seed": 7,
+      "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580"
+    },
+    "rsi-expanded-frozen": {
+      "adapt_search_policy": true,
+      "algorithm_improvement": true,
+      "algorithm_probe_samples": 3,
+      "assets": {
+        "checkpoint": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+          "sha256": null
+        },
+        "clip_model_path": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+          "sha256": null
+        },
+        "evaluation_manifest": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/evaluation-manifest.json",
+          "sha256": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c"
+        },
+        "wan_config": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml",
+          "sha256": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+        }
+      },
+      "backend": "diffusers",
+      "candidate_screening": false,
+      "checkpoint": "../../models/wan21-t2v-1.3b",
+      "checkpoint_asset": {
+        "exists": false,
+        "kind": "missing",
+        "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+        "sha256": null
+      },
+      "config_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-paper-20261018/rsi-expanded-frozen.yaml",
+      "config_sha256": "69bd6286c9dc7b14b16e287d280fd08ce22fbd8bd3bf4f20f55fa82cdba54bc6",
+      "controller": {
+        "api_key_env": "",
+        "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+        "model": "qwen3.5-controller",
+        "model_version": "Qwen3.5-35B-A3B-FP8",
+        "provider": "vllm",
+        "timeout_s": 180
+      },
+      "device": "cuda:3",
+      "dtype": "bfloat16",
+      "evaluator": {
+        "clip_model_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+        "device": "cuda:3",
+        "dtype": "bfloat16",
+        "evaluation_manifest": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c",
+        "evaluation_split": "validation",
+        "execution_profile": {
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-hybrid-20261018/profile.json",
+          "sha256": null
+        },
+        "latency_repeats": 3,
+        "latency_warmup": 1,
+        "local_files_only": true,
+        "max_cases": 3,
+        "max_quality_drop": 0.05,
+        "pipeline_device": "cuda:3",
+        "quality_device": "cuda:3",
+        "runtime_attention": {},
+        "runtime_cache": {},
+        "sample_frames": 4,
+        "seed_count": 2,
+        "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580",
+        "visual_quality_gate": {
+          "enabled": true,
+          "max_low_texture_frame_ratio": 0.75,
+          "min_block_variance": 1.0,
+          "min_frame_difference": 0.001,
+          "min_laplacian_std": 0.5,
+          "min_spatial_gradient": 0.05,
+          "version": "visual-structure-v1"
+        },
+        "wan_config": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+      },
+      "exploit_ratio": 0.7,
+      "frozen_expanded_search_space": true,
+      "memory_enabled": true,
+      "model": "qwen3.5-controller",
+      "name": "rsi-expanded-frozen",
+      "output_root": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-paper-20261018/rsi-expanded-frozen",
+      "provider": "vllm",
+      "search_space_evolution": false,
+      "seed": 7,
+      "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580"
+    },
+    "rsi-fixed-space": {
+      "adapt_search_policy": true,
+      "algorithm_improvement": true,
+      "algorithm_probe_samples": 3,
+      "assets": {
+        "checkpoint": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+          "sha256": null
+        },
+        "clip_model_path": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+          "sha256": null
+        },
+        "evaluation_manifest": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/evaluation-manifest.json",
+          "sha256": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c"
+        },
+        "wan_config": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml",
+          "sha256": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+        }
+      },
+      "backend": "diffusers",
+      "candidate_screening": false,
+      "checkpoint": "../../models/wan21-t2v-1.3b",
+      "checkpoint_asset": {
+        "exists": false,
+        "kind": "missing",
+        "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+        "sha256": null
+      },
+      "config_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-paper-20261018/rsi-fixed-space.yaml",
+      "config_sha256": "831a051525c40188a1a5a20eceb2d4419af573e9a703311e8f92bfd79b22defd",
+      "controller": {
+        "api_key_env": "",
+        "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+        "model": "qwen3.5-controller",
+        "model_version": "Qwen3.5-35B-A3B-FP8",
+        "provider": "vllm",
+        "timeout_s": 180
+      },
+      "device": "cuda:3",
+      "dtype": "bfloat16",
+      "evaluator": {
+        "clip_model_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+        "device": "cuda:3",
+        "dtype": "bfloat16",
+        "evaluation_manifest": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c",
+        "evaluation_split": "validation",
+        "execution_profile": {
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-hybrid-20261018/profile.json",
+          "sha256": null
+        },
+        "latency_repeats": 3,
+        "latency_warmup": 1,
+        "local_files_only": true,
+        "max_cases": 3,
+        "max_quality_drop": 0.05,
+        "pipeline_device": "cuda:3",
+        "quality_device": "cuda:3",
+        "runtime_attention": {},
+        "runtime_cache": {},
+        "sample_frames": 4,
+        "seed_count": 2,
+        "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580",
+        "visual_quality_gate": {
+          "enabled": true,
+          "max_low_texture_frame_ratio": 0.75,
+          "min_block_variance": 1.0,
+          "min_frame_difference": 0.001,
+          "min_laplacian_std": 0.5,
+          "min_spatial_gradient": 0.05,
+          "version": "visual-structure-v1"
+        },
+        "wan_config": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+      },
+      "exploit_ratio": 0.7,
+      "frozen_expanded_search_space": false,
+      "memory_enabled": true,
+      "model": "qwen3.5-controller",
+      "name": "rsi-fixed-space",
+      "output_root": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-paper-20261018/rsi-fixed-space",
+      "provider": "vllm",
+      "search_space_evolution": false,
+      "seed": 7,
+      "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580"
+    }
+  },
+  "budget": {
+    "expected_cases": 6,
+    "latency_repeats": 3,
+    "rounds": 3
+  },
+  "expanded_operator_catalog": [
+    {
+      "argument_schema": {
+        "block_ids": "list[str]"
+      },
+      "execution_domain": "structural",
+      "granularity": "block",
+      "implementation_ref": "",
+      "name": "prune_blocks",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "block_ids": "list[str]",
+        "retained_indices": "list[int]"
+      },
+      "execution_domain": "structural",
+      "granularity": "channel",
+      "implementation_ref": "",
+      "name": "prune_ffn_channels",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "steps": "list[2..6]"
+      },
+      "execution_domain": "composite",
+      "granularity": "composite",
+      "implementation_ref": "harness4h3.operators.wan.compression.CompositeCompressionOperator",
+      "name": "compose",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "block_ids": "list[str]"
+      },
+      "execution_domain": "structural",
+      "granularity": "layer",
+      "implementation_ref": "harness4h3.operators.wan.compression.LayerPruningOperator",
+      "name": "prune_layers",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "attention_names": "list[str]",
+        "head_indices": "list[int]"
+      },
+      "execution_domain": "structural",
+      "granularity": "attention_head",
+      "implementation_ref": "harness4h3.operators.wan.compression.AttentionHeadPruningOperator",
+      "name": "prune_attention_heads",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "attention_names": "list[str]",
+        "head_indices": "list[int]"
+      },
+      "execution_domain": "structural",
+      "granularity": "head",
+      "implementation_ref": "harness4h3.operators.wan.compression.HeadPruningOperator",
+      "name": "prune_heads",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "attention": "str",
+        "block_ids": "list[str]",
+        "head_indices": "list[int]",
+        "keep_ratio": "float",
+        "rules": "list[object]",
+        "score": "str"
+      },
+      "execution_domain": "runtime",
+      "granularity": "head_runtime",
+      "implementation_ref": "harness4h3.operators.wan.compression.HeadGatingOperator",
+      "name": "head_gating",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "block_ids": "list[str]",
+        "grid_shape": "list[int3]",
+        "keep_ratio": "float",
+        "score": "str"
+      },
+      "execution_domain": "runtime",
+      "granularity": "token",
+      "implementation_ref": "harness4h3.operators.wan.compression.TokenPruningOperator",
+      "name": "prune_tokens",
+      "version": "2"
+    },
+    {
+      "argument_schema": {
+        "block_ids": "list[str]",
+        "grid_shape": "list[int3]",
+        "keep_ratio": "float",
+        "mode": "str"
+      },
+      "execution_domain": "runtime",
+      "granularity": "token",
+      "implementation_ref": "harness4h3.operators.wan.compression.TokenMergeOperator",
+      "name": "token_merge",
+      "version": "2"
+    },
+    {
+      "argument_schema": {
+        "block_ids": "list[str]",
+        "keep_ratio": "float",
+        "score": "str"
+      },
+      "execution_domain": "runtime",
+      "granularity": "token",
+      "implementation_ref": "harness4h3.operators.wan.compression.KVTokenSelectionOperator",
+      "name": "kv_token_select",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "attention": "str",
+        "keep_ratio": "float"
+      },
+      "execution_domain": "runtime",
+      "granularity": "sparse_runtime",
+      "implementation_ref": "harness4h3.operators.wan.compression.SparseRuntimeOperator",
+      "name": "sparse_runtime",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "config": "mapping",
+        "method": "svoo",
+        "model_key": "str"
+      },
+      "execution_domain": "runtime",
+      "granularity": "sparse_attention",
+      "implementation_ref": "harness4h3.operators.wan.compression.SVOOAttentionOperator",
+      "name": "svoo_attention",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "config": "mapping",
+        "method": "magcache"
+      },
+      "execution_domain": "runtime",
+      "granularity": "timestep_cache",
+      "implementation_ref": "harness4h3.operators.wan.compression.MagCacheOperator",
+      "name": "magcache",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "attention": "str",
+        "grid_shape": "list[int3]",
+        "window_radius": "list[int3]",
+        "window_size": "int"
+      },
+      "execution_domain": "runtime",
+      "granularity": "attention",
+      "implementation_ref": "harness4h3.operators.wan.compression.AttentionWindowOperator",
+      "name": "attention_window",
+      "version": "2"
+    },
+    {
+      "argument_schema": {
+        "target_steps": "int"
+      },
+      "execution_domain": "sampler",
+      "granularity": "sampling_step",
+      "implementation_ref": "harness4h3.operators.wan.compression.SamplingStepSkipOperator",
+      "name": "sampling_step_skip",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "policy": "str",
+        "rules": "list[object]"
+      },
+      "execution_domain": "runtime",
+      "granularity": "runtime_timestep",
+      "implementation_ref": "harness4h3.operators.wan.compression.TimestepBlockGatingOperator",
+      "name": "timestep_block_gate",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "policy": "str",
+        "rules": "list[object]"
+      },
+      "execution_domain": "runtime",
+      "granularity": "timestep_attention",
+      "implementation_ref": "harness4h3.operators.wan.compression.TimestepAttentionPolicyOperator",
+      "name": "timestep_attention_policy",
+      "version": "1"
+    }
+  ],
+  "operator_catalog": [
+    {
+      "argument_schema": {
+        "block_ids": "list[str]"
+      },
+      "execution_domain": "structural",
+      "granularity": "block",
+      "implementation_ref": "",
+      "name": "prune_blocks",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "block_ids": "list[str]",
+        "retained_indices": "list[int]"
+      },
+      "execution_domain": "structural",
+      "granularity": "channel",
+      "implementation_ref": "",
+      "name": "prune_ffn_channels",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "steps": "list[2..6]"
+      },
+      "execution_domain": "composite",
+      "granularity": "composite",
+      "implementation_ref": "harness4h3.operators.wan.compression.CompositeCompressionOperator",
+      "name": "compose",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "block_ids": "list[str]"
+      },
+      "execution_domain": "structural",
+      "granularity": "layer",
+      "implementation_ref": "harness4h3.operators.wan.compression.LayerPruningOperator",
+      "name": "prune_layers",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "attention_names": "list[str]",
+        "head_indices": "list[int]"
+      },
+      "execution_domain": "structural",
+      "granularity": "attention_head",
+      "implementation_ref": "harness4h3.operators.wan.compression.AttentionHeadPruningOperator",
+      "name": "prune_attention_heads",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "attention_names": "list[str]",
+        "head_indices": "list[int]"
+      },
+      "execution_domain": "structural",
+      "granularity": "head",
+      "implementation_ref": "harness4h3.operators.wan.compression.HeadPruningOperator",
+      "name": "prune_heads",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "attention": "str",
+        "block_ids": "list[str]",
+        "head_indices": "list[int]",
+        "keep_ratio": "float",
+        "rules": "list[object]",
+        "score": "str"
+      },
+      "execution_domain": "runtime",
+      "granularity": "head_runtime",
+      "implementation_ref": "harness4h3.operators.wan.compression.HeadGatingOperator",
+      "name": "head_gating",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "block_ids": "list[str]",
+        "grid_shape": "list[int3]",
+        "keep_ratio": "float",
+        "score": "str"
+      },
+      "execution_domain": "runtime",
+      "granularity": "token",
+      "implementation_ref": "harness4h3.operators.wan.compression.TokenPruningOperator",
+      "name": "prune_tokens",
+      "version": "2"
+    },
+    {
+      "argument_schema": {
+        "block_ids": "list[str]",
+        "grid_shape": "list[int3]",
+        "keep_ratio": "float",
+        "mode": "str"
+      },
+      "execution_domain": "runtime",
+      "granularity": "token",
+      "implementation_ref": "harness4h3.operators.wan.compression.TokenMergeOperator",
+      "name": "token_merge",
+      "version": "2"
+    },
+    {
+      "argument_schema": {
+        "block_ids": "list[str]",
+        "keep_ratio": "float",
+        "score": "str"
+      },
+      "execution_domain": "runtime",
+      "granularity": "token",
+      "implementation_ref": "harness4h3.operators.wan.compression.KVTokenSelectionOperator",
+      "name": "kv_token_select",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "attention": "str",
+        "keep_ratio": "float"
+      },
+      "execution_domain": "runtime",
+      "granularity": "sparse_runtime",
+      "implementation_ref": "harness4h3.operators.wan.compression.SparseRuntimeOperator",
+      "name": "sparse_runtime",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "config": "mapping",
+        "method": "svoo",
+        "model_key": "str"
+      },
+      "execution_domain": "runtime",
+      "granularity": "sparse_attention",
+      "implementation_ref": "harness4h3.operators.wan.compression.SVOOAttentionOperator",
+      "name": "svoo_attention",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "config": "mapping",
+        "method": "magcache"
+      },
+      "execution_domain": "runtime",
+      "granularity": "timestep_cache",
+      "implementation_ref": "harness4h3.operators.wan.compression.MagCacheOperator",
+      "name": "magcache",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "attention": "str",
+        "grid_shape": "list[int3]",
+        "window_radius": "list[int3]",
+        "window_size": "int"
+      },
+      "execution_domain": "runtime",
+      "granularity": "attention",
+      "implementation_ref": "harness4h3.operators.wan.compression.AttentionWindowOperator",
+      "name": "attention_window",
+      "version": "2"
+    },
+    {
+      "argument_schema": {
+        "target_steps": "int"
+      },
+      "execution_domain": "sampler",
+      "granularity": "sampling_step",
+      "implementation_ref": "harness4h3.operators.wan.compression.SamplingStepSkipOperator",
+      "name": "sampling_step_skip",
+      "version": "1"
+    },
+    {
+      "argument_schema": {
+        "policy": "str",
+        "rules": "list[object]"
+      },
+      "execution_domain": "runtime",
+      "granularity": "runtime_timestep",
+      "implementation_ref": "harness4h3.operators.wan.compression.TimestepBlockGatingOperator",
+      "name": "timestep_block_gate",
+      "version": "1"
+    }
+  ],
+  "protocol_fingerprint": "3241bbc8706670815f9a9ac667dd2ccb3109c495c522ba64cf535c4cd2c273ff",
+  "required_arms": [
+    "fixed",
+    "coding-agent",
+    "agent-memory",
+    "rsi-fixed-space",
+    "rsi-expanded-frozen",
+    "rsi"
+  ],
+  "run_manifests": {
+    "agent-memory": {
+      "arm_name": "agent-memory",
+      "assets": {
+        "checkpoint": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+          "sha256": null
+        },
+        "clip_model_path": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+          "sha256": null
+        },
+        "evaluation_manifest": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/evaluation-manifest.json",
+          "sha256": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c"
+        },
+        "wan_config": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml",
+          "sha256": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+        }
+      },
+      "budget": {
+        "expected_cases": 6,
+        "latency_repeats": 3,
+        "rounds": 3
+      },
+      "checkpoint": {
+        "exists": false,
+        "kind": "missing",
+        "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+        "sha256": null
+      },
+      "config_sha256": "bf70800e39087cc91d9732531e97e98cd299670a927c06e69a3114e625aae81b",
+      "controls": {
+        "adapt_search_policy": false,
+        "algorithm_improvement": true,
+        "algorithm_probe_samples": 3,
+        "candidate_screening": false,
+        "exploit_ratio": 0.7,
+        "frozen_expanded_search_space": false,
+        "memory_enabled": true,
+        "model": "qwen3.5-controller",
+        "provider": "vllm",
+        "search_space_evolution": false
+      },
+      "evaluator": {
+        "clip_model_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+        "device": "cuda:3",
+        "dtype": "bfloat16",
+        "evaluation_manifest": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c",
+        "evaluation_split": "validation",
+        "execution_profile": {
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-hybrid-20261018/profile.json",
+          "sha256": null
+        },
+        "latency_repeats": 3,
+        "latency_warmup": 1,
+        "local_files_only": true,
+        "max_cases": 3,
+        "max_quality_drop": 0.05,
+        "pipeline_device": "cuda:3",
+        "quality_device": "cuda:3",
+        "runtime_attention": {},
+        "runtime_cache": {},
+        "sample_frames": 4,
+        "seed_count": 2,
+        "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580",
+        "visual_quality_gate": {
+          "enabled": true,
+          "max_low_texture_frame_ratio": 0.75,
+          "min_block_variance": 1.0,
+          "min_frame_difference": 0.001,
+          "min_laplacian_std": 0.5,
+          "min_spatial_gradient": 0.05,
+          "version": "visual-structure-v1"
+        },
+        "wan_config": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+      },
+      "expanded_operator_catalog_digest": "871ab0d811d545ec90ef9d05044546d280da849f4f654331e3e19c7feb883dc3",
+      "operator_catalog_digest": "e31af4fdfafa7f70f53c22a071a5f70f73f99dc1c51cef201bb5787b9b43b048",
+      "protocol_fingerprint": "3241bbc8706670815f9a9ac667dd2ccb3109c495c522ba64cf535c4cd2c273ff",
+      "runtime_policy_adapter_versions": {
+        "magcache": "diffusers.MagCacheConfig-enable_cache-v1",
+        "sparse_runtime": "harness4h3.topk-kv-v1",
+        "svoo_attention": "sparsevideo.apply-wan-v1"
+      },
+      "schema_version": 1,
+      "search_ranking_version": "evidence-weighted-multifamily-v2",
+      "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580"
+    },
+    "coding-agent": {
+      "arm_name": "coding-agent",
+      "assets": {
+        "checkpoint": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+          "sha256": null
+        },
+        "clip_model_path": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+          "sha256": null
+        },
+        "evaluation_manifest": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/evaluation-manifest.json",
+          "sha256": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c"
+        },
+        "wan_config": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml",
+          "sha256": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+        }
+      },
+      "budget": {
+        "expected_cases": 6,
+        "latency_repeats": 3,
+        "rounds": 3
+      },
+      "checkpoint": {
+        "exists": false,
+        "kind": "missing",
+        "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+        "sha256": null
+      },
+      "config_sha256": "691356e18b8f8081e7f1a3dd82cc0f5644b3cbf1245de1842b6871d90853a251",
+      "controls": {
+        "adapt_search_policy": false,
+        "algorithm_improvement": true,
+        "algorithm_probe_samples": 3,
+        "candidate_screening": false,
+        "exploit_ratio": 0.7,
+        "frozen_expanded_search_space": false,
+        "memory_enabled": false,
+        "model": "qwen3.5-controller",
+        "provider": "vllm",
+        "search_space_evolution": false
+      },
+      "evaluator": {
+        "clip_model_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+        "device": "cuda:3",
+        "dtype": "bfloat16",
+        "evaluation_manifest": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c",
+        "evaluation_split": "validation",
+        "execution_profile": {
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-hybrid-20261018/profile.json",
+          "sha256": null
+        },
+        "latency_repeats": 3,
+        "latency_warmup": 1,
+        "local_files_only": true,
+        "max_cases": 3,
+        "max_quality_drop": 0.05,
+        "pipeline_device": "cuda:3",
+        "quality_device": "cuda:3",
+        "runtime_attention": {},
+        "runtime_cache": {},
+        "sample_frames": 4,
+        "seed_count": 2,
+        "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580",
+        "visual_quality_gate": {
+          "enabled": true,
+          "max_low_texture_frame_ratio": 0.75,
+          "min_block_variance": 1.0,
+          "min_frame_difference": 0.001,
+          "min_laplacian_std": 0.5,
+          "min_spatial_gradient": 0.05,
+          "version": "visual-structure-v1"
+        },
+        "wan_config": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+      },
+      "expanded_operator_catalog_digest": "871ab0d811d545ec90ef9d05044546d280da849f4f654331e3e19c7feb883dc3",
+      "operator_catalog_digest": "e31af4fdfafa7f70f53c22a071a5f70f73f99dc1c51cef201bb5787b9b43b048",
+      "protocol_fingerprint": "3241bbc8706670815f9a9ac667dd2ccb3109c495c522ba64cf535c4cd2c273ff",
+      "runtime_policy_adapter_versions": {
+        "magcache": "diffusers.MagCacheConfig-enable_cache-v1",
+        "sparse_runtime": "harness4h3.topk-kv-v1",
+        "svoo_attention": "sparsevideo.apply-wan-v1"
+      },
+      "schema_version": 1,
+      "search_ranking_version": "evidence-weighted-multifamily-v2",
+      "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580"
+    },
+    "fixed": {
+      "arm_name": "fixed",
+      "assets": {
+        "checkpoint": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+          "sha256": null
+        },
+        "clip_model_path": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+          "sha256": null
+        },
+        "evaluation_manifest": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/evaluation-manifest.json",
+          "sha256": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c"
+        },
+        "wan_config": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml",
+          "sha256": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+        }
+      },
+      "budget": {
+        "expected_cases": 6,
+        "latency_repeats": 3,
+        "rounds": 3
+      },
+      "checkpoint": {
+        "exists": false,
+        "kind": "missing",
+        "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+        "sha256": null
+      },
+      "config_sha256": "c9f8a9b16d432305cb17a128ccb026f9aa7810e9c5c518a5936bfc5f1f4464b6",
+      "controls": {
+        "adapt_search_policy": false,
+        "algorithm_improvement": false,
+        "algorithm_probe_samples": 3,
+        "candidate_screening": false,
+        "exploit_ratio": 1.0,
+        "frozen_expanded_search_space": false,
+        "memory_enabled": false,
+        "model": "deterministic-fixed",
+        "provider": "deterministic",
+        "search_space_evolution": false
+      },
+      "evaluator": {
+        "clip_model_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+        "device": "cuda:3",
+        "dtype": "bfloat16",
+        "evaluation_manifest": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c",
+        "evaluation_split": "validation",
+        "execution_profile": {
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-hybrid-20261018/profile.json",
+          "sha256": null
+        },
+        "latency_repeats": 3,
+        "latency_warmup": 1,
+        "local_files_only": true,
+        "max_cases": 3,
+        "max_quality_drop": 0.05,
+        "pipeline_device": "cuda:3",
+        "quality_device": "cuda:3",
+        "runtime_attention": {},
+        "runtime_cache": {},
+        "sample_frames": 4,
+        "seed_count": 2,
+        "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580",
+        "visual_quality_gate": {
+          "enabled": true,
+          "max_low_texture_frame_ratio": 0.75,
+          "min_block_variance": 1.0,
+          "min_frame_difference": 0.001,
+          "min_laplacian_std": 0.5,
+          "min_spatial_gradient": 0.05,
+          "version": "visual-structure-v1"
+        },
+        "wan_config": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+      },
+      "expanded_operator_catalog_digest": "871ab0d811d545ec90ef9d05044546d280da849f4f654331e3e19c7feb883dc3",
+      "operator_catalog_digest": "e31af4fdfafa7f70f53c22a071a5f70f73f99dc1c51cef201bb5787b9b43b048",
+      "protocol_fingerprint": "3241bbc8706670815f9a9ac667dd2ccb3109c495c522ba64cf535c4cd2c273ff",
+      "runtime_policy_adapter_versions": {
+        "magcache": "diffusers.MagCacheConfig-enable_cache-v1",
+        "sparse_runtime": "harness4h3.topk-kv-v1",
+        "svoo_attention": "sparsevideo.apply-wan-v1"
+      },
+      "schema_version": 1,
+      "search_ranking_version": "evidence-weighted-multifamily-v2",
+      "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580"
+    },
+    "rsi": {
+      "arm_name": "rsi",
+      "assets": {
+        "checkpoint": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+          "sha256": null
+        },
+        "clip_model_path": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+          "sha256": null
+        },
+        "evaluation_manifest": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/evaluation-manifest.json",
+          "sha256": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c"
+        },
+        "wan_config": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml",
+          "sha256": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+        }
+      },
+      "budget": {
+        "expected_cases": 6,
+        "latency_repeats": 3,
+        "rounds": 3
+      },
+      "checkpoint": {
+        "exists": false,
+        "kind": "missing",
+        "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+        "sha256": null
+      },
+      "config_sha256": "970866a745c5845094b21fd3491585d60e444664faaed731393ec8b18af0590e",
+      "controls": {
+        "adapt_search_policy": true,
+        "algorithm_improvement": true,
+        "algorithm_probe_samples": 3,
+        "candidate_screening": false,
+        "exploit_ratio": 0.7,
+        "frozen_expanded_search_space": false,
+        "memory_enabled": true,
+        "model": "qwen3.5-controller",
+        "provider": "vllm",
+        "search_space_evolution": true
+      },
+      "evaluator": {
+        "clip_model_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+        "device": "cuda:3",
+        "dtype": "bfloat16",
+        "evaluation_manifest": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c",
+        "evaluation_split": "validation",
+        "execution_profile": {
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-hybrid-20261018/profile.json",
+          "sha256": null
+        },
+        "latency_repeats": 3,
+        "latency_warmup": 1,
+        "local_files_only": true,
+        "max_cases": 3,
+        "max_quality_drop": 0.05,
+        "pipeline_device": "cuda:3",
+        "quality_device": "cuda:3",
+        "runtime_attention": {},
+        "runtime_cache": {},
+        "sample_frames": 4,
+        "seed_count": 2,
+        "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580",
+        "visual_quality_gate": {
+          "enabled": true,
+          "max_low_texture_frame_ratio": 0.75,
+          "min_block_variance": 1.0,
+          "min_frame_difference": 0.001,
+          "min_laplacian_std": 0.5,
+          "min_spatial_gradient": 0.05,
+          "version": "visual-structure-v1"
+        },
+        "wan_config": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+      },
+      "expanded_operator_catalog_digest": "871ab0d811d545ec90ef9d05044546d280da849f4f654331e3e19c7feb883dc3",
+      "operator_catalog_digest": "e31af4fdfafa7f70f53c22a071a5f70f73f99dc1c51cef201bb5787b9b43b048",
+      "protocol_fingerprint": "3241bbc8706670815f9a9ac667dd2ccb3109c495c522ba64cf535c4cd2c273ff",
+      "runtime_policy_adapter_versions": {
+        "magcache": "diffusers.MagCacheConfig-enable_cache-v1",
+        "sparse_runtime": "harness4h3.topk-kv-v1",
+        "svoo_attention": "sparsevideo.apply-wan-v1"
+      },
+      "schema_version": 1,
+      "search_ranking_version": "evidence-weighted-multifamily-v2",
+      "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580"
+    },
+    "rsi-expanded-frozen": {
+      "arm_name": "rsi-expanded-frozen",
+      "assets": {
+        "checkpoint": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+          "sha256": null
+        },
+        "clip_model_path": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+          "sha256": null
+        },
+        "evaluation_manifest": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/evaluation-manifest.json",
+          "sha256": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c"
+        },
+        "wan_config": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml",
+          "sha256": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+        }
+      },
+      "budget": {
+        "expected_cases": 6,
+        "latency_repeats": 3,
+        "rounds": 3
+      },
+      "checkpoint": {
+        "exists": false,
+        "kind": "missing",
+        "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+        "sha256": null
+      },
+      "config_sha256": "69bd6286c9dc7b14b16e287d280fd08ce22fbd8bd3bf4f20f55fa82cdba54bc6",
+      "controls": {
+        "adapt_search_policy": true,
+        "algorithm_improvement": true,
+        "algorithm_probe_samples": 3,
+        "candidate_screening": false,
+        "exploit_ratio": 0.7,
+        "frozen_expanded_search_space": true,
+        "memory_enabled": true,
+        "model": "qwen3.5-controller",
+        "provider": "vllm",
+        "search_space_evolution": false
+      },
+      "evaluator": {
+        "clip_model_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+        "device": "cuda:3",
+        "dtype": "bfloat16",
+        "evaluation_manifest": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c",
+        "evaluation_split": "validation",
+        "execution_profile": {
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-hybrid-20261018/profile.json",
+          "sha256": null
+        },
+        "latency_repeats": 3,
+        "latency_warmup": 1,
+        "local_files_only": true,
+        "max_cases": 3,
+        "max_quality_drop": 0.05,
+        "pipeline_device": "cuda:3",
+        "quality_device": "cuda:3",
+        "runtime_attention": {},
+        "runtime_cache": {},
+        "sample_frames": 4,
+        "seed_count": 2,
+        "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580",
+        "visual_quality_gate": {
+          "enabled": true,
+          "max_low_texture_frame_ratio": 0.75,
+          "min_block_variance": 1.0,
+          "min_frame_difference": 0.001,
+          "min_laplacian_std": 0.5,
+          "min_spatial_gradient": 0.05,
+          "version": "visual-structure-v1"
+        },
+        "wan_config": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+      },
+      "expanded_operator_catalog_digest": "871ab0d811d545ec90ef9d05044546d280da849f4f654331e3e19c7feb883dc3",
+      "operator_catalog_digest": "e31af4fdfafa7f70f53c22a071a5f70f73f99dc1c51cef201bb5787b9b43b048",
+      "protocol_fingerprint": "3241bbc8706670815f9a9ac667dd2ccb3109c495c522ba64cf535c4cd2c273ff",
+      "runtime_policy_adapter_versions": {
+        "magcache": "diffusers.MagCacheConfig-enable_cache-v1",
+        "sparse_runtime": "harness4h3.topk-kv-v1",
+        "svoo_attention": "sparsevideo.apply-wan-v1"
+      },
+      "schema_version": 1,
+      "search_ranking_version": "evidence-weighted-multifamily-v2",
+      "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580"
+    },
+    "rsi-fixed-space": {
+      "arm_name": "rsi-fixed-space",
+      "assets": {
+        "checkpoint": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+          "sha256": null
+        },
+        "clip_model_path": {
+          "exists": false,
+          "kind": "missing",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+          "sha256": null
+        },
+        "evaluation_manifest": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/evaluation-manifest.json",
+          "sha256": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c"
+        },
+        "wan_config": {
+          "exists": true,
+          "kind": "file",
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/configs/wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml",
+          "sha256": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+        }
+      },
+      "budget": {
+        "expected_cases": 6,
+        "latency_repeats": 3,
+        "rounds": 3
+      },
+      "checkpoint": {
+        "exists": false,
+        "kind": "missing",
+        "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/wan21-t2v-1.3b",
+        "sha256": null
+      },
+      "config_sha256": "831a051525c40188a1a5a20eceb2d4419af573e9a703311e8f92bfd79b22defd",
+      "controls": {
+        "adapt_search_policy": true,
+        "algorithm_improvement": true,
+        "algorithm_probe_samples": 3,
+        "candidate_screening": false,
+        "exploit_ratio": 0.7,
+        "frozen_expanded_search_space": false,
+        "memory_enabled": true,
+        "model": "qwen3.5-controller",
+        "provider": "vllm",
+        "search_space_evolution": false
+      },
+      "evaluator": {
+        "clip_model_path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/models/clip-vit-large-patch14-336",
+        "device": "cuda:3",
+        "dtype": "bfloat16",
+        "evaluation_manifest": "c069aee9dca489558a59a29fa983ded0d3e0ba961fde6e93de584aa7878ba32c",
+        "evaluation_split": "validation",
+        "execution_profile": {
+          "path": "/Users/huangjiahao/MinMax-H3/worktrees/Harness4H3-wan-rsi-profiling/experiments/wan-rsi-hybrid-20261018/profile.json",
+          "sha256": null
+        },
+        "latency_repeats": 3,
+        "latency_warmup": 1,
+        "local_files_only": true,
+        "max_cases": 3,
+        "max_quality_drop": 0.05,
+        "pipeline_device": "cuda:3",
+        "quality_device": "cuda:3",
+        "runtime_attention": {},
+        "runtime_cache": {},
+        "sample_frames": 4,
+        "seed_count": 2,
+        "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580",
+        "visual_quality_gate": {
+          "enabled": true,
+          "max_low_texture_frame_ratio": 0.75,
+          "min_block_variance": 1.0,
+          "min_frame_difference": 0.001,
+          "min_laplacian_std": 0.5,
+          "min_spatial_gradient": 0.05,
+          "version": "visual-structure-v1"
+        },
+        "wan_config": "ea6e5a723f52d1058745cdd1666bc6648454338c51efa14417143fbf9f7f2395"
+      },
+      "expanded_operator_catalog_digest": "871ab0d811d545ec90ef9d05044546d280da849f4f654331e3e19c7feb883dc3",
+      "operator_catalog_digest": "e31af4fdfafa7f70f53c22a071a5f70f73f99dc1c51cef201bb5787b9b43b048",
+      "protocol_fingerprint": "3241bbc8706670815f9a9ac667dd2ccb3109c495c522ba64cf535c4cd2c273ff",
+      "runtime_policy_adapter_versions": {
+        "magcache": "diffusers.MagCacheConfig-enable_cache-v1",
+        "sparse_runtime": "harness4h3.topk-kv-v1",
+        "svoo_attention": "sparsevideo.apply-wan-v1"
+      },
+      "schema_version": 1,
+      "search_ranking_version": "evidence-weighted-multifamily-v2",
+      "source_revision": "1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580"
+    }
+  },
+  "runtime_policy_adapter_versions": {
+    "magcache": "diffusers.MagCacheConfig-enable_cache-v1",
+    "sparse_runtime": "harness4h3.topk-kv-v1",
+    "svoo_attention": "sparsevideo.apply-wan-v1"
+  },
+  "schema_version": 1,
+  "search_ranking_version": "evidence-weighted-multifamily-v2"
+}

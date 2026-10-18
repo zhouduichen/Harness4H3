@@ -20,7 +20,7 @@ class WanEvaluationError(RuntimeError):
     """A real evaluation could not produce trusted evidence."""
 
 
-EVALUATOR_VERSION = "wan-video-evaluator-v7"
+EVALUATOR_VERSION = "wan-video-evaluator-v11"
 LATENCY_MEASUREMENT_METHOD = "denoising+vae_decode_with_case_cached_prompt_embeddings"
 
 DEFAULT_VISUAL_QUALITY_GATE = {
@@ -277,6 +277,8 @@ class WanVideoEvaluationConfig:
     quality_device: str = "cpu"
     source_revision: str = "unknown"
     evaluation_split: str = "unspecified"
+    runtime_attention: Mapping[str, Any] = field(default_factory=dict)
+    runtime_cache: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not str(self.wan_config).strip() or not str(self.evaluation_manifest).strip():
@@ -324,6 +326,8 @@ class WanVideoEvaluationConfig:
                 or os.environ.get("HARNESS4H3_SOURCE_REVISION", "unknown")
             ).strip() or "unknown",
             evaluation_split=str(raw.get("evaluation_split", "unspecified")).strip().lower() or "unspecified",
+            runtime_attention=dict(raw.get("runtime_attention") or {}),
+            runtime_cache=dict(raw.get("runtime_cache") or {}),
         )
 
 
@@ -378,6 +382,8 @@ class WanVideoEvaluator:
                 "quality_backend": type(quality_backend).__name__ if quality_backend is not None else "ClipTemporalQualityBackend",
                 "clip_model_path": str(config.clip_model_path),
                 "source_revision": config.source_revision,
+                "runtime_attention": dict(config.runtime_attention),
+                "runtime_cache": dict(config.runtime_cache),
             }
         )
 
@@ -446,6 +452,7 @@ class WanVideoEvaluator:
         search_score = candidate_quality + max(0.0, 1.0 - latency_ratio) * 0.05
         return {
             **dict(candidate),
+            "baseline_checkpoint_sha256": self.baseline.sha256,
             "baseline_quality_score": baseline_quality,
             "baseline_quality_metrics": dict(baseline.get("quality_metrics") or {}),
             "baseline_hardware_metrics": dict(baseline.get("hardware_metrics") or {}),
@@ -583,6 +590,9 @@ class WanVideoEvaluator:
                         "peak_memory_gb": self._peak_memory_gb(torch),
                         "validity": validity,
                         "quality": quality_record,
+                        "runtime_attention": self._runtime_attention_summary(pipeline),
+                        "runtime_cache": self._runtime_cache_summary(pipeline),
+                        "runtime_policy_provenance": dict(getattr(pipeline, "_harness4h3_runtime_policy_provenance", {}) or {}),
                     })
                     completed_keys.add((case_id, seed))
                     _atomic_json(
@@ -657,8 +667,13 @@ class WanVideoEvaluator:
                     "transformer_parameter_count": int(artifact.structure.parameter_count),
                     "parameter_count_scope": "transformer",
                     "hardware_measurement_scope": "generation_device_only",
+                    "runtime_attention": self._runtime_attention_summary(pipeline),
+                    "runtime_cache": dict(getattr(pipeline, "_harness4h3_runtime_cache", {}) or {}),
                     "case_count": len(cases),
                 },
+                "runtime_attention": self._runtime_attention_summary(pipeline),
+                "runtime_cache": self._runtime_cache_summary(pipeline),
+                "runtime_policy_provenance": dict(getattr(pipeline, "_harness4h3_runtime_policy_provenance", {}) or {}),
                 "resumed_case_count": resumed_case_count,
                 "source_revision": self.config.source_revision,
                 "generation_device": self.config.device,
@@ -783,13 +798,21 @@ class WanVideoEvaluator:
     def _load_pipeline(self, checkpoint: str) -> tuple[Any, Any]:
         if self._pipeline_loader is not None:
             loaded = self._pipeline_loader(checkpoint)
-            return loaded
+            pipeline, torch = loaded
+            self._set_active_cuda_device(torch)
+            if not self._has_persisted_external_policy(pipeline, "svoo_attention"):
+                pipeline = self._install_runtime_attention(pipeline)
+            if not self._has_persisted_external_policy(pipeline, "magcache"):
+                pipeline = self._install_runtime_cache(pipeline)
+            pipeline = self._install_persisted_external_policies(pipeline)
+            return pipeline, torch
         try:
             import torch
             from diffusers import DiffusionPipeline
         except ImportError as exc:
             raise WanEvaluationError("diffusers_or_torch_missing: %s" % exc) from exc
         try:
+            self._set_active_cuda_device(torch)
             pipeline = DiffusionPipeline.from_pretrained(
                 checkpoint,
                 local_files_only=self.config.local_files_only,
@@ -812,9 +835,149 @@ class WanVideoEvaluator:
             pipeline._evolution_execution_device = execution_device
             if hasattr(pipeline, "set_progress_bar_config"):
                 pipeline.set_progress_bar_config(disable=True)
+            if not self._has_persisted_external_policy(pipeline, "svoo_attention"):
+                pipeline = self._install_runtime_attention(pipeline)
+            if not self._has_persisted_external_policy(pipeline, "magcache"):
+                pipeline = self._install_runtime_cache(pipeline)
+            pipeline = self._install_persisted_external_policies(pipeline)
             return pipeline, torch
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             raise WanEvaluationError("wan_pipeline_load_failed: %s" % exc) from exc
+
+    def _set_active_cuda_device(self, torch: Any) -> None:
+        """Keep Triton and other device-context kernels on the pipeline GPU."""
+
+        device = torch.device(self.config.resolved_pipeline_device)
+        if device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.set_device(device)
+
+    def _install_runtime_attention(self, pipeline: Any) -> Any:
+        runtime = dict(self.config.runtime_attention or {})
+        return self._install_runtime_attention_config(pipeline, runtime)
+
+    def _install_runtime_attention_config(self, pipeline: Any, runtime: Mapping[str, Any]) -> Any:
+        runtime = dict(runtime)
+        method = str(runtime.get("method", "")).strip()
+        if not method:
+            return pipeline
+        method_config = runtime.get("config")
+        if not isinstance(method_config, Mapping):
+            method_config = {}
+        model_key = str(runtime.get("model_key", "wan21-t2v-1.3b"))
+        try:
+            import sparsevideo
+
+            config = sparsevideo.default_method_config(
+                method,
+                model_key=model_key,
+                num_inference_steps=int(self._wan_spec["num_inference_steps"]),
+            )
+            config.update(dict(method_config))
+            handle = sparsevideo.apply(pipeline, method=method, config=config)
+        except ImportError as exc:
+            raise WanEvaluationError("runtime_attention_dependency_missing: %s" % exc) from exc
+        except (AttributeError, RuntimeError, TypeError, ValueError, NotImplementedError) as exc:
+            raise WanEvaluationError("runtime_attention_install_failed: %s" % exc) from exc
+        pipeline._harness4h3_runtime_attention = {
+            "method": method,
+            "model_key": model_key,
+            "sparsevideo_version": str(getattr(sparsevideo, "__version__", "unknown")),
+        }
+        pipeline._harness4h3_runtime_attention_handle = handle
+        return pipeline
+
+    @staticmethod
+    def _runtime_attention_summary(pipeline: Any) -> dict[str, Any]:
+        summary = dict(getattr(pipeline, "_harness4h3_runtime_attention", {}) or {})
+        handle = getattr(pipeline, "_harness4h3_runtime_attention_handle", None)
+        if handle is not None:
+            summary["handle"] = handle.summary()
+        return summary
+
+    def _install_runtime_cache(self, pipeline: Any) -> Any:
+        runtime = dict(self.config.runtime_cache or {})
+        return self._install_runtime_cache_config(pipeline, runtime)
+
+    def _install_runtime_cache_config(self, pipeline: Any, runtime: Mapping[str, Any]) -> Any:
+        runtime = dict(runtime)
+        method = str(runtime.get("method", "")).strip().lower()
+        if not method:
+            return pipeline
+        if method != "magcache":
+            raise WanEvaluationError("runtime_cache_method_unsupported: %s" % method)
+        method_config = runtime.get("config")
+        if not isinstance(method_config, Mapping):
+            method_config = {}
+        config_values = dict(method_config)
+        config_values.setdefault("num_inference_steps", int(self._wan_spec["num_inference_steps"]))
+        try:
+            from diffusers.hooks import MagCacheConfig
+
+            cache_config = MagCacheConfig(**config_values)
+            enable_cache = getattr(getattr(pipeline, "transformer", None), "enable_cache", None)
+            if not callable(enable_cache):
+                raise TypeError("Wan transformer does not expose Diffusers enable_cache")
+            cache_handle = enable_cache(cache_config)
+            import diffusers
+        except ImportError as exc:
+            raise WanEvaluationError("runtime_cache_dependency_missing: %s" % exc) from exc
+        except (AttributeError, RuntimeError, TypeError, ValueError, NotImplementedError) as exc:
+            raise WanEvaluationError("runtime_cache_install_failed: %s" % exc) from exc
+        pipeline._harness4h3_runtime_cache = {
+            "method": method,
+            "diffusers_version": str(diffusers.__version__),
+            "config": config_values,
+        }
+        pipeline._harness4h3_runtime_cache_handle = cache_handle
+        return pipeline
+
+    @staticmethod
+    def _runtime_cache_summary(pipeline: Any) -> dict[str, Any]:
+        summary = dict(getattr(pipeline, "_harness4h3_runtime_cache", {}) or {})
+        handle = getattr(pipeline, "_harness4h3_runtime_cache_handle", None)
+        if handle is not None:
+            report = getattr(handle, "summary", None)
+            if callable(report):
+                summary["handle_summary"] = report()
+            else:
+                summary["handle_type"] = type(handle).__name__
+        return summary
+
+    def _install_persisted_external_policies(self, pipeline: Any) -> Any:
+        """Install candidate-specific SVOO/MagCache methods in manifest order."""
+
+        policies = list(
+            getattr(pipeline, "_harness4h3_external_runtime_policies", [])
+            or getattr(getattr(pipeline, "transformer", None), "_harness4h3_external_runtime_policies", [])
+            or []
+        )
+        installed = []
+        for item in policies:
+            if not isinstance(item, Mapping) or not isinstance(item.get("args"), Mapping):
+                raise WanEvaluationError("external_runtime_policy_manifest_invalid")
+            operator = str(item.get("operator", ""))
+            config = dict(item["args"])
+            if operator == "svoo_attention":
+                self._install_runtime_attention_config(pipeline, config)
+            elif operator == "magcache":
+                self._install_runtime_cache_config(pipeline, config)
+            else:
+                raise WanEvaluationError("external_runtime_policy_unsupported: %s" % operator)
+            installed.append({"operator": operator, "args": config})
+        pipeline._harness4h3_runtime_policy_provenance = {
+            "policies": installed,
+            "installation_order": [item["operator"] for item in installed],
+        }
+        return pipeline
+
+    @staticmethod
+    def _has_persisted_external_policy(pipeline: Any, operator: str) -> bool:
+        policies = (
+            getattr(pipeline, "_harness4h3_external_runtime_policies", [])
+            or getattr(getattr(pipeline, "transformer", None), "_harness4h3_external_runtime_policies", [])
+            or []
+        )
+        return any(isinstance(item, Mapping) and item.get("operator") == operator for item in policies)
 
     @staticmethod
     def _move_pipeline_to_device(pipeline: Any, device: str) -> Any:
@@ -892,6 +1055,7 @@ class WanVideoEvaluator:
         *,
         prompt_embeds: Any = None,
         negative_prompt_embeds: Any = None,
+        callback_on_step_end: Optional[Callable[..., Mapping[str, Any]]] = None,
     ) -> Any:
         device = torch.device(self.config.device)
         if prompt_embeds is None or negative_prompt_embeds is None:
@@ -913,17 +1077,22 @@ class WanVideoEvaluator:
         if isinstance(sampling_policy, Mapping):
             requested_steps = min(requested_steps, int(sampling_policy.get("target_steps", requested_steps)))
         with torch.inference_mode():
+            pipeline_kwargs = {
+                "prompt": None,
+                "prompt_embeds": prompt_embeds.to(device),
+                "negative_prompt_embeds": negative_prompt_embeds.to(device),
+                "height": int(self._wan_spec["height"]),
+                "width": int(self._wan_spec["width"]),
+                "num_frames": int(self._wan_spec["num_frames"]),
+                "num_inference_steps": requested_steps,
+                "guidance_scale": float(self._wan_spec["guidance_scale"]),
+                "generator": generator,
+                "output_type": "latent",
+            }
+            if callback_on_step_end is not None:
+                pipeline_kwargs["callback_on_step_end"] = callback_on_step_end
             output = pipeline(
-                prompt=None,
-                prompt_embeds=prompt_embeds.to(device),
-                negative_prompt_embeds=negative_prompt_embeds.to(device),
-                height=int(self._wan_spec["height"]),
-                width=int(self._wan_spec["width"]),
-                num_frames=int(self._wan_spec["num_frames"]),
-                num_inference_steps=requested_steps,
-                guidance_scale=float(self._wan_spec["guidance_scale"]),
-                generator=generator,
-                output_type="latent",
+                **pipeline_kwargs,
             )
             vae_device = self._module_device(
                 pipeline.vae,

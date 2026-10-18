@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "split": "validation",
+  "cases": [
+    {"case_id": "red-fox-snow", "caption": "A cinematic shot of a red fox running through fresh snow.", "seeds": [7, 17]},
+    {"case_id": "sailboat-sunset", "caption": "A small sailboat crosses a calm lake at sunset, with a slow camera pan.", "seeds": [7, 17]},
+    {"case_id": "city-rain", "caption": "A cyclist rides along a rain-soaked city street at night, reflections shimmering on the pavement.", "seeds": [7, 17]}
+  ]
+}

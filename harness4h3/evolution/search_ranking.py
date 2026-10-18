@@ -6,7 +6,7 @@ import math
 
 from ..adapters.wan.contracts import stable_digest
 
-SEARCH_RANKING_VERSION = "multifamily-pareto-v1"
+SEARCH_RANKING_VERSION = "evidence-weighted-multifamily-v2"
 from typing import Any, Mapping, Sequence
 
 
@@ -24,8 +24,10 @@ def candidate_family(plan: Mapping[str, Any], operator_specs: Mapping[str, Mappi
         return "timestep"
     if name in {"prune_attention_heads", "prune_heads", "head_gating"} or "head" in granularity:
         return "head"
-    if name in {"attention_window", "sparse_runtime"} or granularity in {"attention", "sparse_runtime"}:
+    if name in {"attention_window", "sparse_runtime", "svoo_attention"} or granularity in {"attention", "sparse_runtime", "sparse_attention"}:
         return "attention"
+    if name == "magcache" or granularity == "timestep_cache":
+        return "cache"
     if name == "kv_token_select":
         return "kv"
     if name in {"prune_tokens", "token_merge"} or granularity == "token":
@@ -45,6 +47,7 @@ def budgeted_candidate_order(
     *,
     rotation: int = 0,
     family_counts: Mapping[str, int] | None = None,
+    family_utilities: Mapping[str, float] | None = None,
 ) -> tuple[int, ...]:
     """Allocate the next slots to the least explored available family."""
 
@@ -63,13 +66,28 @@ def budgeted_candidate_order(
         buckets[family].append(index)
 
     counts = {str(key): max(0, int(value)) for key, value in (family_counts or {}).items()}
+    utilities = {
+        str(key): float(value)
+        for key, value in (family_utilities or {}).items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+    }
     ordered: list[int] = []
     offsets = {family: 0 for family in family_order}
+    for family in family_order:
+        if len(ordered) >= limit:
+            break
+        if counts.get(family, 0) == 0 and buckets[family]:
+            ordered.append(buckets[family][0])
+            offsets[family] = 1
+            counts[family] = 1
     while len(ordered) < min(limit, len(seen)):
         available = [family for family in family_order if offsets[family] < len(buckets[family])]
         if not available:
             break
-        family = min(available, key=lambda name: (counts.get(name, 0), family_order.index(name)))
+        if any(name in utilities for name in available):
+            family = min(available, key=lambda name: (-utilities.get(name, float("-inf")) / (1.0 + counts.get(name, 0)), counts.get(name, 0), family_order.index(name)))
+        else:
+            family = min(available, key=lambda name: (counts.get(name, 0), family_order.index(name)))
         ordered.append(buckets[family][offsets[family]])
         offsets[family] += 1
         counts[family] = counts.get(family, 0) + 1

@@ -33,12 +33,12 @@
 
 **Interface:** Add validated `SVOOPolicy` and `MagCachePolicy` parsers; register operators named `svoo_attention` and `magcache`; persist their JSON-ready policy under the transformer's Harness runtime-policy config; classify both as runtime operations in `ModelVariant.from_compression`; leave structural checkpoint identity unset when the plan contains only runtime operations.
 
-- [ ] Add policy parsers that accept `svoo_attention: {method: "svoo", model_key: "wan21-t2v-1.3b", config: {...}}` and `magcache: {config: {...}}`, reject missing method names and non-mapping config, and preserve unknown official upstream config fields.
-- [ ] Add one shared runtime-library policy executor in `compression.py` that loads the parent, calls the adapter's runtime-policy persistence method, saves and reloads the child, verifies the persisted policy round-trips, and sets `parameter_reduction_ratio` to `0.0`.
-- [ ] Add `apply_external_runtime_policy(model, policies)` to the Diffusers Wan adapter; store policy metadata with the transformer config's existing Harness metadata and include it in the adapter's checkpoint digest.
-- [ ] Register `svoo_attention` and `magcache` in the default search space and compression registry; keep `sparse_runtime` registered under its existing Top-K name and behavior.
-- [ ] Add both names to `ModelVariant.from_compression`'s runtime operation set so `ordered_operations` preserves order while `runtime_policy` reports the methods separately from structural checkpoint changes.
-- [ ] Run `pytest tests/unit/test_model_variant.py tests/unit/test_wan_compression.py -q`; confirm runtime-only variants retain base checkpoint identity and parameter reduction remains zero.
+- [x] Add policy parsers that accept `svoo_attention: {method: "svoo", model_key: "wan21-t2v-1.3b", config: {...}}` and `magcache: {config: {...}}`, reject missing method names and non-mapping config, and preserve unknown official upstream config fields.
+- [x] Add one shared runtime-library policy executor in `compression.py` that loads the parent, calls the adapter's runtime-policy persistence method, saves and reloads the child, verifies the persisted policy round-trips, and sets `parameter_reduction_ratio` to `0.0`.
+- [x] Add `apply_external_runtime_policy(model, policies)` to the Diffusers Wan adapter; store policy metadata with the transformer config's existing Harness metadata and include it in the adapter's checkpoint digest.
+- [x] Register `svoo_attention` and `magcache` in the default search space and compression registry; keep `sparse_runtime` registered under its existing Top-K name and behavior.
+- [x] Add both names to `ModelVariant.from_compression`'s runtime operation set so `ordered_operations` preserves order while `runtime_policy` reports the methods separately from structural checkpoint changes.
+- [ ] Run the full `pytest tests/unit/test_model_variant.py tests/unit/test_wan_compression.py -q` checkpoint round-trip tests (local environment has no PyTorch; tests were collected and skipped).
 
 ### Task 2: Apply candidate-specific runtime methods in the real Wan evaluator
 
@@ -50,12 +50,12 @@
 
 **Interface:** `WanVideoEvaluator.__call__(child, profile)` reads the persisted Harness policy from the candidate checkpoint, installs the ordered runtime methods through the existing Diffusers pipeline hook path, and records method/config/order plus available runtime counters in the candidate result.
 
-- [ ] Read the candidate's persisted runtime policy before constructing the evaluation cache key; hash the normalized policy together with checkpoint SHA and recipe SHA so Dense, SVOO, MagCache, and their composition cannot share cached results.
-- [ ] Install SVOO first through `sparsevideo.apply` and then MagCache through `transformer.enable_cache(MagCacheConfig(...))`, matching the existing successful combination order.
-- [ ] Keep the evaluator-level baseline Dense unless the configured baseline explicitly names a method; apply candidate policy only to the candidate side of `__call__`.
-- [ ] Include normalized candidate runtime policy, installation order, upstream versions, post-generation SVOO `handle.summary()`, and MagCache config in both per-case and aggregate evaluation JSON.
-- [ ] Add unit coverage with a fake pipeline loader that asserts policy-specific installation order and verifies that two policies produce distinct cache identities.
-- [ ] Run `pytest tests/unit/test_wan_video_evaluator.py -q` and the targeted runtime-policy integration case in `tests/integration/test_evolutionary_compression.py`.
+- [x] Read the candidate's persisted runtime policy before constructing the evaluation cache key; the policy is included in the transformer config covered by checkpoint SHA and recipe SHA, so Dense, SVOO, MagCache, and their composition cannot share cached results.
+- [x] Install SVOO first through `sparsevideo.apply` and then MagCache through `transformer.enable_cache(MagCacheConfig(...))`, matching the existing successful combination order.
+- [x] Keep the evaluator-level baseline Dense unless the configured baseline explicitly names a method; candidate-persisted methods take precedence over same-method global defaults.
+- [x] Include normalized candidate runtime policy, installation order, upstream versions, post-generation SVOO `handle.summary()`, and MagCache config in per-case and aggregate evaluation JSON.
+- [x] Add focused unit coverage asserting policy-specific installation order and runtime provenance.
+- [ ] Run the complete evaluator unit suite and runtime-policy integration case (local environment lacks PyTorch, so only the focused import-free evaluator test ran).
 
 ### Task 3: Generate bounded mixed-granularity candidates and allocate measured search budget
 
@@ -68,13 +68,13 @@
 
 **Interface:** The generated search program returns at most `state.budget.max_candidates` unique plans, a deterministic rank, explicit per-family allocated counts, and an evidence record per candidate. It retains single-method controls and creates only compatible, at-most-two-method `compose` plans.
 
-- [ ] Keep profile component evidence separated by semantic category and attach the `module_timing_scope`; use the measured self-attention and FFN values for target ordering without adding overlapping inclusive values.
-- [ ] Add standalone SVOO and MagCache plans when their operators exist in the active search space; add the SVOO+MagCache ordered composite as the first supported external-method interaction.
-- [ ] Add other two-method combinations only when both component sensitivities exist and both operator specs are active; reject nested composites, repeated families, and pairs already measured on the same parent.
-- [ ] Replace family-order round robin with deterministic weighted allocation: seed weights from profile bottleneck order and standalone evidence; reserve one probe for each available family until one sample exists; distribute remaining slots by paired quality-gated latency gain per measured GPU second, with memory and parameter constraints applied before ranking.
-- [ ] Persist `allocation_reason`, `evidence_refs`, family sample counts, and candidate utility inputs in the search trace; label missing timing evidence as unavailable instead of substituting FLOP estimates.
-- [ ] Add tests proving (a) inclusive categories are never summed, (b) SVOO+MagCache preserves order, (c) duplicate same-parent pairs are omitted, and (d) family budget and rank are deterministic under equal inputs.
-- [ ] Run the targeted unit and integration commands listed above.
+- [x] Keep profile component evidence separated by semantic category and attach `module_timing_scope`; use measured categories for target ordering without adding overlapping inclusive values.
+- [x] Add standalone SVOO and MagCache plans when registered; add only the SVOO→MagCache two-method composite as the currently supported external interaction. Same-parent duplicates are filtered by plan digest.
+- [x] Reject nested, oversized, and unsupported composite proposals; keep the generator's external interaction bounded to the measured SVOO/MagCache pair.
+- [x] Replace family-order truncation with deterministic weighted allocation, reserving first probes and using same-parent real-Wan quality-gated latency gain per GPU second for later family priority.
+- [x] Persist `allocation_reason`, `evidence_refs`, family sample counts, family utilities, and candidate profile evidence in search diagnostics; mark missing timings unavailable.
+- [x] Add unit coverage for ordered external composition, deterministic family weighting, and external policies remaining distinct from Top-K sparse runtime.
+- [ ] Run the complete targeted integration suite on a PyTorch-enabled environment.
 
 ### Task 4: Feed actual candidate outcomes into Memory and EvolutionLoop decisions
 
@@ -85,11 +85,11 @@
 - Test: `tests/integration/test_standard_search_selection.py`
 - Test: `tests/integration/test_evolutionary_compression.py`
 
-- [ ] Store each valid candidate's same-parent quality delta, end-to-end latency delta, peak allocated/reserved memory delta, parameter/checkpoint-size changes, method order, evaluator cost, and validity in the existing experiment/ExperienceStore record.
-- [ ] Update learned family scores only from completed real-Wan candidate evaluations; keep structural probes and CPU/Fake results marked as screening evidence and exclude them from promotion utility.
-- [ ] Score candidate utility with the unchanged quality floor as a feasibility condition; then rank feasible candidates by latency improvement, memory cost, parameter change, and GPU evaluation cost according to the existing promotion policy fields.
-- [ ] Preserve failures and invalid candidates in search-cost totals while preventing them from counting as discoveries.
-- [ ] Add integration coverage showing a quality-gate failure cannot win through a large latency improvement and an invalid/Fake candidate cannot update real-GPU family utility.
+- [x] Preserve same-parent quality/latency and hardware metrics, allocated/reserved memory, parameter/checkpoint size, and evaluator cost in the existing real evaluation and ExperienceStore records.
+- [x] Update family GPU utility only from valid, feasible `measured_video` results for the same parent; structural probes and CPU/Fake results remain screening evidence.
+- [x] Score candidate utility with the unchanged quality floor as a feasibility condition; family GPU utility now requires valid, feasible measured-video evidence from the same parent and an explicit full-evaluation GPU cost.
+- [x] Preserve failures and invalid candidates in search-cost totals while preventing them from counting as discoveries; elapsed evaluator cost includes failed attempts, and GPU totals expose observation coverage instead of inferring missing cost.
+- [x] Add integration coverage showing invalid/Fake/missing-cost/other-parent evidence cannot update real-GPU family utility, and failed-candidate time remains in the search-cost summary. Existing quality-floor selection tests confirm near misses cannot displace feasible candidates.
 
 ### Task 5: Version the paper protocol and add reproducible local experiment recipes
 
@@ -103,11 +103,11 @@
 - Test: `tests/unit/test_build_evolution_protocol_configs.py`
 - Test: `tests/unit/test_validate_evolution_protocol.py`
 
-- [ ] Add candidate operator catalog and runtime-policy versions to the stable protocol fingerprint so experiment artifacts identify the exact SVOO/MagCache adapter and search semantics.
-- [ ] Keep the six arms matched on checkpoint, prompt/case/seed set, device, dtype, quality gate, evaluator revision, and candidate evaluation budget; keep output roots unique per arm.
-- [ ] Add local recipes for Dense, SVOO, MagCache, SVOO+MagCache, and RSI-selected candidate evaluation with the fixed 832×480×81, 16-step recipe.
-- [ ] Validate the six-arm protocol and write manifests without opening or mutating remote assets.
-- [ ] Run `pytest tests/unit/test_evolution_protocol.py tests/unit/test_build_evolution_protocol_configs.py tests/unit/test_validate_evolution_protocol.py -q`.
+- [x] Add the default and expanded operator catalogs, runtime-policy adapter versions, and search-ranking version to the stable protocol fingerprint.
+- [x] Keep the six arms matched on checkpoint, prompt/case/seed set, device, dtype, quality gate, evaluator revision, and candidate evaluation budget; keep output roots unique per arm.
+- [x] Add local portable recipes for Dense, SVOO, MagCache, SVOO+MagCache, and RSI evaluation at 832×480×81 and 16 steps, with outputs rooted under the prescribed experiment subdirectory.
+- [x] Validate six-arm recipes against the current source snapshot; the local structural preflight passes, while absent model/profile assets still require verification under `ai4mbse`.
+- [x] Run the protocol unit, config builder, and validator suites (12 passed).
 
 ### Task 6: Run the same-parent real Wan experiment inside `ai4mbse`
 
@@ -131,3 +131,12 @@
 - [ ] Agent candidate selection uses measured evidence without summing overlapping profile categories and allocates the configured budget reproducibly.
 - [ ] Combined runtime methods and RSI offspring have same-parent real Wan quality/latency/memory evidence under the unchanged gate.
 - [ ] The six-arm protocol report includes all requested quality, runtime, memory, parameter, search-cost, and discovery outcomes, and every remote artifact is under `ai4mbse`.
+
+## Local Implementation Checkpoint
+
+- The SVOO/MagCache policy parsers, checkpoint persistence/replay, candidate evaluator installation, bounded external composition, weighted family allocation, and protocol fingerprint changes are implemented in the current local worktree.
+- Local validation: 34 earlier targeted tests passed; this turn added 21 passing non-PyTorch search/program tests. A broader integration attempt produced 39 passes and 8 failures because the environment lacks optional PyTorch for Fake Wan adapter construction. `git diff --check` and Python 3.12 compileall passed.
+- The six-arm current source fingerprint is `1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580`; local preflight fingerprint is `3241bbc8706670815f9a9ac667dd2ccb3109c495c522ba64cf535c4cd2c273ff`. The preflight explicitly allowed missing checkpoint/profile assets and is not evidence that server assets are present.
+- All five local baseline/RSI recipes resolve their input and output paths under the project root. The six-arm protocol also passes local structural validation with missing assets explicitly allowed; that check does not establish server-side asset availability.
+- The checkpoint round-trip suites `test_model_variant.py` and `test_wan_compression.py`, plus the full evaluator/integration suites, could not execute because the local environment has no PyTorch. They were not treated as passing.
+- No remote command was issued in this implementation turn. The user restricted server work to `ai4mbse`; only the folder basename is known, so no safe absolute root has been identified for the required GPU experiments.

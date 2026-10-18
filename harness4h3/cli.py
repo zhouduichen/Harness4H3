@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from . import Harness4H3Error
 from .archive.store import CandidateStore
@@ -54,11 +55,12 @@ from .executor.local import LocalProcessExecutor
 from .target.profile import load_target_profile
 from research.experiments.remote_h3_closed_loop import RemoteCampaign
 from .adapters.wan import build_wan_adapter
+from .adapters.wan.contracts import CheckpointArtifact
 from .evolution import CompressionConfig, EvolutionLoop, FinalEvaluationRequest, FinalEvaluationRunner, PromotionPolicy, SearchPolicy, WanVideoEvaluationConfig, WanVideoEvaluator
 from .evolution.agent import AlgorithmAgent, build_algorithm_provider
 from .evolution.tica_calibration import TICACalibrationManifest, TICAEvaluationSplits
 from .operators.wan import build_wan_compression_registry
-from .profiler import CalibrationCorpus, CalibrationSampleSpec, FakeWanCalibrationProvider, profile_model
+from .profiler import CalibrationCorpus, CalibrationSampleSpec, FakeWanCalibrationProvider, ProfileReport, profile_model, profile_wan_execution
 from .sandbox import AlgorithmSandbox
 
 
@@ -116,6 +118,82 @@ def cmd_profile_wan(args: argparse.Namespace) -> int:
         channel_method=config.channel_method,
     )
     output = Path(args.output).resolve() if args.output else config.output_root / "profile.json"
+    if args.execution:
+        if config.backend != "diffusers":
+            raise ValueError("--execution requires a real Diffusers Wan checkpoint")
+        structure = adapter.inspect(model)
+        del model
+        gc.collect()
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        evaluator_config = WanVideoEvaluationConfig.from_mapping(
+            config.evaluator,
+            config.output_root / "execution-profile",
+        )
+        baseline = CheckpointArtifact(
+            path=config.checkpoint,
+            sha256=structure.checkpoint_sha256,
+            architecture=structure.architecture,
+            structure=structure,
+            metadata={"offline_simulation": False, "purpose": "real_execution_profile"},
+        )
+        evaluator = WanVideoEvaluator(evaluator_config, baseline=baseline)
+        profile_cases = config.evaluator.get("profile_cases")
+        if not isinstance(profile_cases, list) or not profile_cases:
+            profile_cases = [{
+                "width": int(evaluator._wan_spec["width"]),
+                "height": int(evaluator._wan_spec["height"]),
+                "num_frames": int(evaluator._wan_spec["num_frames"]),
+                "num_inference_steps": int(evaluator._wan_spec["num_inference_steps"]),
+                "capture_kernel_trace": True,
+            }]
+        head_policy = dict(config.evaluator.get("head_gating_policy") or {})
+        head_policy.setdefault("attention", "attn1")
+        head_policy.setdefault("keep_ratio", 0.75)
+        head_policy.setdefault("score", "weight_l2")
+        head_policy.setdefault("block_ids", ["block.%d" % index for index in range(structure.block_count)])
+        partial_cases: list[dict[str, Any]] = []
+
+        def save_profile_case(case_result: Any) -> None:
+            partial_cases.append(dict(case_result))
+            partial_report = report.to_dict()
+            partial_report["execution"] = {
+                "execution_schema_version": 1,
+                "available": True,
+                "offline_simulation": False,
+                "measurement_backend": "torch.cuda.Event+torch.profiler",
+                "device": evaluator_config.device,
+                "pipeline_device": evaluator_config.resolved_pipeline_device,
+                "dtype": evaluator_config.dtype,
+                "gpu_name": torch.cuda.get_device_name(torch.device(evaluator_config.device)),
+                "torch_version": str(torch.__version__),
+                "cuda_version": str(torch.version.cuda),
+                "diffusers_version": __import__("diffusers").__version__,
+                "checkpoint_sha256": baseline.sha256,
+                "source_revision": evaluator_config.source_revision,
+                "latency_method": "cuda_events_and_wall_clock_after_synchronization",
+                "diagnostic_method": "inclusive_module_forward_hooks_and_one_step_torch_profiler_trace",
+                "partial": True,
+                "cases": list(partial_cases),
+            }
+            ProfileReport.from_dict(partial_report).write_json(output)
+
+        execution = profile_wan_execution(
+            evaluator,
+            cases=profile_cases,
+            prompt=str(config.evaluator.get("profile_prompt", "A cinematic shot of a red fox running through fresh snow.")),
+            seed=int(config.evaluator.get("profile_seed", config.seed)),
+            warmup=int(config.evaluator.get("profile_warmup", 2)),
+            repeats=int(config.evaluator.get("profile_repeats", 5)),
+            trace_dir=output.parent / (output.stem + "-traces"),
+            head_gating_policy=head_policy,
+            on_case_complete=save_profile_case,
+        )
+        report_raw = report.to_dict()
+        report_raw["execution"] = execution
+        report = ProfileReport.from_dict(report_raw)
     report.write_json(output)
     _emit({"status": "success", "profile": str(output), "model": report.model, "provenance": report.provenance}, args.json)
     return 0
@@ -160,6 +238,50 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
     if int(args.rounds) <= 0:
         raise ValueError("rounds must be positive")
     adapter, parent = _compression_context(config)
+    execution_profile = None
+    execution_profile_path = None
+    profile_path_raw = str(config.evaluator.get("execution_profile", "")).strip()
+    if profile_path_raw:
+        execution_profile_path = Path(profile_path_raw).expanduser()
+        if not execution_profile_path.is_absolute():
+            execution_profile_path = Path(args.compression_config).resolve().parent / execution_profile_path
+        execution_report = ProfileReport.read_json(execution_profile_path)
+        execution_profile = dict(execution_report.execution)
+        if execution_profile.get("available") is not True or execution_profile.get("offline_simulation") is not False:
+            raise ValueError("execution_profile must contain completed real CUDA measurements")
+        if execution_profile.get("partial") is not False:
+            raise ValueError("execution_profile must explicitly confirm a complete measurement")
+        cases = execution_profile.get("cases")
+        expected_case_count = execution_profile.get("expected_case_count")
+        observed_case_count = execution_profile.get("observed_case_count")
+        if (
+            not isinstance(cases, list)
+            or not cases
+            or expected_case_count != len(cases)
+            or observed_case_count != len(cases)
+        ):
+            raise ValueError("execution_profile case count is incomplete or inconsistent")
+        for index, case in enumerate(cases):
+            recipe = case.get("recipe") if isinstance(case, Mapping) else None
+            latency = case.get("latency_median_ms") if isinstance(case, Mapping) else None
+            memory = case.get("memory") if isinstance(case, Mapping) else None
+            diagnostic = case.get("diagnostic_pass") if isinstance(case, Mapping) else None
+            if (
+                not isinstance(recipe, Mapping)
+                or not isinstance(latency, Mapping)
+                or not isinstance(memory, Mapping)
+                or not isinstance(diagnostic, Mapping)
+                or not isinstance(diagnostic.get("module_timings"), list)
+                or not isinstance(latency.get("full_generation_with_text_wall_ms"), (int, float))
+                or not isinstance(memory.get("peak_allocated_bytes_median"), int)
+            ):
+                raise ValueError("execution_profile case %d is missing real latency, memory, or module evidence" % index)
+        if str(execution_profile.get("checkpoint_sha256", "")) != parent.sha256:
+            raise ValueError("execution_profile checkpoint does not match the active Wan parent")
+        configured_device = str(config.evaluator.get("device", config.device))
+        if str(execution_profile.get("device", "")) != configured_device:
+            raise ValueError("execution_profile device does not match the Wan evaluator device")
+        execution_profile_path = str(execution_profile_path.resolve())
     controller = dict(config.controller)
     provider_name = str(controller.get("provider", "deterministic"))
     agent = AlgorithmAgent(
@@ -238,6 +360,8 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         frozen_expanded_search_space=config.frozen_expanded_search_space,
         candidate_screening=config.candidate_screening,
         algorithm_probe_samples=config.algorithm_probe_samples,
+        execution_profile=execution_profile,
+        execution_profile_path=execution_profile_path,
         phase=config.phase,
         tica_prune=config.tica_prune,
         tica_manifest=tica_manifest,
@@ -971,6 +1095,7 @@ def build_parser() -> argparse.ArgumentParser:
     profile_wan = subparsers.add_parser("profile-wan", help="profile a fake or Diffusers Wan DiT checkpoint")
     profile_wan.add_argument("--config", dest="compression_config", default="configs/evolutionary-compression.fake.yaml")
     profile_wan.add_argument("--output")
+    profile_wan.add_argument("--execution", action="store_true", help="run real CUDA Wan generation and operator profiling")
     _json_flag(profile_wan)
     profile_wan.set_defaults(handler=cmd_profile_wan)
 

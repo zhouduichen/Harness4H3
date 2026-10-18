@@ -101,6 +101,25 @@ def test_small_budget_pays_down_family_coverage_without_forcing_winner():
     assert visited == set(range(len(plans)))
 
 
+def test_real_gpu_family_utility_guides_remaining_budget_after_probe_coverage():
+    plans = [
+        {"operator": "svoo_attention"},
+        {"operator": "magcache"},
+        {"operator": "prune_blocks"},
+        {"operator": "svoo_attention", "args": {"config": {"x": 2}}},
+        {"operator": "magcache", "args": {"config": {"x": 2}}},
+    ]
+    result = budgeted_candidate_order(
+        plans,
+        list(range(len(plans))),
+        {},
+        4,
+        family_counts={"attention": 1, "cache": 1, "structure": 1},
+        family_utilities={"cache": 0.01, "attention": 0.2},
+    )
+    assert result == (0, 3, 1, 4)
+
+
 def test_pareto_front_uses_quality_efficiency_and_risk_and_excludes_invalid():
     rows = [
         {"valid": True, "quality_score": 0.95, "efficiency_reduction_ratio": 0.2, "risk_value": 0.05},

@@ -16,7 +16,7 @@ from ..h3.state import ModelState
 from ..memory.design_gene import DesignGene
 from ..memory.experience import ExperienceRecord, ExperienceStore
 from ..profiler import CalibrationCorpus, CalibrationSampleSpec, FakeWanCalibrationProvider, ProfileReport, profile_model
-from ..operators.wan import OperatorSpec, SearchSpaceManager, SearchSpaceVersion, default_search_space
+from ..operators.wan import OperatorSpec, SearchSpaceManager, SearchSpaceVersion, default_search_space, expanded_search_space
 from ..sandbox.policy import SourcePolicyError, validate_source
 from ..sandbox.runner import AlgorithmSandbox, CompressionPlan as SandboxCompressionPlan, SandboxResult
 from .agent import AlgorithmAgent
@@ -37,6 +37,103 @@ from ..operators.wan import WanCompressionRegistry, build_wan_compression_regist
 
 
 EvaluationFn = Callable[[CheckpointArtifact, Mapping[str, Any]], Mapping[str, Any]]
+
+
+def _algorithm_candidate_search_cost(records: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Summarize all attempted candidates without treating missing GPU cost as zero."""
+
+    def finite(value: Any) -> Optional[float]:
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+            return float(value)
+        return None
+
+    elapsed = []
+    gpu_costs = []
+    for item in records:
+        evaluation_cost = item.get("evaluation_cost")
+        hardware_metrics = item.get("hardware_metrics")
+        elapsed.append(finite(evaluation_cost.get("elapsed_s")) if isinstance(evaluation_cost, Mapping) else None)
+        gpu_costs.append(
+            finite(hardware_metrics.get("gpu_runtime_cost_s"))
+            if isinstance(hardware_metrics, Mapping)
+            else None
+        )
+    observed_gpu_costs = [value for value in gpu_costs if value is not None and value >= 0]
+    valid_count = sum(item.get("valid") is True for item in records)
+    feasible_count = sum(item.get("quality_feasible") is True for item in records)
+    return {
+        "candidate_count": len(records),
+        "valid_candidate_count": valid_count,
+        "invalid_candidate_count": len(records) - valid_count,
+        "quality_feasible_candidate_count": feasible_count,
+        "quality_infeasible_candidate_count": sum(
+            item.get("valid") is True and item.get("quality_feasible") is not True
+            for item in records
+        ),
+        "candidate_evaluation_elapsed_s_observed": sum(value for value in elapsed if value is not None),
+        "candidate_evaluation_cost_observations": sum(value is not None for value in elapsed),
+        "candidate_evaluation_cost_complete": bool(records) and all(value is not None for value in elapsed),
+        "gpu_runtime_cost_s_observed": sum(observed_gpu_costs),
+        "gpu_runtime_cost_observations": len(observed_gpu_costs),
+        "gpu_runtime_cost_complete": bool(records) and len(observed_gpu_costs) == len(records),
+        "gpu_runtime_cost_scope": "reported_per_candidate_only; missing GPU cost is not inferred",
+    }
+
+
+def _same_parent_family_gpu_utility(
+    history: list[Mapping[str, Any]],
+    parent_sha256: str,
+    operator_specs: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, float], dict[str, int]]:
+    """Use only feasible real-video outcomes with explicitly measured GPU cost."""
+
+    utilities: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for past in history:
+        if not isinstance(past, Mapping):
+            continue
+        decision = past.get("decision") if isinstance(past.get("decision"), Mapping) else {}
+        evaluation = past.get("evaluation") if isinstance(past.get("evaluation"), Mapping) else {}
+        measured_parent = decision.get(
+            "parent_checkpoint_sha256",
+            evaluation.get("baseline_checkpoint_sha256", ""),
+        )
+        if str(measured_parent) != str(parent_sha256):
+            continue
+        if (
+            evaluation.get("offline_simulation") is True
+            or evaluation.get("evaluation_status") != "measured_video"
+            or evaluation.get("valid") is not True
+            or decision.get("feasible") is not True
+        ):
+            continue
+        plan = decision.get("algorithm_plan")
+        if not isinstance(plan, Mapping):
+            plan = {"operator": decision.get("operator"), "args": decision.get("operator_args", {})}
+        if not isinstance(plan.get("args", {}), Mapping):
+            continue
+        candidate_hw = evaluation.get("hardware_metrics")
+        baseline_hw = evaluation.get(
+            "baseline_hardware_metrics",
+            decision.get("parent_hardware_metrics"),
+        )
+        if not isinstance(candidate_hw, Mapping) or not isinstance(baseline_hw, Mapping):
+            continue
+        candidate_latency = candidate_hw.get("inference_wall_time_s_mean", candidate_hw.get("latency_s"))
+        baseline_latency = baseline_hw.get("inference_wall_time_s_mean", baseline_hw.get("latency_s"))
+        gpu_cost = candidate_hw.get("gpu_runtime_cost_s")
+        if not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            for value in (candidate_latency, baseline_latency, gpu_cost)
+        ) or float(gpu_cost) <= 0:
+            continue
+        family = candidate_family(plan, operator_specs)
+        utility = max(0.0, float(baseline_latency) - float(candidate_latency)) / float(gpu_cost)
+        utilities[family] = max(utilities.get(family, 0.0), utility)
+        counts[family] = counts.get(family, 0) + 1
+    return utilities, counts
 
 
 @dataclass(frozen=True)
@@ -81,6 +178,8 @@ class EvolutionLoop:
         frozen_expanded_search_space: bool = False,
         candidate_screening: bool = False,
         algorithm_probe_samples: int = 3,
+        execution_profile: Optional[Mapping[str, Any]] = None,
+        execution_profile_path: Optional[str] = None,
         phase: str = "evolution",
         search_space_manager: Optional[SearchSpaceManager] = None,
         tica_prune: bool = False,
@@ -138,6 +237,8 @@ class EvolutionLoop:
         self.channel_method = str(channel_method).strip() or "weight"
         self.algorithm_improvement = bool(algorithm_improvement)
         self.algorithm_probe_samples = max(1, int(algorithm_probe_samples))
+        self.execution_profile = dict(execution_profile or {})
+        self.execution_profile_path = str(execution_profile_path or "")
         self.search_space_evolution = bool(search_space_evolution)
         self.frozen_expanded_search_space = bool(frozen_expanded_search_space)
         self.candidate_screening = bool(candidate_screening)
@@ -160,8 +261,14 @@ class EvolutionLoop:
 
         if not (self.search_space_evolution or self.frozen_expanded_search_space):
             return
-        self.search_space_manager = self.search_space_manager or SearchSpaceManager(self.output_root / "search-space")
+        initial_version = expanded_search_space() if self.frozen_expanded_search_space else None
+        self.search_space_manager = self.search_space_manager or SearchSpaceManager(
+            self.output_root / "search-space",
+            initial_version=initial_version,
+        )
         self.search_space_version = self.search_space_manager.active
+        if initial_version is not None and self.search_space_version.to_dict() != initial_version.to_dict():
+            raise ValueError("frozen_search_space_does_not_match_requested_catalog")
         self.registry = self.search_space_manager.registry_for(self.search_space_version, self.registry)
         self.sandbox.operator_specs.update(
             {
@@ -240,6 +347,21 @@ class EvolutionLoop:
         profile_path = round_dir / "profile.json"
         profile = self._load_or_profile(profile_path, parent_artifact)
         profile_payload: Mapping[str, Any] = profile.to_dict()
+        if (
+            self.execution_profile.get("available") is True
+            and self.execution_profile.get("offline_simulation") is False
+            and str(self.execution_profile.get("checkpoint_sha256", "")) == parent_artifact.sha256
+        ):
+            profile_payload = {**dict(profile_payload), "execution": self.execution_profile}
+            _write_json(
+                round_dir / "execution-profile-reference.json",
+                {
+                    "path": self.execution_profile_path,
+                    "checkpoint_sha256": parent_artifact.sha256,
+                    "device": self.execution_profile.get("device"),
+                    "execution_schema_version": self.execution_profile.get("execution_schema_version"),
+                },
+            )
         tica_profile_path = round_dir / "tica-profile.json"
         tica_search_path = round_dir / "tica-search.json"
         algorithm_trace_path = round_dir / "algorithm-program-trace.json"
@@ -264,8 +386,9 @@ class EvolutionLoop:
                     pinned_search_space = True
             except (KeyError, TypeError, ValueError):
                 pinned_search_space = False
-        if self.search_space_version is not None and not search_space_path.exists():
-            _write_json(search_space_path, self.search_space_version.to_dict())
+        if not search_space_path.exists():
+            fixed_search_space = self.search_space_version or default_search_space()
+            _write_json(search_space_path, fixed_search_space.to_dict())
         architecture = str(profile_payload["model"]["architecture"])
         skills = self.skill_hub.search(architecture=architecture, limit=8) if self.memory_enabled else []
         pareto_front = self._load_pareto_front()
@@ -956,6 +1079,8 @@ class EvolutionLoop:
         decision = {
             "status": decision_status,
             "parent_model_id": parent_candidate.id,
+            "parent_checkpoint_sha256": parent_artifact.sha256,
+            "parent_hardware_metrics": dict(parent_candidate.state.measured_metrics.get("hardware_metrics") or {}),
             "child_model_id": child_candidate.id,
             "algorithm_id": algorithm.algorithm_id,
             "algorithm_source_sha256": algorithm.source_sha256,
@@ -1738,6 +1863,16 @@ class EvolutionLoop:
 
         prior_best = max(prior_candidates, key=measured_recovery_key, default=None)
         initial_depth = min(2, max_depth) if prior_best is not None else 1
+        operator_specs = _operator_specs_from_search_space(block_search_space)
+        family_sample_counts: dict[str, int] = {}
+        for feedback in prior_feedback:
+            for family, count in dict(feedback.get("measured_family_counts", {}) or {}).items():
+                family_sample_counts[str(family)] = family_sample_counts.get(str(family), 0) + int(count)
+        family_gpu_evidence, gpu_evidence_counts = _same_parent_family_gpu_utility(
+            history, parent.sha256, operator_specs
+        )
+        for family, count in gpu_evidence_counts.items():
+            family_sample_counts[family] = family_sample_counts.get(family, 0) + count
         seen: set[str] = set(previous_digests)
         measured: list[Mapping[str, Any]] = []
         decisions: list[Mapping[str, Any]] = []
@@ -1763,6 +1898,8 @@ class EvolutionLoop:
             "quality_floor_basis": "parent_relative_probe_similarity_with_parent_baseline_1.0",
             "algorithm_improvement": bool(self.algorithm_improvement),
             "measured_candidates": prior_candidates,
+            "family_sample_counts": family_sample_counts,
+            "family_gpu_evidence": family_gpu_evidence,
             "frontier": prior_plans,
         }
         selected_plan: Optional[SandboxCompressionPlan] = None
@@ -1810,8 +1947,10 @@ class EvolutionLoop:
                 if isinstance(previous_plan, Mapping):
                     family = candidate_family(previous_plan, operator_specs)
                     family_counts[family] = family_counts.get(family, 0) + 1
+            candidate_diagnostics = dict(decision.diagnostics)
             evaluation_order = budgeted_candidate_order(
                 decision.plans, eligible, operator_specs, remaining, family_counts=family_counts,
+                family_utilities=candidate_diagnostics.get("family_gpu_utility", family_gpu_evidence),
             )
             skipped.extend(
                 {"depth": depth, "candidate_index": index, "plan": decision.plans[index], "plan_digest": stable_digest(decision.plans[index]), "reason": "budget"}
@@ -1896,6 +2035,7 @@ class EvolutionLoop:
                     "hardware_metrics",
                     "probe_coverage",
                     "ranking_evidence",
+                    "evaluation_cost",
                 ):
                     if key in metrics:
                         record[key] = metrics[key]
@@ -1924,6 +2064,8 @@ class EvolutionLoop:
                 "quality_floor_basis": "parent_relative_probe_similarity_with_parent_baseline_1.0",
                 "algorithm_improvement": bool(self.algorithm_improvement),
                 "measured_candidates": depth_records,
+                "family_sample_counts": family_sample_counts,
+                "family_gpu_evidence": family_gpu_evidence,
                 "frontier": [dict(item["plan"]) for item in recoverable],
             }
 
@@ -1958,6 +2100,7 @@ class EvolutionLoop:
             "prior_measurement_candidate_count": len(prior_candidates),
             "initial_search_depth": initial_depth,
             "candidate_results": measured,
+            "search_cost": _algorithm_candidate_search_cost(measured),
             "valid_candidate_count": sum(row.get("valid") is True for row in measured),
             "quality_feasible_candidate_count": sum(measured_candidate_key(row) is not None for row in measured),
             "pareto_front_indices": list(pareto_indices),

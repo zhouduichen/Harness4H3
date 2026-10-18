@@ -1,0 +1,209 @@
+{
+  "cases": [
+    {
+      "caption": "A cinematic shot of a red fox running through fresh snow.",
+      "case_id": "wan-832x480x81-red-fox",
+      "generation_wall_time_s": 62.94668748928234,
+      "latency_measurement_method": "denoising+vae_decode_with_case_cached_prompt_embeddings",
+      "latency_samples_s": [
+        61.514896974898875,
+        63.38730040192604,
+        62.94668748928234
+      ],
+      "latency_warmup": 1,
+      "peak_memory_gb": 21.454524517059326,
+      "prompt_embeddings_cached": true,
+      "quality": {
+        "aggregate": 0.6772294580936431,
+        "backend": "clip_temporal",
+        "model_path": "/data/models/clip-vit-large-patch14-336",
+        "motion": 0.1711837649345398,
+        "semantic": 0.6653286218643188,
+        "semantic_mean": 0.6653286218643188,
+        "semantic_p10": 0.6508780121803284,
+        "temporal": 0.9719052314758301,
+        "visual_metrics": {
+          "block_variance_mean": 138.60889053344727,
+          "block_variance_p10": 132.06631469726562,
+          "frame_difference_mean": 0.04279594123363495,
+          "frame_difference_p10": 0.03862758353352547,
+          "laplacian_std_mean": 6.827871680259705,
+          "laplacian_std_p10": 5.600536346435547,
+          "low_texture_frame_ratio": 0.0,
+          "spatial_gradient_mean": 1.9948906898498535,
+          "spatial_gradient_p10": 1.5786385536193848
+        },
+        "visual_quality_gate": {
+          "enabled": true,
+          "failures": [],
+          "low_texture_frame_ratio": 0.0,
+          "passed": true,
+          "thresholds": {
+            "max_low_texture_frame_ratio": 0.75,
+            "min_block_variance": 1.0,
+            "min_frame_difference": 0.001,
+            "min_laplacian_std": 0.5,
+            "min_spatial_gradient": 0.05
+          },
+          "version": "visual-structure-v1"
+        }
+      },
+      "runtime_attention": {},
+      "runtime_cache": {
+        "config": {
+          "calibrate": false,
+          "mag_ratios": [
+            1.0,
+            1.0043765903,
+            0.9673218131,
+            0.9690133333,
+            0.9731017649,
+            0.9714230895,
+            0.9706552029,
+            0.9636064172,
+            0.9583126307,
+            0.952772826,
+            0.9466742873,
+            0.9315682659,
+            0.9141220748,
+            0.8960618079,
+            0.8554908037,
+            0.7984179854
+          ],
+          "max_skip_steps": 4,
+          "num_inference_steps": 16,
+          "retention_ratio": 0.2,
+          "threshold": 0.12
+        },
+        "diffusers_version": "0.39.0",
+        "method": "magcache"
+      },
+      "seed": 7,
+      "validity": {
+        "finite_pixels": true,
+        "frames": 81,
+        "height": 480,
+        "valid": true,
+        "video_path": "/data/models/harness4h3-wan-runtime-baselines-20261018/magcache/real-evaluation/evaluations/dab2db83db4cd1f9c2a7ddb46e169711d688c84702bf78c589a3d3f3ce24776d/acdc3b973700c0aef8b4d90fd60c04a6e09435a362a3b52186a2c5c64945b551/videos/wan-832x480x81-red-fox/seed_7/wan.mp4",
+        "visual_quality_gate_passed": true,
+        "width": 832
+      },
+      "video_path": "/data/models/harness4h3-wan-runtime-baselines-20261018/magcache/real-evaluation/evaluations/dab2db83db4cd1f9c2a7ddb46e169711d688c84702bf78c589a3d3f3ce24776d/acdc3b973700c0aef8b4d90fd60c04a6e09435a362a3b52186a2c5c64945b551/videos/wan-832x480x81-red-fox/seed_7/wan.mp4"
+    }
+  ],
+  "checkpoint_sha256": "dab2db83db4cd1f9c2a7ddb46e169711d688c84702bf78c589a3d3f3ce24776d",
+  "dtype": "bfloat16",
+  "evaluation_manifest_sha256": "a0099099abeebd85752ced4660a0baddf1d7b87b04c672bea12aace939784bfc",
+  "evaluation_status": "measured_video",
+  "evaluator_version": "wan-video-evaluator-v9",
+  "generation_device": "cuda:3",
+  "hardware_metrics": {
+    "case_count": 1,
+    "dtype": "bfloat16",
+    "fixed_component_size_gb": {
+      "text_encoder": 21.163090201094747,
+      "text_encoder_2": null,
+      "tokenizer": 0.019981161691248417,
+      "tokenizer_2": null,
+      "vae": 0.47273246198892593
+    },
+    "generation_device": "cuda:3",
+    "gpu_runtime_cost_s": 187.84888486610726,
+    "hardware_measurement_scope": "generation_device_only",
+    "inference_wall_time_s_mean": 62.94668748928234,
+    "inference_wall_time_s_median": 62.94668748928234,
+    "inference_wall_time_s_total": 62.94668748928234,
+    "input_shape": {
+      "height": 480,
+      "num_frames": 81,
+      "width": 832
+    },
+    "latency_measurement_method": "denoising+vae_decode_with_case_cached_prompt_embeddings",
+    "model_size_gb": 26.94842732604593,
+    "model_size_scope": "pipeline_logical_unique_files",
+    "parameter_count": 1418996800,
+    "parameter_count_scope": "transformer",
+    "peak_memory_available": true,
+    "peak_memory_device": "cuda:3",
+    "peak_memory_gb_max": 21.454524517059326,
+    "pipeline_device": "cuda:3",
+    "pipeline_model_size_gb": 26.94842732604593,
+    "prompt_encoding_included": false,
+    "runtime_attention": {},
+    "runtime_cache": {
+      "config": {
+        "calibrate": false,
+        "mag_ratios": [
+          1.0,
+          1.0043765903,
+          0.9673218131,
+          0.9690133333,
+          0.9731017649,
+          0.9714230895,
+          0.9706552029,
+          0.9636064172,
+          0.9583126307,
+          0.952772826,
+          0.9466742873,
+          0.9315682659,
+          0.9141220748,
+          0.8960618079,
+          0.8554908037,
+          0.7984179854
+        ],
+        "max_skip_steps": 4,
+        "num_inference_steps": 16,
+        "retention_ratio": 0.2,
+        "threshold": 0.12
+      },
+      "diffusers_version": "0.39.0",
+      "method": "magcache"
+    },
+    "transformer_model_size_gb": 5.286321424879134,
+    "transformer_parameter_count": 1418996800
+  },
+  "offline_simulation": false,
+  "pipeline_device": "cuda:3",
+  "promotable": true,
+  "quality_metrics": {
+    "motion": 0.1711837649345398,
+    "score_type": "clip_temporal",
+    "semantic": 0.6653286218643188,
+    "temporal": 0.9719052314758301
+  },
+  "quality_score": 0.6772294580936431,
+  "resumed_case_count": 0,
+  "runtime_attention": {},
+  "runtime_cache": {
+    "config": {
+      "calibrate": false,
+      "mag_ratios": [
+        1.0,
+        1.0043765903,
+        0.9673218131,
+        0.9690133333,
+        0.9731017649,
+        0.9714230895,
+        0.9706552029,
+        0.9636064172,
+        0.9583126307,
+        0.952772826,
+        0.9466742873,
+        0.9315682659,
+        0.9141220748,
+        0.8960618079,
+        0.8554908037,
+        0.7984179854
+      ],
+      "max_skip_steps": 4,
+      "num_inference_steps": 16,
+      "retention_ratio": 0.2,
+      "threshold": 0.12
+    },
+    "diffusers_version": "0.39.0",
+    "method": "magcache"
+  },
+  "source_revision": "1290ae7+sorted-py-sha256-v1:f234b97081746f27cfcf0fabd5af888ce6bd9076a29c6959df2f395437044b9a",
+  "status": "success",
+  "valid": true
+}

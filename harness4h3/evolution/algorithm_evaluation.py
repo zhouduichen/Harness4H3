@@ -376,6 +376,10 @@ class AlgorithmModelEvaluator:
             runtime_output_metrics = None
             runtime_metadata = child_structure.metadata if isinstance(child_structure.metadata, Mapping) else {}
             has_runtime_operation = bool(runtime_metadata.get("runtime_operations"))
+            external_runtime_policy = any(
+                isinstance(item, Mapping) and item.get("operator") in {"svoo_attention", "magcache"}
+                for item in runtime_metadata.get("runtime_operations", ())
+            )
             runtime_probe = getattr(self.adapter, "runtime_profile", None)
             if callable(runtime_probe) and has_runtime_operation:
                 try:
@@ -451,7 +455,7 @@ class AlgorithmModelEvaluator:
             }
             efficiency_score = efficiency_reduction_ratio(search_metrics)
             runtime_reduction = efficiency_reduction_ratio({"runtime_execution": runtime_execution})
-            if has_runtime_operation and parameter_reduction <= 0 and runtime_reduction <= 0:
+            if has_runtime_operation and parameter_reduction <= 0 and runtime_reduction <= 0 and not external_runtime_policy:
                 return {**self._invalid("runtime_policy_no_observed_reduction", started, result, compression=compression), "runtime_execution": runtime_execution, "probe_coverage": probe_coverage}
 
             return {
@@ -459,6 +463,7 @@ class AlgorithmModelEvaluator:
                 "offline_simulation": bool(self.parent.metadata.get("offline_simulation", False)),
                 "evidence_level": "cpu_fake_quality_proxy" if bool(self.parent.metadata.get("offline_simulation", False)) else "real_wan_structure",
                 "evaluation_status": "cpu_fake_algorithm_measurement" if bool(self.parent.metadata.get("offline_simulation", False)) else "real_wan_structure_measurement",
+                "requires_real_video_evaluation": bool(external_runtime_policy),
                 "parent_checkpoint_sha256": self.parent.sha256,
                 "child_checkpoint_sha256": compression.child_checkpoint.sha256,
                 "plan_digest": plan_digest,

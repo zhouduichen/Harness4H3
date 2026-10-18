@@ -1,0 +1,908 @@
+{
+  "case_count": 5,
+  "cases": [
+    {
+      "kernel_trace": {
+        "available": true,
+        "capture_scope": "second_denoising_step_after_one_profiler_warmup_step",
+        "filtered_cuda_operators": [
+          {
+            "calls": 420,
+            "category": "projection_or_matrix_multiply",
+            "operator": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_relu_f2f_stages_32x1_tn",
+            "self_cuda_time_us": 159598.59299999973
+          },
+          {
+            "calls": 60,
+            "category": "attention_kernel",
+            "operator": "void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<128, 128, 32, 4, false, false, cutlass::bfloat16_t, Flash_kernel_traits<128, 128, 32, 4, cutlass::bfloat16_t> >, false, false, false, false, true, true, false, false>(pytorch_flash::Flash_fwd_params)",
+            "self_cuda_time_us": 107268.43400000028
+          },
+          {
+            "calls": 60,
+            "category": "projection_or_matrix_multiply",
+            "operator": "ampere_bf16_s1688gemm_bf16_64x128_sliced1x2_ldg8_relu_f2f_tn",
+            "self_cuda_time_us": 76484.78000000013
+          },
+          {
+            "calls": 540,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 16596.156999999737
+          },
+          {
+            "calls": 62,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::GeluCUDAKernelImpl(at::TensorIteratorBase&, at::native::GeluType)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::GeluCUDAKernelImpl(at::TensorIteratorBase&, at::native::GeluType)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
+            "self_cuda_time_us": 15764.586999999898
+          },
+          {
+            "calls": 424,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "self_cuda_time_us": 13363.465000000331
+          },
+          {
+            "calls": 434,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul>)",
+            "self_cuda_time_us": 11209.925999999447
+          },
+          {
+            "calls": 182,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<float, float, false>(int, float, float const*, float const*, float const*, float*, float*, float*)",
+            "self_cuda_time_us": 7370.257000000061
+          },
+          {
+            "calls": 240,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<c10::BFloat16, float, true>(int, float, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, float*, float*, c10::BFloat16*)",
+            "self_cuda_time_us": 7099.209000000119
+          },
+          {
+            "calls": 60,
+            "category": "attention_kernel",
+            "operator": "void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<128, 128, 32, 4, false, false, cutlass::bfloat16_t, Flash_kernel_traits<128, 128, 32, 4, cutlass::bfloat16_t> >, false, false, false, false, false, true, false, false>(pytorch_flash::Flash_fwd_params)",
+            "self_cuda_time_us": 5509.155999999882
+          },
+          {
+            "calls": 192,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 5232.353999999747
+          },
+          {
+            "calls": 305,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+            "self_cuda_time_us": 4562.440000000055
+          },
+          {
+            "calls": 62,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "self_cuda_time_us": 3417.2200000001867
+          },
+          {
+            "calls": 240,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 3109.3099999999595
+          },
+          {
+            "calls": 122,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<float> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<float> const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<float> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<float> const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 2791.363000000079
+          },
+          {
+            "calls": 122,
+            "category": "projection_or_matrix_multiply",
+            "operator": "ampere_bf16_s16816gemm_bf16_64x64_ldg8_relu_f2f_stages_64x5_tn",
+            "self_cuda_time_us": 2353.4350000000436
+          },
+          {
+            "calls": 422,
+            "category": "other_cuda_operator",
+            "operator": "Memset (Device)",
+            "self_cuda_time_us": 482.57100000012633
+          },
+          {
+            "calls": 128,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnSelf_add<float>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<float>, std::array<char*, 2ul>)",
+            "self_cuda_time_us": 259.4559999999806
+          },
+          {
+            "calls": 4,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 209.85900000002948
+          },
+          {
+            "calls": 4,
+            "category": "projection_or_matrix_multiply",
+            "operator": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8::Params)",
+            "self_cuda_time_us": 129.98599999999078
+          }
+        ],
+        "trace_path": "/data/models/harness4h3-wan-profiling-20261018/corrected-r2/profile-traces/dense-256x256-81f.json"
+      },
+      "latency_median_ms": {
+        "denoising_vae_cuda_event_ms": 8017.9150390625,
+        "denoising_vae_postprocess_wall_ms": 8017.925836611539,
+        "full_generation_with_text_wall_ms": 8078.792785294354,
+        "text_encoder_cuda_event_ms": 60.75747299194336,
+        "text_encoder_wall_ms": 60.72767125442624
+      },
+      "latency_samples": {
+        "denoising_vae_cuda_event_ms": [
+          7926.1416015625,
+          7934.392578125,
+          8017.9150390625,
+          8108.19873046875,
+          8180.38916015625
+        ],
+        "denoising_vae_postprocess_wall_ms": [
+          7926.133567932993,
+          7934.365174733102,
+          8017.925836611539,
+          8108.220065012574,
+          8180.406984407455
+        ],
+        "full_generation_with_text_wall_ms": [
+          7987.597279716283,
+          7994.988173246384,
+          8078.792785294354,
+          8168.378370814025,
+          8241.91165016964
+        ],
+        "text_encoder_cuda_event_ms": [
+          61.35103988647461,
+          60.47817611694336,
+          60.75747299194336,
+          60.045536041259766,
+          61.388832092285156
+        ],
+        "text_encoder_wall_ms": [
+          61.322157736867666,
+          60.43806718662381,
+          60.72767125442624,
+          60.0155652500689,
+          61.3588378764689
+        ]
+      },
+      "memory_bytes": {
+        "measurement_scope": "cuda:3",
+        "model_resident_allocated_bytes": 14474130944,
+        "peak_allocated_bytes_median": 15265031168,
+        "peak_reserved_bytes_median": 15848177664
+      },
+      "parameter_count": 1418996800,
+      "prompt": "A cinematic shot of a red fox running through fresh snow.",
+      "recipe": {
+        "height": 256,
+        "num_frames": 81,
+        "num_inference_steps": 16,
+        "width": 256
+      },
+      "repeats": 5,
+      "seed": 7,
+      "transformer_diagnostic": {
+        "category_cuda_time_ms_total_inclusive": {
+          "cross_attention": 699.6407365002669,
+          "cross_attention_output_projection": 233.2907840013504,
+          "cross_attention_to_k_projection": 21.51248013973236,
+          "cross_attention_to_q_projection": 236.19369632005692,
+          "cross_attention_to_v_projection": 20.60876785032451,
+          "ffn": 6681.718052655342,
+          "self_attention": 3167.0400957824895,
+          "self_attention_output_projection": 230.9274242222309,
+          "self_attention_to_k_projection": 232.24723209440708,
+          "self_attention_to_q_projection": 234.82505556941032,
+          "self_attention_to_v_projection": 232.62169602513313,
+          "transformer_block": 7277.304026603699,
+          "transformer_forward": 7304.472625732422
+        },
+        "module_timing_scope": "inclusive_forward_hook_cuda_event",
+        "postprocess_wall_time_ms_instrumented": 123.83069982752204,
+        "step_count_observed": 16,
+        "step_timing_scope": "synchronized_callback_intervals; first interval includes pipeline and scheduler setup",
+        "step_wall_time_ms_first": 431.6840907558799,
+        "step_wall_time_ms_last": 464.6412981674075,
+        "step_wall_time_ms_max": 471.5059930458665,
+        "step_wall_time_ms_min": 431.6840907558799,
+        "vae_decode_cuda_time_ms_instrumented": 876.0097045898438
+      },
+      "variant": "dense",
+      "warmup": 2
+    },
+    {
+      "kernel_trace": {
+        "available": true,
+        "capture_scope": "second_denoising_step_after_one_profiler_warmup_step",
+        "filtered_cuda_operators": [
+          {
+            "calls": 120,
+            "category": "attention_kernel",
+            "operator": "void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<128, 128, 32, 4, false, false, cutlass::bfloat16_t, Flash_kernel_traits<128, 128, 32, 4, cutlass::bfloat16_t> >, false, false, false, false, false, true, false, false>(pytorch_flash::Flash_fwd_params)",
+            "self_cuda_time_us": 239500.80599999972
+          },
+          {
+            "calls": 420,
+            "category": "projection_or_matrix_multiply",
+            "operator": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_relu_f2f_stages_32x1_tn",
+            "self_cuda_time_us": 232980.025999999
+          },
+          {
+            "calls": 60,
+            "category": "projection_or_matrix_multiply",
+            "operator": "ampere_bf16_s1688gemm_bf16_128x64_sliced1x2_ldg8_relu_f2f_tn",
+            "self_cuda_time_us": 108665.41800000021
+          },
+          {
+            "calls": 540,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 38845.04599999926
+          },
+          {
+            "calls": 434,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul>)",
+            "self_cuda_time_us": 30350.729999999472
+          },
+          {
+            "calls": 62,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::GeluCUDAKernelImpl(at::TensorIteratorBase&, at::native::GeluType)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::GeluCUDAKernelImpl(at::TensorIteratorBase&, at::native::GeluType)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
+            "self_cuda_time_us": 23770.083
+          },
+          {
+            "calls": 424,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "self_cuda_time_us": 21884.485000000128
+          },
+          {
+            "calls": 240,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 12779.679999999686
+          },
+          {
+            "calls": 192,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 12450.807000000503
+          },
+          {
+            "calls": 182,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<float, float, false>(int, float, float const*, float const*, float const*, float*, float*, float*)",
+            "self_cuda_time_us": 11827.565999999926
+          },
+          {
+            "calls": 240,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<c10::BFloat16, float, true>(int, float, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, float*, float*, c10::BFloat16*)",
+            "self_cuda_time_us": 10739.200000000415
+          },
+          {
+            "calls": 305,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+            "self_cuda_time_us": 8967.74999999978
+          },
+          {
+            "calls": 122,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<float> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<float> const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<float> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<float> const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 6611.957999999611
+          },
+          {
+            "calls": 62,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "self_cuda_time_us": 5671.877000000184
+          },
+          {
+            "calls": 122,
+            "category": "projection_or_matrix_multiply",
+            "operator": "ampere_bf16_s16816gemm_bf16_64x64_ldg8_relu_f2f_stages_64x5_tn",
+            "self_cuda_time_us": 2363.324000000165
+          },
+          {
+            "calls": 422,
+            "category": "other_cuda_operator",
+            "operator": "Memset (Device)",
+            "self_cuda_time_us": 572.8759999995616
+          },
+          {
+            "calls": 128,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnSelf_add<float>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<float>, std::array<char*, 2ul>)",
+            "self_cuda_time_us": 364.8020000002989
+          },
+          {
+            "calls": 4,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 295.90900000007355
+          },
+          {
+            "calls": 4,
+            "category": "projection_or_matrix_multiply",
+            "operator": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8::Params)",
+            "self_cuda_time_us": 131.07400000004577
+          },
+          {
+            "calls": 2,
+            "category": "other_cuda_operator",
+            "operator": "std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, float, false, true, true, false, 6, false, cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16>, float> >(cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16 const>, cublasGemvTensorStridedBatched<__nv_bfloat16>, float>)",
+            "self_cuda_time_us": 85.05799999996793
+          }
+        ],
+        "trace_path": "/data/models/harness4h3-wan-profiling-20261018/corrected-r2/profile-traces/dense-832x480-17f.json"
+      },
+      "latency_median_ms": {
+        "denoising_vae_cuda_event_ms": 13718.853515625,
+        "denoising_vae_postprocess_wall_ms": 13718.943804036826,
+        "full_generation_with_text_wall_ms": 13800.395702011883,
+        "text_encoder_cuda_event_ms": 81.30569458007812,
+        "text_encoder_wall_ms": 81.26581879332662
+      },
+      "latency_samples": {
+        "denoising_vae_cuda_event_ms": [
+          13553.98046875,
+          13718.853515625,
+          13985.8984375
+        ],
+        "denoising_vae_postprocess_wall_ms": [
+          13554.072410799563,
+          13718.943804036826,
+          13985.964891966432
+        ],
+        "full_generation_with_text_wall_ms": [
+          13637.001847848296,
+          13800.395702011883,
+          14067.130082286894
+        ],
+        "text_encoder_cuda_event_ms": [
+          82.80242919921875,
+          81.30569458007812,
+          80.9958724975586
+        ],
+        "text_encoder_wall_ms": [
+          82.76605885475874,
+          81.26581879332662,
+          80.95976011827588
+        ]
+      },
+      "memory_bytes": {
+        "measurement_scope": "cuda:3",
+        "model_resident_allocated_bytes": 14479636480,
+        "peak_allocated_bytes_median": 19033740800,
+        "peak_reserved_bytes_median": 21615345664
+      },
+      "parameter_count": 1418996800,
+      "prompt": "A cinematic shot of a red fox running through fresh snow.",
+      "recipe": {
+        "height": 480,
+        "num_frames": 17,
+        "num_inference_steps": 16,
+        "width": 832
+      },
+      "repeats": 3,
+      "seed": 7,
+      "transformer_diagnostic": {
+        "category_cuda_time_ms_total_inclusive": {
+          "cross_attention": 958.5375365783693,
+          "cross_attention_output_projection": 327.7885116636753,
+          "cross_attention_to_k_projection": 20.911967985332012,
+          "cross_attention_to_q_projection": 330.5608957707882,
+          "cross_attention_to_v_projection": 20.423455994576216,
+          "ffn": 10640.152007470024,
+          "self_attention": 6161.650530108367,
+          "self_attention_output_projection": 325.0944636762142,
+          "self_attention_to_k_projection": 328.1436480283737,
+          "self_attention_to_q_projection": 332.264991492033,
+          "self_attention_to_v_projection": 327.7672317326069,
+          "transformer_block": 12741.025020599365,
+          "transformer_forward": 12776.544647216797
+        },
+        "module_timing_scope": "inclusive_forward_hook_cuda_event",
+        "postprocess_wall_time_ms_instrumented": 756.7096292041242,
+        "step_count_observed": 16,
+        "step_timing_scope": "synchronized_callback_intervals; first interval includes pipeline and scheduler setup",
+        "step_wall_time_ms_first": 744.9904908426106,
+        "step_wall_time_ms_last": 781.9800800643861,
+        "step_wall_time_ms_max": 1092.9459370672703,
+        "step_wall_time_ms_min": 744.9904908426106,
+        "vae_decode_cuda_time_ms_instrumented": 1377.23876953125
+      },
+      "variant": "dense",
+      "warmup": 1
+    },
+    {
+      "kernel_trace": {
+        "available": false,
+        "capture_scope": null,
+        "filtered_cuda_operators": [],
+        "trace_path": null
+      },
+      "latency_median_ms": {
+        "denoising_vae_cuda_event_ms": 39420.82421875,
+        "denoising_vae_postprocess_wall_ms": 39421.180355362594,
+        "full_generation_with_text_wall_ms": 39503.66951292381,
+        "text_encoder_cuda_event_ms": 84.1046371459961,
+        "text_encoder_wall_ms": 84.0712240897119
+      },
+      "latency_samples": {
+        "denoising_vae_cuda_event_ms": [
+          38909.90234375,
+          39420.82421875,
+          39778.57421875
+        ],
+        "denoising_vae_postprocess_wall_ms": [
+          38910.29339004308,
+          39421.180355362594,
+          39778.96944619715
+        ],
+        "full_generation_with_text_wall_ms": [
+          38994.93775004521,
+          39503.66951292381,
+          39863.2114646025
+        ],
+        "text_encoder_cuda_event_ms": [
+          84.49817657470703,
+          82.31219482421875,
+          84.1046371459961
+        ],
+        "text_encoder_wall_ms": [
+          84.45753995329142,
+          82.27363973855972,
+          84.0712240897119
+        ]
+      },
+      "memory_bytes": {
+        "measurement_scope": "cuda:3",
+        "model_resident_allocated_bytes": 14480422912,
+        "peak_allocated_bytes_median": 19105984000,
+        "peak_reserved_bytes_median": 21615345664
+      },
+      "parameter_count": 1418996800,
+      "prompt": "A cinematic shot of a red fox running through fresh snow.",
+      "recipe": {
+        "height": 480,
+        "num_frames": 41,
+        "num_inference_steps": 16,
+        "width": 832
+      },
+      "repeats": 3,
+      "seed": 7,
+      "transformer_diagnostic": {
+        "category_cuda_time_ms_total_inclusive": {
+          "cross_attention": 1846.9270373684121,
+          "cross_attention_output_projection": 618.4511672854424,
+          "cross_attention_to_k_projection": 19.008543998003006,
+          "cross_attention_to_q_projection": 622.8289275765419,
+          "cross_attention_to_v_projection": 142.67270371317863,
+          "ffn": 18506.819594603963,
+          "self_attention": 20534.13563196489,
+          "self_attention_output_projection": 631.7092158198357,
+          "self_attention_to_k_projection": 603.45270383358,
+          "self_attention_to_q_projection": 603.7375043034554,
+          "self_attention_to_v_projection": 604.0077751874924,
+          "transformer_block": 35734.36861419678,
+          "transformer_forward": 35814.88146972656
+        },
+        "module_timing_scope": "inclusive_forward_hook_cuda_event",
+        "postprocess_wall_time_ms_instrumented": 765.1467393152416,
+        "step_count_observed": 16,
+        "step_timing_scope": "synchronized_callback_intervals; first interval includes pipeline and scheduler setup",
+        "step_wall_time_ms_first": 2308.0442510545254,
+        "step_wall_time_ms_last": 2223.8046540878713,
+        "step_wall_time_ms_max": 2308.0442510545254,
+        "step_wall_time_ms_min": 2223.8046540878713,
+        "vae_decode_cuda_time_ms_instrumented": 3309.254638671875
+      },
+      "variant": "dense",
+      "warmup": 1
+    },
+    {
+      "kernel_trace": {
+        "available": false,
+        "capture_scope": null,
+        "filtered_cuda_operators": [],
+        "trace_path": null
+      },
+      "latency_median_ms": {
+        "denoising_vae_cuda_event_ms": 97235.6953125,
+        "denoising_vae_postprocess_wall_ms": 97236.8022822775,
+        "full_generation_with_text_wall_ms": 97321.20443088934,
+        "text_encoder_cuda_event_ms": 84.49555206298828,
+        "text_encoder_wall_ms": 84.46209412068129
+      },
+      "latency_samples": {
+        "denoising_vae_cuda_event_ms": [
+          97527.6171875,
+          97235.6953125,
+          96699.0390625
+        ],
+        "denoising_vae_postprocess_wall_ms": [
+          97528.7182321772,
+          97236.8022822775,
+          96700.15305606648
+        ],
+        "full_generation_with_text_wall_ms": [
+          97617.94098326936,
+          97321.20443088934,
+          96784.8383039236
+        ],
+        "text_encoder_cuda_event_ms": [
+          89.03663635253906,
+          84.22124481201172,
+          84.49555206298828
+        ],
+        "text_encoder_wall_ms": [
+          88.98702170699835,
+          84.1832491569221,
+          84.46209412068129
+        ]
+      },
+      "memory_bytes": {
+        "measurement_scope": "cuda:3",
+        "model_resident_allocated_bytes": 14488616960,
+        "peak_allocated_bytes_median": 19220833792,
+        "peak_reserved_bytes_median": 21615345664
+      },
+      "parameter_count": 1418996800,
+      "prompt": "A cinematic shot of a red fox running through fresh snow.",
+      "recipe": {
+        "height": 480,
+        "num_frames": 81,
+        "num_inference_steps": 16,
+        "width": 832
+      },
+      "repeats": 3,
+      "seed": 7,
+      "transformer_diagnostic": {
+        "category_cuda_time_ms_total_inclusive": {
+          "cross_attention": 3061.784603820415,
+          "cross_attention_output_projection": 1035.4776328802109,
+          "cross_attention_to_k_projection": 18.640896044671535,
+          "cross_attention_to_q_projection": 1040.8115513324738,
+          "cross_attention_to_v_projection": 17.633952043950558,
+          "ffn": 32813.90554915264,
+          "self_attention": 61866.29263486876,
+          "self_attention_output_projection": 1042.8515850305557,
+          "self_attention_to_k_projection": 1093.6584321260452,
+          "self_attention_to_q_projection": 1086.9069448709488,
+          "self_attention_to_v_projection": 1110.9510056972504,
+          "transformer_block": 89733.97149658203,
+          "transformer_forward": 89885.66357421875
+        },
+        "module_timing_scope": "inclusive_forward_hook_cuda_event",
+        "postprocess_wall_time_ms_instrumented": 929.8953344114125,
+        "step_count_observed": 16,
+        "step_timing_scope": "synchronized_callback_intervals; first interval includes pipeline and scheduler setup",
+        "step_wall_time_ms_first": 5606.145434081554,
+        "step_wall_time_ms_last": 5602.091747801751,
+        "step_wall_time_ms_max": 5652.796195354313,
+        "step_wall_time_ms_min": 5602.091747801751,
+        "vae_decode_cuda_time_ms_instrumented": 6539.1552734375
+      },
+      "variant": "dense",
+      "warmup": 1
+    },
+    {
+      "head_gating_execution": {
+        "calls": 8640,
+        "full_heads": 103680,
+        "operator": {
+          "attention": "attn1",
+          "block_ids": [
+            "block.0",
+            "block.1",
+            "block.2",
+            "block.3",
+            "block.4",
+            "block.5",
+            "block.6",
+            "block.7",
+            "block.8",
+            "block.9",
+            "block.10",
+            "block.11",
+            "block.12",
+            "block.13",
+            "block.14",
+            "block.15",
+            "block.16",
+            "block.17",
+            "block.18",
+            "block.19",
+            "block.20",
+            "block.21",
+            "block.22",
+            "block.23",
+            "block.24",
+            "block.25",
+            "block.26",
+            "block.27",
+            "block.28",
+            "block.29"
+          ],
+          "keep_ratio": 0.75,
+          "score": "weight_l2"
+        },
+        "selected_head_ratio": 0.75,
+        "selected_heads": 77760
+      },
+      "kernel_trace": {
+        "available": true,
+        "capture_scope": "second_denoising_step_after_one_profiler_warmup_step",
+        "filtered_cuda_operators": [
+          {
+            "calls": 420,
+            "category": "projection_or_matrix_multiply",
+            "operator": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_relu_f2f_stages_32x1_tn",
+            "self_cuda_time_us": 114121.42099999997
+          },
+          {
+            "calls": 60,
+            "category": "projection_or_matrix_multiply",
+            "operator": "ampere_bf16_s1688gemm_bf16_64x128_sliced1x2_ldg8_relu_f2f_tn",
+            "self_cuda_time_us": 64132.10200000006
+          },
+          {
+            "calls": 60,
+            "category": "attention_kernel",
+            "operator": "void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<128, 128, 32, 4, false, false, cutlass::bfloat16_t, Flash_kernel_traits<128, 128, 32, 4, cutlass::bfloat16_t> >, false, false, false, false, true, true, false, false>(pytorch_flash::Flash_fwd_params)",
+            "self_cuda_time_us": 58230.85799999993
+          },
+          {
+            "calls": 62,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::GeluCUDAKernelImpl(at::TensorIteratorBase&, at::native::GeluType)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::GeluCUDAKernelImpl(at::TensorIteratorBase&, at::native::GeluType)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
+            "self_cuda_time_us": 15813.858000000175
+          },
+          {
+            "calls": 544,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+            "self_cuda_time_us": 13257.804999999771
+          },
+          {
+            "calls": 434,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul>)",
+            "self_cuda_time_us": 10565.049999999941
+          },
+          {
+            "calls": 540,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 8706.190999999919
+          },
+          {
+            "calls": 182,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<float, float, false>(int, float, float const*, float const*, float const*, float*, float*, float*)",
+            "self_cuda_time_us": 7760.417000000323
+          },
+          {
+            "calls": 240,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<c10::BFloat16, float, true>(int, float, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, float*, float*, c10::BFloat16*)",
+            "self_cuda_time_us": 5643.431000000341
+          },
+          {
+            "calls": 192,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 5121.923999999933
+          },
+          {
+            "calls": 305,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+            "self_cuda_time_us": 4447.380000000099
+          },
+          {
+            "calls": 540,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::vectorized_gather_kernel<16, long>(char*, char*, long*, int, long, long, long, long, bool)",
+            "self_cuda_time_us": 4395.250999999676
+          },
+          {
+            "calls": 60,
+            "category": "attention_kernel",
+            "operator": "void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<128, 128, 32, 4, false, false, cutlass::bfloat16_t, Flash_kernel_traits<128, 128, 32, 4, cutlass::bfloat16_t> >, false, false, false, false, false, true, false, false>(pytorch_flash::Flash_fwd_params)",
+            "self_cuda_time_us": 4019.132999999956
+          },
+          {
+            "calls": 62,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul>)",
+            "self_cuda_time_us": 3404.600000000035
+          },
+          {
+            "calls": 122,
+            "category": "other_cuda_operator",
+            "operator": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<float> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<float> const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<float> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<float> const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 2586.9049999999625
+          },
+          {
+            "calls": 360,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::_scatter_gather_elementwise_kernel<128, 8, at::native::_cuda_scatter_gather_internal_kernel<false, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1}>(int, at::native::_cuda_scatter_gather_internal_kernel<false, at::native::OpaqueType<2>, long>::operator()<at::native::TensorAssign>(at::TensorIterator&, long, long, long, at::native::TensorAssign const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 2425.2250000001513
+          },
+          {
+            "calls": 240,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1} const&)::{lambda(int)#1})",
+            "self_cuda_time_us": 2093.385000000011
+          },
+          {
+            "calls": 122,
+            "category": "projection_or_matrix_multiply",
+            "operator": "ampere_bf16_s16816gemm_bf16_64x64_ldg8_relu_f2f_stages_64x5_tn",
+            "self_cuda_time_us": 1859.814000000501
+          },
+          {
+            "calls": 60,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::index_elementwise_kernel<128, 4, at::native::index_copy_kernel_impl<at::native::OpaqueType<2> >(at::TensorIterator&, long, long, long)::{lambda(int)#1}>(long, at::native::index_copy_kernel_impl<at::native::OpaqueType<2> >(at::TensorIterator&, long, long, long)::{lambda(int)#1})",
+            "self_cuda_time_us": 1464.7570000001488
+          },
+          {
+            "calls": 60,
+            "category": "selection_or_data_movement",
+            "operator": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::detail::TensorInfo<c10::BFloat16, unsigned int>, at::cuda::detail::TensorInfo<c10::BFloat16 const, unsigned int>, at::cuda::detail::TensorInfo<long const, unsigned int>, int, int, unsigned int, long)",
+            "self_cuda_time_us": 1058.849000000031
+          }
+        ],
+        "trace_path": "/data/models/harness4h3-wan-profiling-20261018/corrected-r2/profile-traces/head_gating_0_75-256x256-81f.json"
+      },
+      "latency_median_ms": {
+        "denoising_vae_cuda_event_ms": 8033.6630859375,
+        "denoising_vae_postprocess_wall_ms": 8033.69959210977,
+        "full_generation_with_text_wall_ms": 8114.461259916425,
+        "text_encoder_cuda_event_ms": 81.0123519897461,
+        "text_encoder_wall_ms": 80.97734302282333
+      },
+      "latency_samples": {
+        "denoising_vae_cuda_event_ms": [
+          7944.34326171875,
+          7986.29638671875,
+          8033.6630859375,
+          8039.4853515625,
+          8073.4384765625
+        ],
+        "denoising_vae_postprocess_wall_ms": [
+          7944.371894001961,
+          7986.336988862604,
+          8033.69959210977,
+          8039.482835214585,
+          8073.476618155837
+        ],
+        "full_generation_with_text_wall_ms": [
+          8025.669138878584,
+          8067.095628008246,
+          8114.461259916425,
+          8120.651523582637,
+          8154.968319926411
+        ],
+        "text_encoder_cuda_event_ms": [
+          81.17616271972656,
+          80.64681243896484,
+          80.64832305908203,
+          81.0123519897461,
+          81.37548828125
+        ],
+        "text_encoder_wall_ms": [
+          81.13647671416402,
+          80.61001636087894,
+          80.61071205884218,
+          80.97734302282333,
+          81.33991714566946
+        ]
+      },
+      "memory_bytes": {
+        "measurement_scope": "cuda:3",
+        "model_resident_allocated_bytes": 17320919040,
+        "peak_allocated_bytes_median": 18109431808,
+        "peak_reserved_bytes_median": 18937282560
+      },
+      "parameter_count": 1418996800,
+      "prompt": "A cinematic shot of a red fox running through fresh snow.",
+      "recipe": {
+        "height": 256,
+        "num_frames": 81,
+        "num_inference_steps": 16,
+        "width": 256
+      },
+      "repeats": 5,
+      "seed": 7,
+      "transformer_diagnostic": {
+        "category_cuda_time_ms_total_inclusive": {
+          "cross_attention": 804.8238072179956,
+          "cross_attention_output_projection": 224.59328006207943,
+          "cross_attention_to_k_projection": 17.98425600863993,
+          "cross_attention_to_q_projection": 199.84892785549164,
+          "cross_attention_to_v_projection": 16.080223967321217,
+          "ffn": 5459.459739303566,
+          "self_attention": 3497.3527965836693,
+          "transformer_block": 7273.080382347107,
+          "transformer_forward": 7301.176818847656
+        },
+        "module_timing_scope": "inclusive_forward_hook_cuda_event",
+        "postprocess_wall_time_ms_instrumented": 97.26726124063134,
+        "step_count_observed": 16,
+        "step_timing_scope": "synchronized_callback_intervals; first interval includes pipeline and scheduler setup",
+        "step_wall_time_ms_first": 462.97567104920745,
+        "step_wall_time_ms_last": 456.1243592761457,
+        "step_wall_time_ms_max": 462.97567104920745,
+        "step_wall_time_ms_min": 456.046428065747,
+        "vae_decode_cuda_time_ms_instrumented": 885.946533203125
+      },
+      "variant": "head_gating_0_75",
+      "warmup": 2
+    }
+  ],
+  "execution": {
+    "available": true,
+    "checkpoint_sha256": "dab2db83db4cd1f9c2a7ddb46e169711d688c84702bf78c589a3d3f3ce24776d",
+    "cuda_version": "12.8",
+    "device": "cuda:3",
+    "diagnostic_method": "inclusive_module_forward_hooks_and_one_step_torch_profiler_trace",
+    "diffusers_version": "0.40.0",
+    "dtype": "bfloat16",
+    "execution_schema_version": 1,
+    "gpu_name": "NVIDIA L40",
+    "latency_method": "cuda_events_and_wall_clock_after_synchronization",
+    "measurement_backend": "torch.cuda.Event+torch.profiler",
+    "offline_simulation": false,
+    "pipeline_device": "cuda:3",
+    "torch_version": "2.10.0+cu128"
+  },
+  "model": {
+    "architecture": "WanDiffusersDiT",
+    "block_count": 30,
+    "checkpoint_sha256": "dab2db83db4cd1f9c2a7ddb46e169711d688c84702bf78c589a3d3f3ce24776d",
+    "ffn_width": 8960,
+    "hidden_size": 1536,
+    "parameter_count": 1418996800
+  },
+  "provenance": {
+    "channel_probe_limit": 32,
+    "device": "cuda:3",
+    "flops_available": true,
+    "input_shape": [
+      1,
+      16,
+      1,
+      8,
+      8
+    ],
+    "latency_available": true,
+    "latency_method": "per_block_forward_hook_cuda_events",
+    "latency_repeats": 3,
+    "latency_warmup": 1,
+    "measurement_status": "measured",
+    "memory_available": true,
+    "model_sha256": "dab2db83db4cd1f9c2a7ddb46e169711d688c84702bf78c589a3d3f3ce24776d",
+    "offline_simulation": false,
+    "peak_memory_bytes": 2857375744,
+    "precision": "torch.bfloat16",
+    "seed": 7
+  },
+  "raw_profile_sha256": "d3a414c4466f90c5e9e2190916f2b0a9da94a54ae48cd1ed7b8706718835c26a",
+  "remote_raw_profile_path": "/data/models/harness4h3-wan-profiling-20261018/corrected-r2/profile.json",
+  "schema_version": 1,
+  "source_profile_path": "/tmp/harness4h3-wan-profile-corrected-r2-20261018.json"
+}

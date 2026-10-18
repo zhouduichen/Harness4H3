@@ -34,6 +34,7 @@ class ProfileReport:
     evidence: Mapping[str, Any] = field(default_factory=dict)
     block_timestep_sensitivity: tuple[Mapping[str, Any], ...] = ()
     token_grid: tuple[int, int, int] = ()
+    execution: Mapping[str, Any] = field(default_factory=dict)
     schema_version: int = 2
 
     def __post_init__(self) -> None:
@@ -48,7 +49,7 @@ class ProfileReport:
             raise ValueError("profile provenance must declare offline_simulation")
         if not isinstance(self.hardware, Mapping):
             raise ValueError("profile hardware must be a mapping")
-        for name in ("calibration", "relationships", "evidence"):
+        for name in ("calibration", "relationships", "evidence", "execution"):
             if not isinstance(getattr(self, name), Mapping):
                 raise ValueError("profile %s must be a mapping" % name)
 
@@ -80,6 +81,7 @@ class ProfileReport:
             evidence=dict(raw.get("evidence") or {}),
             block_timestep_sensitivity=tuple(dict(item) for item in raw.get("block_timestep_sensitivity", [])),
             token_grid=tuple(int(value) for value in raw.get("token_grid", ())),
+            execution=dict(raw.get("execution") or {}),
             schema_version=int(raw.get("schema_version", 1)),
         )
 

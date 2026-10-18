@@ -1,0 +1,79 @@
+{
+  "status": "ratios_captured_video_write_failed",
+  "reason": "evaluation reached video serialization after the MagCache calibration loop; isolated sparsevideo environment lacked cv2",
+  "checkpoint_sha256": "dab2db83db4cd1f9c2a7ddb46e169711d688c84702bf78c589a3d3f3ce24776d",
+  "method": "diffusers MagCache",
+  "recipe": {
+    "width": 832,
+    "height": 480,
+    "frames": 81,
+    "steps": 16,
+    "seed": 7,
+    "prompt": "A cinematic shot of a red fox running through fresh snow."
+  },
+  "source_revision": "1290ae7+sorted-py-sha256-v1:f234b97081746f27cfcf0fabd5af888ce6bd9076a29c6959df2f395437044b9a",
+  "raw_calibration_traces": [
+    [
+      1.0,
+      1.0026278495788574,
+      0.9675757884979248,
+      0.9690266847610474,
+      0.9730511903762817,
+      0.9713815450668335,
+      0.9706386923789978,
+      0.963576078414917,
+      0.9582207202911377,
+      0.9527050852775574,
+      0.9466575980186462,
+      0.9314841628074646,
+      0.9141141176223755,
+      0.8959954380989075,
+      0.8552905321121216,
+      0.798107385635376
+    ],
+    [
+      1.0,
+      1.0061253309249878,
+      0.9670678377151489,
+      0.968999981880188,
+      0.9731523394584656,
+      0.9714646339416504,
+      0.9706717133522034,
+      0.9636367559432983,
+      0.958404541015625,
+      0.9528405666351318,
+      0.9466909766197205,
+      0.9316523671150208,
+      0.9141300320625305,
+      0.8961281776428223,
+      0.8556910753250122,
+      0.7987285852432251
+    ]
+  ],
+  "trace_interpretation": "Two 16-step traces were emitted during the evaluator generation; the Diffusers hook output does not identify their origin. Both are preserved, and their per-step arithmetic mean is used as one representative calibration vector.",
+  "mag_ratios_mean": [
+    1.0,
+    1.0043765902519226,
+    0.9673218131065369,
+    0.9690133333206177,
+    0.9731017649173737,
+    0.9714230895042419,
+    0.9706552028656006,
+    0.9636064171791077,
+    0.9583126306533813,
+    0.9527728259563446,
+    0.9466742873191833,
+    0.9315682649612427,
+    0.914122074842453,
+    0.8960618078708649,
+    0.8554908037185669,
+    0.7984179854393005
+  ],
+  "parameters": {
+    "threshold": 0.12,
+    "max_skip_steps": 4,
+    "retention_ratio": 0.2,
+    "num_inference_steps": 16,
+    "calibrate": false
+  }
+}

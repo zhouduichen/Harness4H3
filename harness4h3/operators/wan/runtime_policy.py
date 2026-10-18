@@ -16,6 +16,51 @@ def _ratio(value: Any, name: str) -> float:
 
 
 @dataclass(frozen=True)
+class SVOOPolicy:
+    """Configuration for the official SparseVideo SVOO runtime method."""
+
+    method: str
+    model_key: str
+    config: Mapping[str, Any]
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "SVOOPolicy":
+        method = str(raw.get("method", "")).strip().lower()
+        if method != "svoo":
+            raise ValueError("svoo_attention.method must be 'svoo'")
+        model_key = str(raw.get("model_key", "wan21-t2v-1.3b")).strip()
+        if not model_key:
+            raise ValueError("svoo_attention.model_key must not be empty")
+        config = raw.get("config", {})
+        if not isinstance(config, Mapping):
+            raise ValueError("svoo_attention.config must be a mapping")
+        return cls(method, model_key, dict(config))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"method": self.method, "model_key": self.model_key, "config": dict(self.config)}
+
+
+@dataclass(frozen=True)
+class MagCachePolicy:
+    """Configuration for Diffusers' existing MagCache implementation."""
+
+    config: Mapping[str, Any]
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "MagCachePolicy":
+        method = str(raw.get("method", "")).strip().lower()
+        if method != "magcache":
+            raise ValueError("magcache.method must be 'magcache'")
+        config = raw.get("config", {})
+        if not isinstance(config, Mapping):
+            raise ValueError("magcache.config must be a mapping")
+        return cls(dict(config))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"method": "magcache", "config": dict(self.config)}
+
+
+@dataclass(frozen=True)
 class TokenSparsityPolicy:
     keep_ratio: float
     block_ids: tuple[str, ...] = ()

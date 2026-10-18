@@ -20,7 +20,20 @@ from ..adapters.wan.contracts import stable_digest
 from .config import CompressionConfig, CompressionConfigError
 
 PROTOCOL_SCHEMA_VERSION = 1
+RUNTIME_POLICY_ADAPTER_VERSIONS = {
+    "svoo_attention": "sparsevideo.apply-wan-v1",
+    "magcache": "diffusers.MagCacheConfig-enable_cache-v1",
+    "sparse_runtime": "harness4h3.topk-kv-v1",
+}
 REQUIRED_ARMS = ("fixed", "coding-agent", "agent-memory", "rsi")
+PAPER_REQUIRED_ARMS = (
+    "fixed",
+    "coding-agent",
+    "agent-memory",
+    "rsi-fixed-space",
+    "rsi-expanded-frozen",
+    "rsi",
+)
 DEFAULT_ROUNDS = 3
 DEFAULT_EXPECTED_CASES = 16
 DEFAULT_LATENCY_REPEATS = 3
@@ -130,7 +143,16 @@ def _read_raw_config(path: Path) -> Mapping[str, Any]:
 
 def _normal_name(name: str) -> str:
     value = str(name).strip().lower().replace("_", "-")
-    aliases = {"coding": "coding-agent", "memory": "agent-memory", "full-rsi": "rsi", "complete-rsi": "rsi"}
+    aliases = {
+        "coding": "coding-agent",
+        "memory": "agent-memory",
+        "full-rsi": "rsi",
+        "complete-rsi": "rsi",
+        "rsi-fixed": "rsi-fixed-space",
+        "fixed-space-rsi": "rsi-fixed-space",
+        "rsi-frozen-expanded": "rsi-expanded-frozen",
+        "frozen-expanded-rsi": "rsi-expanded-frozen",
+    }
     return aliases.get(value, value)
 
 
@@ -199,7 +221,18 @@ def _config_record(name: str, path: Path, *, allow_missing_assets: bool) -> dict
         "visual_quality_gate": dict(evaluator.get("visual_quality_gate") or {}),
         "evaluation_split": str(evaluator.get("evaluation_split", "unspecified")).strip().lower(),
         "source_revision": source_revision,
+        "runtime_attention": dict(evaluator.get("runtime_attention") or {}),
+        "runtime_cache": dict(evaluator.get("runtime_cache") or {}),
     }
+    execution_profile_raw = str(evaluator.get("execution_profile", "")).strip()
+    if execution_profile_raw:
+        execution_profile_path = Path(execution_profile_raw).expanduser()
+        if not execution_profile_path.is_absolute():
+            execution_profile_path = (path.parent / execution_profile_path).resolve()
+        eval_fields["execution_profile"] = {
+            "path": str(execution_profile_path.resolve()),
+            "sha256": _sha256_file(execution_profile_path) if execution_profile_path.is_file() else None,
+        }
     controller = _controller_record(raw)
     provider = str(controller.get("provider", "deterministic")).strip().lower().replace("_", "-")
     return {
@@ -215,6 +248,11 @@ def _config_record(name: str, path: Path, *, allow_missing_assets: bool) -> dict
         "seed": int(config.seed),
         "memory_enabled": bool(config.memory_enabled),
         "adapt_search_policy": bool(config.adapt_search_policy),
+        "algorithm_improvement": bool(config.algorithm_improvement),
+        "search_space_evolution": bool(config.search_space_evolution),
+        "frozen_expanded_search_space": bool(config.frozen_expanded_search_space),
+        "candidate_screening": bool(config.candidate_screening),
+        "algorithm_probe_samples": int(config.algorithm_probe_samples),
         "exploit_ratio": float(config.exploit_ratio),
         "controller": controller,
         "provider": provider,
@@ -238,13 +276,17 @@ def validate_protocol(
     latency_repeats: int = DEFAULT_LATENCY_REPEATS,
     source_revision: str | None = None,
     allow_missing_assets: bool = False,
+    required_arms: Sequence[str] = REQUIRED_ARMS,
 ) -> dict[str, Any]:
-    """Validate four configs and return a stable, serializable protocol report."""
+    """Validate matched Wan configs for the legacy four-arm or paper protocol."""
 
+    arms = tuple(_normal_name(name) for name in required_arms)
+    if not arms or len(set(arms)) != len(arms):
+        raise ProtocolValidationError("required_arms must contain unique arm names")
     names = {_normal_name(name): name for name in specs}
     errors: list[str] = []
-    missing_arms = [name for name in REQUIRED_ARMS if name not in names]
-    extra_arms = sorted(name for name in names if name not in REQUIRED_ARMS)
+    missing_arms = [name for name in arms if name not in names]
+    extra_arms = sorted(name for name in names if name not in arms)
     if missing_arms:
         errors.append("missing arms: " + ", ".join(missing_arms))
     if extra_arms:
@@ -259,7 +301,7 @@ def validate_protocol(
 
     records = {
         name: _config_record(name, Path(specs[names[name]]).expanduser().resolve(), allow_missing_assets=allow_missing_assets)
-        for name in REQUIRED_ARMS
+        for name in arms
     }
     errors = []
     roots = {name: Path(record["output_root"]) for name, record in records.items()}
@@ -270,7 +312,7 @@ def validate_protocol(
             if left_name < right_name and _path_overlap(left_root, right_root):
                 errors.append("output_root overlaps: %s and %s" % (left_name, right_name))
 
-    first = records[REQUIRED_ARMS[0]]
+    first = records[arms[0]]
     first_common = _common_identity(first)
     for name, record in records.items():
         current_common = _common_identity(record)
@@ -280,11 +322,12 @@ def validate_protocol(
                 break
     # The controller is intentionally the same only for the three adaptive
     # arms; Fixed may use a deterministic provider.
-    for name in ("agent-memory", "rsi"):
+    adaptive_arms = tuple(name for name in arms if name != "fixed")
+    for name in adaptive_arms:
         for key in ("controller", "model", "evaluator"):
             if _canonical(records[name][key]) != _canonical(records["coding-agent"][key]):
                 errors.append("coding-agent and %s differ in %s" % (name, key))
-    for name in REQUIRED_ARMS:
+    for name in arms:
         evaluator = records[name]["evaluator"]
         if evaluator["max_cases"] * evaluator["seed_count"] != expected_cases:
             errors.append("%s must have max_cases*seed_count=%d" % (name, expected_cases))
@@ -299,6 +342,11 @@ def validate_protocol(
             "model": record["model"],
             "memory_enabled": record["memory_enabled"],
             "adapt_search_policy": record["adapt_search_policy"],
+            "algorithm_improvement": record["algorithm_improvement"],
+            "search_space_evolution": record["search_space_evolution"],
+            "frozen_expanded_search_space": record["frozen_expanded_search_space"],
+            "candidate_screening": record["candidate_screening"],
+            "algorithm_probe_samples": record["algorithm_probe_samples"],
             "exploit_ratio": record["exploit_ratio"],
         }
         for name, record in records.items()
@@ -312,18 +360,80 @@ def validate_protocol(
         errors.append("coding-agent must disable memory and adaptation")
     if controls["coding-agent"]["provider"] in {"fixed", "deterministic", "offline", "mock"}:
         errors.append("coding-agent must use a non-deterministic controller provider")
-    if not controls["agent-memory"]["memory_enabled"] or controls["agent-memory"]["adapt_search_policy"]:
-        errors.append("agent-memory must enable memory and disable adaptation")
-    if not controls["rsi"]["memory_enabled"] or not controls["rsi"]["adapt_search_policy"]:
-        errors.append("rsi must enable memory and adaptation")
-    for name in ("agent-memory", "rsi"):
-        if controls[name]["exploit_ratio"] != controls["coding-agent"]["exploit_ratio"]:
-            errors.append("coding-agent and %s must use the same exploit_ratio" % name)
+    if arms == PAPER_REQUIRED_ARMS:
+        if any(not records[name]["evaluator"].get("execution_profile") for name in arms):
+            errors.append("paper protocol requires a shared real-CUDA execution_profile")
+        expected = {
+            "fixed": (False, False, False, False, False),
+            "coding-agent": (False, False, True, False, False),
+            "agent-memory": (True, False, True, False, False),
+            "rsi-fixed-space": (True, True, True, False, False),
+            "rsi-expanded-frozen": (True, True, True, False, True),
+            "rsi": (True, True, True, True, False),
+        }
+        for name, (memory, adapt, improvement, evolving_space, frozen_space) in expected.items():
+            control = controls[name]
+            actual = (
+                control["memory_enabled"],
+                control["adapt_search_policy"],
+                control["algorithm_improvement"],
+                control["search_space_evolution"],
+                control["frozen_expanded_search_space"],
+            )
+            if actual != (memory, adapt, improvement, evolving_space, frozen_space):
+                errors.append("%s feature flags do not match the paper protocol" % name)
+        adaptive_exploit = controls["coding-agent"]["exploit_ratio"]
+        if any(controls[name]["exploit_ratio"] != adaptive_exploit for name in adaptive_arms):
+            errors.append("all adaptive paper arms must use the same exploit_ratio")
+        adaptive_search = [
+            records[name]["algorithm_probe_samples"]
+            for name in arms
+            if records[name]["algorithm_improvement"]
+        ]
+        if len(set(adaptive_search)) > 1:
+            errors.append("algorithm_probe_samples must match across algorithm-improvement arms")
+    else:
+        if "agent-memory" in controls and (not controls["agent-memory"]["memory_enabled"] or controls["agent-memory"]["adapt_search_policy"]):
+            errors.append("agent-memory must enable memory and disable adaptation")
+        if "rsi" in controls and (not controls["rsi"]["memory_enabled"] or not controls["rsi"]["adapt_search_policy"]):
+            errors.append("rsi must enable memory and adaptation")
+        for name in ("agent-memory", "rsi"):
+            if name in controls and controls[name]["exploit_ratio"] != controls["coding-agent"]["exploit_ratio"]:
+                errors.append("coding-agent and %s must use the same exploit_ratio" % name)
     _raise(errors)
 
+    from ..operators.wan.search_space import default_search_space, expanded_search_space
+    from .search_ranking import SEARCH_RANKING_VERSION
+
+    operator_catalog = [
+        {
+            "name": spec.name,
+            "version": spec.version,
+            "argument_schema": dict(spec.argument_schema),
+            "granularity": spec.granularity,
+            "execution_domain": spec.execution_domain,
+            "implementation_ref": spec.implementation_ref,
+        }
+        for spec in default_search_space().operators
+    ]
+    expanded_operator_catalog = [
+        {
+            "name": spec.name,
+            "version": spec.version,
+            "argument_schema": dict(spec.argument_schema),
+            "granularity": spec.granularity,
+            "execution_domain": spec.execution_domain,
+            "implementation_ref": spec.implementation_ref,
+        }
+        for spec in expanded_search_space().operators
+    ]
     fingerprint_payload = {
         "schema_version": PROTOCOL_SCHEMA_VERSION,
-        "arms": {name: controls[name] for name in REQUIRED_ARMS},
+        "operator_catalog": operator_catalog,
+        "expanded_operator_catalog": expanded_operator_catalog,
+        "search_ranking_version": SEARCH_RANKING_VERSION,
+        "runtime_policy_adapter_versions": RUNTIME_POLICY_ADAPTER_VERSIONS,
+        "arms": {name: controls[name] for name in arms},
         "common": {
             key: first_common[key] for key in first_common
         },
@@ -335,11 +445,15 @@ def validate_protocol(
     }
     fingerprint = stable_digest(fingerprint_payload)
     manifests = {}
-    for name in REQUIRED_ARMS:
+    for name in arms:
         record = records[name]
         manifests[name] = {
             "schema_version": PROTOCOL_SCHEMA_VERSION,
             "protocol_fingerprint": fingerprint,
+            "search_ranking_version": SEARCH_RANKING_VERSION,
+            "runtime_policy_adapter_versions": dict(RUNTIME_POLICY_ADAPTER_VERSIONS),
+            "operator_catalog_digest": stable_digest(operator_catalog),
+            "expanded_operator_catalog_digest": stable_digest(expanded_operator_catalog),
             "arm_name": name,
             "config_sha256": record["config_sha256"],
             "source_revision": record["source_revision"],
@@ -352,7 +466,11 @@ def validate_protocol(
     return {
         "schema_version": PROTOCOL_SCHEMA_VERSION,
         "protocol_fingerprint": fingerprint,
-        "required_arms": list(REQUIRED_ARMS),
+        "search_ranking_version": SEARCH_RANKING_VERSION,
+        "runtime_policy_adapter_versions": dict(RUNTIME_POLICY_ADAPTER_VERSIONS),
+        "operator_catalog": operator_catalog,
+        "expanded_operator_catalog": expanded_operator_catalog,
+        "required_arms": list(arms),
         "budget": {"rounds": rounds, "expected_cases": expected_cases, "latency_repeats": latency_repeats},
         "arms": records,
         "run_manifests": manifests,
@@ -367,7 +485,7 @@ def write_manifests(report: Mapping[str, Any]) -> None:
     if not isinstance(arms, Mapping) or not isinstance(manifests, Mapping):
         raise ProtocolValidationError("invalid protocol report")
     targets: list[tuple[Path, Mapping[str, Any]]] = []
-    for name in REQUIRED_ARMS:
+    for name in report.get("required_arms", REQUIRED_ARMS):
         record = arms.get(name)
         manifest = manifests.get(name)
         if not isinstance(record, Mapping) or not isinstance(manifest, Mapping):

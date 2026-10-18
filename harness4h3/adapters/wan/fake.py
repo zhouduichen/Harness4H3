@@ -17,7 +17,7 @@ from .contracts import (
     checkpoint_content_sha256,
 )
 from ...operators.wan.runtime_gating import TimestepAttentionRule, TimestepGateRule, normalized_timesteps, rule_matches, validate_timestep_attention_plan, validate_timestep_gate_plan
-from ...operators.wan.runtime_policy import AttentionWindowPolicy, HeadGatingPolicy, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
+from ...operators.wan.runtime_policy import AttentionWindowPolicy, HeadGatingPolicy, KVTokenSelectionPolicy, MagCachePolicy, SamplingStepPolicy, SparseRuntimePolicy, SVOOPolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
 from ...operators.wan.token_geometry import merge_token_sequence, select_token_indices
 from .attention import prune_attention_module_heads
 
@@ -271,6 +271,7 @@ class FakeWanDiT:
         self._harness4h3_head_gating_policy = dict(head_gating_policy or {})
         self._harness4h3_sampling_step_policy = dict(sampling_step_policy or {})
         self._harness4h3_runtime_operations = [dict(item) for item in (runtime_operations or [])]
+        self._harness4h3_external_runtime_policies = []
         if self._harness4h3_sparse_runtime_policy:
             for block in self.blocks:
                 block.attn1._harness4h3_sparse_policy = dict(self._harness4h3_sparse_runtime_policy)
@@ -480,6 +481,7 @@ class FakeWanDiTAdapter:
                 sampling_step_policy=config.get("sampling_step_policy", {}),
                 runtime_operations=config.get("runtime_operations", []),
             )
+            model._harness4h3_external_runtime_policies = [dict(item) for item in config.get("external_runtime_policies", [])]
             model.load_state_dict(torch.load(root / "model.pt", map_location="cpu", weights_only=True))
             model._artifact_sha256 = checkpoint_content_sha256(root)
         model.to(device=device)
@@ -518,6 +520,7 @@ class FakeWanDiTAdapter:
                 "head_gating_policy": dict(model._harness4h3_head_gating_policy),
                 "sampling_step_policy": dict(model._harness4h3_sampling_step_policy),
                 "runtime_operations": [dict(item) for item in model._harness4h3_runtime_operations],
+                "external_runtime_policies": [dict(item) for item in model._harness4h3_external_runtime_policies],
             },
         )
 
@@ -655,6 +658,24 @@ class FakeWanDiTAdapter:
         model._harness4h3_sparse_runtime_policy = parsed.to_dict()
         model._harness4h3_runtime_operations.append({"operator": "sparse_runtime", "args": parsed.to_dict()})
         return StructuralChange("runtime_sparse_attention", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
+
+    def apply_external_runtime_policy(self, model: FakeWanDiT, policies: Sequence[Mapping[str, Any]]) -> StructuralChange:
+        normalized = []
+        for item in policies:
+            if not isinstance(item, Mapping) or not isinstance(item.get("args"), Mapping):
+                raise ValueError("invalid_external_runtime_policy")
+            operator = str(item.get("operator", ""))
+            if operator == "svoo_attention":
+                args = SVOOPolicy.from_mapping(item["args"]).to_dict()
+            elif operator == "magcache":
+                args = MagCachePolicy.from_mapping(item["args"]).to_dict()
+            else:
+                raise ValueError("unsupported_external_runtime_policy: %s" % operator)
+            entry = {"operator": operator, "args": args}
+            normalized.append(entry)
+            model._harness4h3_external_runtime_policies.append(entry)
+            model._harness4h3_runtime_operations.append(entry)
+        return StructuralChange("runtime_external_methods", {"policies": normalized, "parameter_reduction_ratio": 0.0, "offline_simulation": True})
 
     def apply_attention_window(self, model: FakeWanDiT, policy: Mapping[str, Any]) -> StructuralChange:
         parsed = AttentionWindowPolicy.from_mapping(policy)

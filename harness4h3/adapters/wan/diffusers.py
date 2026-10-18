@@ -12,7 +12,7 @@ from .contracts import BlockRef, CheckpointArtifact, ChannelPruningConfig, Model
 from .attention import prune_attention_module_heads
 from ...operators.wan.token_geometry import merge_token_sequence, select_token_indices
 from ...operators.wan.runtime_gating import TimestepAttentionRule, normalized_timesteps, rule_matches, rules_to_dict, validate_timestep_attention_plan, validate_timestep_gate_plan
-from ...operators.wan.runtime_policy import AttentionWindowPolicy, HeadGatingPolicy, HeadGatingRule, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
+from ...operators.wan.runtime_policy import AttentionWindowPolicy, HeadGatingPolicy, HeadGatingRule, KVTokenSelectionPolicy, MagCachePolicy, SamplingStepPolicy, SparseRuntimePolicy, SVOOPolicy, TokenMergePolicy, TokenSparsityPolicy, select_sampling_steps
 
 
 def _torch_modules() -> tuple[Any, Any]:
@@ -724,6 +724,8 @@ class DiffusersWanAdapter:
                     self.apply_kv_token_selection(model, args)
                 elif operator == "sparse_runtime":
                     self.apply_sparse_runtime(model, args)
+                elif operator in {"svoo_attention", "magcache"}:
+                    self.apply_external_runtime_policy(model, [{"operator": operator, "args": args}])
                 elif operator == "attention_window":
                     self.apply_attention_window(model, args)
                 elif operator == "head_gating":
@@ -1328,6 +1330,34 @@ class DiffusersWanAdapter:
             attention.forward = MethodType(sparse_forward, attention)
         _record_runtime_operation(transformer, "sparse_runtime", parsed.to_dict())
         return StructuralChange("runtime_sparse_attention", {"policy": parsed.to_dict(), "dynamic_compute": True, "parameter_reduction_ratio": 0.0})
+
+    def apply_external_runtime_policy(self, model: Any, policies: Sequence[Mapping[str, Any]]) -> StructuralChange:
+        """Persist candidate-specific upstream methods without executing them at load time."""
+
+        transformer = self._transformer(model)
+        normalized = []
+        for item in policies:
+            if not isinstance(item, Mapping) or not isinstance(item.get("args"), Mapping):
+                raise ValueError("invalid_external_runtime_policy")
+            operator = str(item.get("operator", ""))
+            args = dict(item["args"])
+            if operator == "svoo_attention":
+                parsed = SVOOPolicy.from_mapping(args).to_dict()
+            elif operator == "magcache":
+                parsed = MagCachePolicy.from_mapping(args).to_dict()
+            else:
+                raise ValueError("unsupported_external_runtime_policy: %s" % operator)
+            entry = {"operator": operator, "args": parsed}
+            normalized.append(entry)
+            existing = list(getattr(transformer, "_harness4h3_external_runtime_policies", []) or [])
+            existing.append(entry)
+            transformer._harness4h3_external_runtime_policies = existing
+            _register_config(transformer, "harness4h3_external_runtime_policies", existing)
+            _record_runtime_operation(transformer, operator, parsed)
+        return StructuralChange(
+            "runtime_external_methods",
+            {"policies": normalized, "parameter_reduction_ratio": 0.0, "execution_deferred_to_evaluator": True},
+        )
 
     def apply_attention_window(self, model: Any, policy: Mapping[str, Any]) -> StructuralChange:
         torch, _ = _torch_modules()

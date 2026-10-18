@@ -1,0 +1,91 @@
+backend: diffusers
+checkpoint: ../models/wan21-t2v-1.3b
+output_root: ../experiments/wan-gpu-profiling-20261018
+device: cuda:3
+dtype: bfloat16
+local_files_only: true
+seed: 7
+advanced_profiling: false
+evaluator:
+  backend: wan_video
+  wan_config: wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml
+  evaluation_manifest: wan-rsi-hybrid-20261018/evaluation-manifest.json
+  clip_model_path: ../models/clip-vit-large-patch14-336
+  device: cuda:3
+  quality_device: cuda:3
+  dtype: bfloat16
+  local_files_only: true
+  max_cases: 1
+  seed_count: 1
+  sample_frames: 4
+  latency_warmup: 0
+  latency_repeats: 1
+  evaluation_split: validation
+  profile_prompt: A cinematic shot of a red fox running through fresh snow.
+  profile_seed: 7
+  profile_warmup: 2
+  profile_repeats: 5
+  head_gating_policy:
+    attention: attn1
+    keep_ratio: 0.75
+    score: weight_l2
+    block_ids:
+      - block.0
+      - block.1
+      - block.2
+      - block.3
+      - block.4
+      - block.5
+      - block.6
+      - block.7
+      - block.8
+      - block.9
+      - block.10
+      - block.11
+      - block.12
+      - block.13
+      - block.14
+      - block.15
+      - block.16
+      - block.17
+      - block.18
+      - block.19
+      - block.20
+      - block.21
+      - block.22
+      - block.23
+      - block.24
+      - block.25
+      - block.26
+      - block.27
+      - block.28
+      - block.29
+  profile_cases:
+    - width: 256
+      height: 256
+      num_frames: 81
+      num_inference_steps: 16
+      variants: [dense, head_gating_0_75]
+      capture_kernel_trace: true
+    - width: 832
+      height: 480
+      num_frames: 17
+      num_inference_steps: 16
+      warmup: 1
+      repeats: 3
+      variants: [dense]
+      capture_kernel_trace: true
+    - width: 832
+      height: 480
+      num_frames: 41
+      num_inference_steps: 16
+      warmup: 1
+      repeats: 3
+      variants: [dense]
+    - width: 832
+      height: 480
+      num_frames: 81
+      num_inference_steps: 16
+      warmup: 1
+      repeats: 3
+      variants: [dense]

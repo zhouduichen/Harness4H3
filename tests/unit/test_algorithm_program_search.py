@@ -198,6 +198,42 @@ def test_program_rank_is_profile_derived_instead_of_algorithm_parity(tmp_path):
     assert rank_values[0] == rank_values[1]
 
 
+def test_search_proposes_external_controls_and_ordered_supported_composition(tmp_path):
+    profile = {
+        "model": {"architecture": "WanDiffusersDiT", "block_count": 2, "ffn_width": 4},
+        "layers": [{"block_id": "block.0"}, {"block_id": "block.1"}],
+        "block_sensitivity": [{"block_id": "block.0", "importance_score": 0.1}],
+        "execution": {
+            "cases": [{
+                "variant": "dense",
+                "generation_wall_time_s": 90.0,
+                "recipe": {"num_inference_steps": 16},
+                "diagnostic_pass": {
+                    "category_cuda_time_ms_total": {"self_attention": 60.0, "ffn": 30.0},
+                    "module_timings": [],
+                },
+            }]
+        },
+    }
+    algorithm = AlgorithmAgent().generate("A0001", parent_id="M0000", profile=profile, history=[])
+    decision = _run_algorithm_search_program(
+        algorithm.source,
+        AlgorithmSandbox(tmp_path / "external-search"),
+        profile,
+        [],
+        {"depth": 1, "proposed_plan": None, "budget": {"max_candidates": 16}},
+        default_search_space().to_dict(),
+    )
+
+    plans = decision.plans
+    assert any(plan["operator"] == "svoo_attention" for plan in plans)
+    assert any(plan["operator"] == "magcache" for plan in plans)
+    combined = next(plan for plan in plans if plan["operator"] == "compose" and [step["operator"] for step in plan["args"]["steps"]] == ["svoo_attention", "magcache"])
+    assert combined["args"]["steps"][0]["args"]["method"] == "svoo"
+    assert decision.diagnostics["family_allocated_counts"]
+    assert all("allocation_reason" in item and "evidence_refs" in item for item in decision.diagnostics["candidate_evidence"])
+
+
 def test_standard_algorithm_improvement_retains_registered_granularity(tmp_path):
     profile = {
         "model": {"architecture": "WanFakeDiT", "block_count": 3, "ffn_width": 8},

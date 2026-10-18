@@ -15,7 +15,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, CompressionResult, OperatorCapability, WanModelAdapter
 from ...sandbox import AlgorithmSandbox
-from .compression import AttentionHeadPruningOperator, AttentionWindowOperator, FFNChannelPruningOperator, HeadGatingOperator, HeadPruningOperator, KVTokenSelectionOperator, LayerPruningOperator, SamplingStepSkipOperator, SparseRuntimeOperator, TimestepAttentionPolicyOperator, TimestepBlockGatingOperator, TokenMergeOperator, TokenPruningOperator, WanCompressionRegistry, build_wan_compression_registry
+from .compression import AttentionHeadPruningOperator, AttentionWindowOperator, FFNChannelPruningOperator, HeadGatingOperator, HeadPruningOperator, KVTokenSelectionOperator, LayerPruningOperator, MagCacheOperator, SVOOAttentionOperator, SamplingStepSkipOperator, SparseRuntimeOperator, TimestepAttentionPolicyOperator, TimestepBlockGatingOperator, TokenMergeOperator, TokenPruningOperator, WanCompressionRegistry, build_wan_compression_registry
 
 
 def _jsonable(value: Any) -> Any:
@@ -310,6 +310,8 @@ def default_search_space() -> SearchSpaceVersion:
             OperatorSpec("token_merge", "2", {"keep_ratio": "float", "block_ids": "list[str]", "mode": "str", "grid_shape": "list[int3]"}, "token", ("self_attention_pre_rope_merge", "unmerge_to_residual_shape"), ("dynamic_policy", "adjacent_groups_only", "spatiotemporal_grid_optional"), "token_merge", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.TokenMergeOperator"),
             OperatorSpec("kv_token_select", "1", {"keep_ratio": "float", "block_ids": "list[str]", "score": "str"}, "token", ("full_query_length", "reduced_kv_length", "self_attention_only"), ("dynamic_policy", "shared_batch_index_set"), "kv_token_select", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.KVTokenSelectionOperator"),
             OperatorSpec("sparse_runtime", "1", {"keep_ratio": "float", "attention": "str"}, "sparse_runtime", ("self_attention_top_k",), ("dynamic_policy",), "sparse_runtime", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.SparseRuntimeOperator"),
+            OperatorSpec("svoo_attention", "1", {"method": "svoo", "model_key": "str", "config": "mapping"}, "sparse_attention", ("upstream_sparsevideo", "candidate_specific_runtime"), ("requires_sparsevideo", "external_runtime_policy"), "svoo_attention", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.SVOOAttentionOperator"),
+            OperatorSpec("magcache", "1", {"method": "magcache", "config": "mapping"}, "timestep_cache", ("upstream_diffusers_magcache", "candidate_specific_runtime"), ("requires_magcache_support", "external_runtime_policy"), "magcache", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.MagCacheOperator"),
             OperatorSpec("attention_window", "2", {"window_size": "int", "attention": "str", "grid_shape": "list[int3]", "window_radius": "list[int3]"}, "attention", ("self_attention_local_window",), ("dynamic_policy", "requires_sequence_order", "spatiotemporal_grid_optional"), "attention_window", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.AttentionWindowOperator"),
             OperatorSpec("sampling_step_skip", "1", {"target_steps": "int"}, "sampling_step", ("preserve_endpoints",), ("dynamic_policy",), "sampling_step_skip", execution_domain="sampler", implementation_ref="harness4h3.operators.wan.compression.SamplingStepSkipOperator"),
             OperatorSpec("timestep_block_gate", "1", {"rules": "list[object]", "policy": "str"}, "runtime_timestep", ("normalized_timestep", "known_block_ids", "no_parameter_reduction"), ("dynamic_skip", "requires_temporal_sensitivity"), "timestep_block_gate", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.TimestepBlockGatingOperator"),
@@ -319,16 +321,47 @@ def default_search_space() -> SearchSpaceVersion:
     )
 
 
+def expanded_search_space() -> SearchSpaceVersion:
+    """Return the frozen, validated catalog used by the paper ablation arm.
+
+    This keeps the default catalog fixed while exposing the existing per-step
+    K/V policy operator as one explicit search-space expansion.
+    """
+
+    base = default_search_space()
+    timestep_attention = OperatorSpec(
+        "timestep_attention_policy",
+        "1",
+        {"rules": "list[object]", "policy": "str"},
+        "timestep_attention",
+        ("per_sample_timestep", "reduced_kv_length", "self_attention_only"),
+        ("dynamic_policy", "requires_temporal_sensitivity"),
+        "timestep_attention_policy",
+        execution_domain="runtime",
+        implementation_ref="harness4h3.operators.wan.compression.TimestepAttentionPolicyOperator",
+    )
+    return SearchSpaceVersion(
+        version_id="S0002",
+        parent_version_id=base.version_id,
+        operators=(*base.operators, timestep_attention),
+        constraints=dict(base.constraints),
+        evidence_ids=("builtin-expanded-catalog-v1",),
+        status="validated",
+    )
+
+
 class SearchSpaceManager:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, initial_version: Optional[SearchSpaceVersion] = None) -> None:
         self.store = SearchSpaceStore(Path(root))
         self.implementation_registry = OperatorImplementationRegistry(_TRUSTED_FACTORIES)
         if self.store.latest() is None:
-            self.store.write_version(default_search_space())
+            self.store.write_version(initial_version or default_search_space())
         if self.store.read_active_id() is None:
             latest = self.store.latest()
             if latest is not None:
                 self.store.write_active_id(latest.version_id)
+        if initial_version is not None and self.active.to_dict() != initial_version.to_dict():
+            raise ValueError("frozen_search_space_does_not_match_requested_catalog")
 
     @property
     def active(self) -> SearchSpaceVersion:
@@ -715,6 +748,8 @@ _TRUSTED_FACTORIES: dict[str, Callable[[], Any]] = {
     "token_merge": TokenMergeOperator,
     "kv_token_select": KVTokenSelectionOperator,
     "sparse_runtime": SparseRuntimeOperator,
+    "svoo_attention": SVOOAttentionOperator,
+    "magcache": MagCacheOperator,
     "attention_window": AttentionWindowOperator,
     "sampling_step_skip": SamplingStepSkipOperator,
 }

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "result_kind": "console_derived_summary",
+  "raw_evaluation_artifact_copied_locally": false,
+  "method": "SparseVideo SVOO + Diffusers MagCache",
+  "recipe": {
+    "model": "Wan2.1-T2V-1.3B",
+    "resolution": "832x480",
+    "frames": 81,
+    "denoising_steps": 16,
+    "seed": 7,
+    "prompt": "A cinematic shot of a red fox running through fresh snow.",
+    "device": "NVIDIA L40, CUDA:3",
+    "dtype": "bfloat16",
+    "checkpoint_sha256": "dab2db83db4cd1f9c2a7ddb46e169711d688c84702bf78c589a3d3f3ce24776d",
+    "source_revision": "1290ae7+sorted-tree-py-v1:8aebf7b542b49a37c25befc6178c820f6086457d1e6a993a43cee69974b2de6"
+  },
+  "latency": {
+    "samples_seconds": [
+      38.98068927973509,
+      39.894706977996975,
+      40.564726904034615
+    ],
+    "median_seconds": 39.894706977996975,
+    "warmup_generations": 1,
+    "timed_generations": 3
+  },
+  "peak_allocated_memory_gib": 21.734930515289307,
+  "quality": {
+    "aggregate": 0.671527696152528,
+    "semantic": 0.6569067239761353,
+    "temporal": 0.9669956564903259,
+    "motion": 0.18293858071168265
+  },
+  "visual_gate": "pass",
+  "runtime_diagnostics": {
+    "svoo_log": "dense warmup steps 1-1/16; sparse attention active from step 2/16",
+    "post_run_dispatch_counters": "not retained in local artifacts",
+    "magcache_skip_count": "not exported by the hook"
+  },
+  "provenance_note": "Values transcribed from the completed evaluator output. They are not a substitute for the raw evaluation JSON, which was not copied into the local worktree. Single prompt/seed; no statistical quality claim."
+}

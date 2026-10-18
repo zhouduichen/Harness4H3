@@ -1,0 +1,33 @@
+/home/intern/miniconda3/envs/sparsevideo/lib/python3.12/site-packages/torch/cuda/__init__.py:789: UserWarning: Can't initialize NVML
+  warnings.warn("Can't initialize NVML")
+Loading pipeline components...:   0%|          | 0/5 [00:00<?, ?it/s]
+Loading weights:   0%|          | 0/242 [00:00<?, ?it/s][A
+Loading weights:  17%|█▋        | 41/242 [00:00<00:00, 400.72it/s][A
+Loading weights:  36%|███▌      | 87/242 [00:00<00:00, 398.29it/s][A
+Loading weights:  52%|█████▏    | 127/242 [00:00<00:00, 387.83it/s][A
+Loading weights:  69%|██████▉   | 167/242 [00:00<00:00, 377.14it/s][A
+Loading weights:  86%|████████▌ | 207/242 [00:00<00:00, 374.43it/s][ALoading weights: 100%|██████████| 242/242 [00:00<00:00, 308.13it/s]
+Loading pipeline components...:  20%|██        | 1/5 [00:01<00:06,  1.57s/it]Loading pipeline components...:  60%|██████    | 3/5 [00:03<00:01,  1.02it/s]
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s][A
+Loading checkpoint shards:  50%|█████     | 1/2 [00:00<00:00,  5.71it/s][ALoading checkpoint shards: 100%|██████████| 2/2 [00:00<00:00,  9.90it/s]
+Loading pipeline components...: 100%|██████████| 5/5 [00:03<00:00,  1.83it/s]Loading pipeline components...: 100%|██████████| 5/5 [00:03<00:00,  1.47it/s]
+
+[MagCache] Calibration Complete. Copy these values to MagCacheConfig(mag_ratios=...):
+[1.0, 1.0026278495788574, 0.9675757884979248, 0.9690266847610474, 0.9730511903762817, 0.9713815450668335, 0.9706386923789978, 0.963576078414917, 0.9582207202911377, 0.9527050852775574, 0.9466575980186462, 0.9314841628074646, 0.9141141176223755, 0.8959954380989075, 0.8552905321121216, 0.798107385635376]
+
+
+[MagCache] Calibration Complete. Copy these values to MagCacheConfig(mag_ratios=...):
+[1.0, 1.0061253309249878, 0.9670678377151489, 0.968999981880188, 0.9731523394584656, 0.9714646339416504, 0.9706717133522034, 0.9636367559432983, 0.958404541015625, 0.9528405666351318, 0.9466909766197205, 0.9316523671150208, 0.9141300320625305, 0.8961281776428223, 0.8556910753250122, 0.7987285852432251]
+
+Traceback (most recent call last):
+  File "/home/intern/huangjiahao/Harness4H3-rsi/work/codex-wan-rsi-profiling-20261018-r3/tools/run_wan_evaluator_once.py", line 74, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/home/intern/huangjiahao/Harness4H3-rsi/work/codex-wan-rsi-profiling-20261018-r3/tools/run_wan_evaluator_once.py", line 68, in main
+    result = evaluator._evaluate_artifact(artifact)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/intern/huangjiahao/Harness4H3-rsi/work/codex-wan-rsi-profiling-20261018-r3/harness4h3/evolution/evaluator.py", line 572, in _evaluate_artifact
+    self._write_video(frames, video_path, float(self._wan_spec["native_fps"]))
+  File "/home/intern/huangjiahao/Harness4H3-rsi/work/codex-wan-rsi-profiling-20261018-r3/harness4h3/evolution/evaluator.py", line 1033, in _write_video
+    import cv2
+ModuleNotFoundError: No module named 'cv2'

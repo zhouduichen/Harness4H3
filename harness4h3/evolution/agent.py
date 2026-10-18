@@ -102,6 +102,22 @@ def _concise_multigranular_search_program_suffix(algorithm_id: str) -> str:
     layers = [x for x in profile.get('layers', []) if isinstance(x, dict) and x.get('block_id')]
     ids = [str(x['block_id']) for x in layers]
     costs = {str(x['block_id']): float(x.get('latency_ms', x.get('estimated_flops', 0.0)) or 0.0) for x in layers}
+    cost_source = 'structural_profile_proxy'
+    execution = profile.get('execution', {})
+    execution_cases = execution.get('cases', []) if isinstance(execution, dict) else []
+    reference_case = next((x for x in execution_cases if isinstance(x, dict) and x.get('variant') == 'dense'), None)
+    if isinstance(reference_case, dict):
+        diagnostic = reference_case.get('diagnostic_pass', {})
+        module_rows = diagnostic.get('module_timings', []) if isinstance(diagnostic, dict) else []
+        measured_costs = {
+            str(x.get('block_id')): float(x.get('cuda_time_ms_total', 0.0))
+            for x in module_rows
+            if isinstance(x, dict) and x.get('category') == 'transformer_block' and x.get('block_id') in ids
+            and finite(x.get('cuda_time_ms_total')) and float(x.get('cuda_time_ms_total')) > 0.0
+        }
+        if measured_costs:
+            costs.update(measured_costs)
+            cost_source = 'real_cuda_transformer_block_forward_hook'
     block_rows = profile.get('block_timestep_sensitivity') or profile.get('tica_block_sensitivity') or profile.get('block_sensitivity', [])
     block_scores, by_time = {}, {}
     for row in block_rows:
@@ -171,6 +187,23 @@ def _concise_multigranular_search_program_suffix(algorithm_id: str) -> str:
     targets = [int(x['target_steps']) for x in steps if isinstance(x, dict) and x.get('available') is not False and x.get('target_steps') is not None]
     for target in sorted(set(targets), reverse=True):
         add('sampling_step_skip', {'target_steps': target}, 0.15)
+    recipe = reference_case.get('recipe', {}) if isinstance(reference_case, dict) else {}
+    step_count = int(recipe.get('num_inference_steps', 16)) if isinstance(recipe, dict) else 16
+    svoo_args = {'method': 'svoo', 'model_key': 'wan21-t2v-1.3b', 'config': {}}
+    magcache_config = {'threshold': 0.12, 'max_skip_steps': 4, 'retention_ratio': 0.2, 'num_inference_steps': step_count, 'calibrate': False}
+    if step_count == 16:
+        magcache_config['mag_ratios'] = [1.0, 1.0043765903, 0.9673218131, 0.9690133333, 0.9731017649, 0.9714230895, 0.9706552029, 0.9636064172, 0.9583126307, 0.9527728260, 0.9466742873, 0.9315682659, 0.9141220748, 0.8960618079, 0.8554908037, 0.7984179854]
+    magcache_args = {'method': 'magcache', 'config': magcache_config}
+    category_costs = diagnostic.get('category_cuda_time_ms_total', {}) if isinstance(reference_case, dict) and isinstance(diagnostic, dict) else {}
+    attention_priority = float(category_costs.get('self_attention', category_costs.get('self_attention_cuda_ms', 0.0)) or 0.0) if isinstance(category_costs, dict) else 0.0
+    full_generation_s = float(reference_case.get('generation_wall_time_s', 0.0) or 0.0) if isinstance(reference_case, dict) else 0.0
+    add('svoo_attention', svoo_args, max(attention_priority, 0.01))
+    add('magcache', magcache_args, max(full_generation_s * 1000.0, 0.01))
+    if 'compose' in names and 'svoo_attention' in names and 'magcache' in names:
+        add('compose', {'steps': [
+            {'operator': 'svoo_attention', 'args': svoo_args},
+            {'operator': 'magcache', 'args': magcache_args},
+        ]}, max(attention_priority, 0.01) + max(full_generation_s * 1000.0, 0.01))
     intervals = {'high_noise': (0.85, 0.95), 'middle': (0.45, 0.55), 'low_noise': (0.05, 0.15)}
     temporal = [(v, b, t) for b, values in by_time.items() for t, v in values.items() if t in intervals]
     temporal.sort()
@@ -181,12 +214,6 @@ def _concise_multigranular_search_program_suffix(algorithm_id: str) -> str:
             add('timestep_block_gate', gate, 1.0 / (1.0 + max(0.0, delta)))
             if ratios and 'timestep_attention_policy' in names:
                 add('timestep_attention_policy', {'rules': [{'min_timestep': low, 'max_timestep': high, 'keep_ratio': ratios[0], 'block_ids': [b], 'score': 'l2_norm'}], 'policy': 'select_kv_tokens'}, 1.0 / (1.0 + max(0.0, delta)))
-            if ratios and 'compose' in names and 'kv_token_select' in names and 'sparse_runtime' in names:
-                add('compose', {'steps': [
-                    {'operator': 'timestep_block_gate', 'args': gate},
-                    {'operator': 'kv_token_select', 'args': {'keep_ratio': ratios[0], 'block_ids': [b], 'score': 'l2_norm'}},
-                    {'operator': 'sparse_runtime', 'args': {'keep_ratio': ratios[0], 'attention': 'attn1'}}
-                ]}, 0.18)
     elif 'timestep_block_gate' not in names:
         omitted.append({'operator': 'timestep_block_gate', 'reason': 'operator_not_in_active_search_space'})
     else:
@@ -196,8 +223,16 @@ def _concise_multigranular_search_program_suffix(algorithm_id: str) -> str:
     elif not temporal or not ratios:
         omitted.append({'operator': 'timestep_attention_policy', 'reason': 'missing_token_or_temporal_sensitivity'})
     proposed = state.get('proposed_plan') if isinstance(state, dict) else None
-    if isinstance(proposed, dict) and not state.get('algorithm_improvement') and proposed.get('operator') in names and isinstance(proposed.get('args'), dict) and proposed not in plans:
+    proposed_ok = isinstance(proposed, dict) and proposed.get('operator') in names and isinstance(proposed.get('args'), dict)
+    if proposed_ok and proposed.get('operator') == 'compose':
+        proposed_steps = proposed['args'].get('steps', [])
+        proposed_ok = isinstance(proposed_steps, list) and len(proposed_steps) == 2 and all(isinstance(step, dict) and isinstance(step.get('args'), dict) and step.get('operator') in names for step in proposed_steps)
+        if proposed_ok:
+            proposed_ok = [step['operator'] for step in proposed_steps] == ['svoo_attention', 'magcache']
+    if proposed_ok and not state.get('algorithm_improvement') and proposed not in plans:
         plans.insert(0, proposed); scores.insert(0, 10.0)
+    elif isinstance(proposed, dict) and proposed.get('operator') == 'compose' and not proposed_ok:
+        omitted.append({'operator': 'compose', 'reason': 'unsupported_or_over_budget_interaction'})
     prior_plans = [item.get('plan') for item in state.get('measured_candidates', []) if isinstance(item, dict) and isinstance(item.get('plan'), dict)]
     retained = [(plan, score) for plan, score in zip(plans, scores) if plan not in prior_plans]
     omitted.extend({'operator': plan.get('operator'), 'reason': 'previously_measured_same_parent'} for plan, _score in zip(plans, scores) if plan in prior_plans)
@@ -205,17 +240,45 @@ def _concise_multigranular_search_program_suffix(algorithm_id: str) -> str:
     if not plans and retained == [] and prior_plans:
         omitted.append({'operator': 'search', 'reason': 'all_evidence_supported_candidates_already_measured'})
     limit = max(1, min(64, int(state.get('budget', {}).get('max_candidates', 16) or 16)))
-    family = {'prune_blocks': 'structure', 'head_gating': 'head', 'prune_tokens': 'token', 'token_merge': 'token', 'kv_token_select': 'kv', 'sparse_runtime': 'attention', 'attention_window': 'attention', 'sampling_step_skip': 'sampling', 'timestep_block_gate': 'timestep', 'timestep_attention_policy': 'timestep', 'compose': 'hybrid'}
+    family = {'prune_blocks': 'structure', 'head_gating': 'head', 'prune_tokens': 'token', 'token_merge': 'token', 'kv_token_select': 'kv', 'sparse_runtime': 'attention', 'svoo_attention': 'attention', 'magcache': 'cache', 'attention_window': 'attention', 'sampling_step_skip': 'sampling', 'timestep_block_gate': 'timestep', 'timestep_attention_policy': 'timestep', 'compose': 'hybrid'}
     queues, family_order = {}, []
     for i, plan in enumerate(plans):
         key = family.get(plan['operator'], plan['operator'])
         if key not in queues: queues[key] = []; family_order.append(key)
         queues[key].append(i)
-    counts, offsets, chosen = {}, {}, []
+    counts = {str(k): max(0, int(v)) for k, v in state.get('family_sample_counts', {}).items()}
+    for item in state.get('measured_candidates', []):
+        if isinstance(item, dict) and item.get('valid') is True:
+            fam = str(item.get('family', ''))
+            if fam: counts[fam] = max(counts.get(fam, 0), 1)
+    offsets, chosen = {}, []
+    family_evidence = {str(k): float(v) for k, v in state.get('family_gpu_evidence', {}).items() if finite(v) and float(v) >= 0.0}
+    for item in state.get('measured_candidates', []):
+        if not isinstance(item, dict) or item.get('valid') is not True or item.get('quality_feasible') is not True:
+            continue
+        if item.get('offline_simulation') is True or item.get('evidence_level') not in ('real_wan_gpu', 'measured_video'):
+            continue
+        fam = str(item.get('family', ''))
+        latency_gain = item.get('latency_gain_s')
+        evaluation_cost = item.get('evaluation_cost_s')
+        if finite(latency_gain) and finite(evaluation_cost) and float(evaluation_cost) > 0:
+            family_evidence[fam] = max(family_evidence.get(fam, 0.0), max(0.0, float(latency_gain)) / float(evaluation_cost))
+    # Ensure one unmeasured family probe when the budget permits; use real
+    # same-parent gain per GPU second afterward, with profile bottlenecks as
+    # the deterministic cold-start prior.
+    unmeasured = [key for key in family_order if counts.get(key, 0) == 0]
+    for key in unmeasured[:limit]:
+        chosen.append(queues[key][0]); offsets[key] = 1; counts[key] = 1
     while len(chosen) < min(limit, len(plans)):
         available = [key for key in family_order if offsets.get(key, 0) < len(queues[key])]
         if not available: break
-        key = min(available, key=lambda item: (counts.get(item, 0), family_order.index(item)))
+        def priority(key):
+            row = queues[key][offsets.get(key, 0)]
+            cold = max(0.0, float(scores[row]))
+            evidence = family_evidence.get(key)
+            count = counts.get(key, 0)
+            return (-(float(evidence) if evidence is not None else cold) / (1.0 + count), count, family_order.index(key))
+        key = min(available, key=priority)
         chosen.append(queues[key][offsets.get(key, 0)])
         offsets[key] = offsets.get(key, 0) + 1; counts[key] = counts.get(key, 0) + 1
     plans = [plans[i] for i in chosen]
@@ -235,7 +298,21 @@ def _concise_multigranular_search_program_suffix(algorithm_id: str) -> str:
         rank.append(rank_queues[family_name][family_offsets.get(family_name, 0)])
         family_offsets[family_name] = family_offsets.get(family_name, 0) + 1
         family_counts[family_name] = family_counts.get(family_name, 0) + 1
-    return {'candidates': plans, 'rank': rank, 'stop': True, 'diagnostics': {'omitted': omitted, 'generated_operators': [x['operator'] for x in plans], 'family_ranking_order': [plans[i]['operator'] for i in rank], 'ranked_blocks': blocks}}
+    bottlenecks = {}
+    if isinstance(reference_case, dict):
+        diagnostic = reference_case.get('diagnostic_pass', {})
+        categories = diagnostic.get('category_cuda_time_ms_total', {}) if isinstance(diagnostic, dict) else {}
+        if isinstance(categories, dict): bottlenecks = categories
+    allocations = {key: sum(1 for plan in plans if family.get(plan['operator'], plan['operator']) == key) for key in sorted(set(family.get(plan['operator'], plan['operator']) for plan in plans))}
+    candidate_evidence = []
+    for i, plan in enumerate(plans):
+        family_name = family.get(plan['operator'], plan['operator'])
+        measured_utility = family_evidence.get(family_name)
+        allocation_reason = 'paired_real_wan_gain_per_gpu_second' if measured_utility is not None else ('profile_bottleneck_probe' if float(scores[i]) > 0.0 and bottlenecks else 'cold_start_family_probe')
+        evidence_refs = ['profile.execution.diagnostic_pass.category_cuda_time_ms_total'] if bottlenecks else []
+        if measured_utility is not None: evidence_refs.append('same_parent_real_wan_family_measurement')
+        candidate_evidence.append({'candidate_index': i, 'family': family_name, 'profile_score': float(scores[i]), 'measured_gain_per_gpu_second': measured_utility, 'allocation_reason': allocation_reason, 'evidence_refs': evidence_refs, 'family_sample_count': int(state.get('family_sample_counts', {}).get(family_name, 0)), 'module_timing_scope': 'inclusive_nested_for_bottleneck_order_only' if bottlenecks else 'unavailable'})
+    return {'candidates': plans, 'rank': rank, 'stop': True, 'diagnostics': {'omitted': omitted, 'generated_operators': [x['operator'] for x in plans], 'family_ranking_order': [plans[i]['operator'] for i in rank], 'family_allocated_counts': allocations, 'family_gpu_utility': family_evidence, 'candidate_evidence': candidate_evidence, 'ranked_blocks': blocks, 'block_cost_source': cost_source, 'inclusive_cuda_bottleneck_categories_ms': bottlenecks}}
 '''.replace('ALGORITHM_ID', algorithm_id)
 
 
@@ -902,6 +979,62 @@ def _deterministic_improvement_source(
     )
 
 
+def _compact_execution_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
+    execution = profile.get("execution")
+    if not isinstance(execution, Mapping) or execution.get("available") is not True:
+        return {}
+    compact: dict[str, Any] = {
+        "execution_schema_version": execution.get("execution_schema_version"),
+        "offline_simulation": execution.get("offline_simulation"),
+        "device": execution.get("device"),
+        "gpu_name": execution.get("gpu_name"),
+        "dtype": execution.get("dtype"),
+        "checkpoint_sha256": execution.get("checkpoint_sha256"),
+        "diagnostic_method": execution.get("diagnostic_method"),
+        "cases": [],
+    }
+    for case in execution.get("cases", ()):
+        if not isinstance(case, Mapping):
+            continue
+        diagnostic = case.get("diagnostic_pass")
+        diagnostic = diagnostic if isinstance(diagnostic, Mapping) else {}
+        modules = [item for item in diagnostic.get("module_timings", ()) if isinstance(item, Mapping)]
+        blocks = [item for item in modules if item.get("category") == "transformer_block"]
+        blocks.sort(key=lambda item: float(item.get("cuda_time_ms_total", 0.0) or 0.0), reverse=True)
+        trace = case.get("kernel_trace")
+        trace = trace if isinstance(trace, Mapping) else {}
+        operators = [
+            item for item in trace.get("operator_summaries", ())
+            if isinstance(item, Mapping) and str(item.get("operator", "")) not in {"ProfilerStep*", "Command Buffer Full"}
+        ]
+        steps = [item for item in diagnostic.get("denoising_step_timings", ()) if isinstance(item, Mapping)]
+        compact["cases"].append({
+            "variant": case.get("variant"),
+            "recipe": case.get("recipe"),
+            "warmup": case.get("warmup"),
+            "repeats": case.get("repeats"),
+            "latency_median_ms": case.get("latency_median_ms"),
+            "memory": case.get("memory"),
+            "inclusive_category_cuda_time_ms_total": diagnostic.get("category_cuda_time_ms_total"),
+            "inclusive_category_cuda_time_ms_by_step": diagnostic.get("category_cuda_time_ms_by_step"),
+            "transformer_step_cuda_time_ms": next((item.get("cuda_time_ms_by_step") for item in modules if item.get("category") == "transformer_forward"), {}),
+            "top_transformer_blocks": [
+                {key: item[key] for key in ("block_id", "cuda_time_ms_total", "cuda_time_ms_by_step") if key in item}
+                for item in blocks[:8]
+            ],
+            "denoising_steps": [
+                {key: item[key] for key in ("step_index", "timestep", "wall_time_ms", "peak_allocated_bytes", "peak_reserved_bytes") if key in item}
+                for item in steps
+            ],
+            "attention_head_execution": case.get("head_gating_execution"),
+            "step_kernel_operators": [
+                {key: item[key] for key in ("operator", "category", "calls", "self_cuda_time_us", "self_device_memory_bytes") if key in item}
+                for item in operators[:8]
+            ],
+        })
+    return compact
+
+
 def _compact_profile(profile: Mapping[str, Any], *, block_only: bool = False) -> dict[str, Any]:
     """Keep provider prompts bounded while retaining compression evidence."""
 
@@ -909,6 +1042,9 @@ def _compact_profile(profile: Mapping[str, Any], *, block_only: bool = False) ->
     for key in ("model", "provenance", "schema_version", "timestep_sensitivity", "sampling_step_sensitivity", "token_grid"):
         if key in profile:
             compact[key] = profile[key]
+    execution = _compact_execution_profile(profile)
+    if execution:
+        compact["execution"] = execution
     compact["layers"] = [
         {
             field: item[field]

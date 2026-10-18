@@ -1,0 +1,26 @@
+backend: diffusers
+checkpoint: ../../models/wan21-t2v-1.3b
+output_root: ../../experiments/wan-runtime-baselines-20261018/dense
+device: cuda:3
+dtype: bfloat16
+local_files_only: true
+seed: 7
+evaluator:
+  backend: wan_video
+  wan_config: ../wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml
+  evaluation_manifest: ../wan-rsi-hybrid-20261018/evaluation-manifest.json
+  clip_model_path: ../../models/clip-vit-large-patch14-336
+  device: cuda:3
+  pipeline_device: cuda:3
+  quality_device: cuda:3
+  dtype: bfloat16
+  local_files_only: true
+  max_cases: 1
+  seed_count: 1
+  sample_frames: 4
+  latency_warmup: 1
+  latency_repeats: 3
+  evaluation_split: validation
+  source_revision: 1290ae7+sorted-py-sha256-v1:f234b97081746f27cfcf0fabd5af888ce6bd9076a29c6959df2f395437044b9a
+  execution_profile: ../../experiments/wan-rsi-hybrid-20261018/profile.json
+  runtime_attention: {}

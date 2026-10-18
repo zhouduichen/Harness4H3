@@ -3,7 +3,11 @@ from unittest.mock import patch
 
 from harness4h3.adapters.wan import FakeWanDiTAdapter
 from harness4h3.evolution.agent import AlgorithmAgent
-from harness4h3.evolution.loop import EvolutionLoop
+from harness4h3.evolution.loop import (
+    EvolutionLoop,
+    _algorithm_candidate_search_cost,
+    _same_parent_family_gpu_utility,
+)
 from harness4h3.operators.wan import default_search_space
 
 
@@ -243,3 +247,80 @@ def test_valid_near_miss_enters_validation_without_lowering_quality_gate(tmp_pat
     assert search['evaluated_candidate_count'] == evaluator_class.return_value.evaluate.call_count
     assert len(search['candidate_results']) == evaluator_class.return_value.evaluate.call_count
     assert all(row['parent_checkpoint_sha256'] == parent.sha256 for row in search['candidate_results'])
+
+
+def test_family_utility_uses_only_feasible_same_parent_real_video_and_explicit_gpu_cost():
+    specs = {
+        spec.name: {"granularity": spec.granularity}
+        for spec in default_search_space().operators
+    }
+    eligible = {
+        "decision": {
+            "parent_checkpoint_sha256": "parent-a",
+            "parent_hardware_metrics": {"inference_wall_time_s_mean": 10.0},
+            "feasible": True,
+            "algorithm_plan": {"operator": "svoo_attention", "args": {}},
+        },
+        "evaluation": {
+            "evaluation_status": "measured_video",
+            "valid": True,
+            "feasible": True,
+            "hardware_metrics": {"inference_wall_time_s_mean": 5.0, "gpu_runtime_cost_s": 10.0},
+        },
+    }
+    invalid = {
+        **eligible,
+        "evaluation": {**eligible["evaluation"], "valid": False},
+    }
+    quality_gate_failure = {
+        **eligible,
+        "decision": {**eligible["decision"], "feasible": False},
+    }
+    fake = {
+        **eligible,
+        "evaluation": {**eligible["evaluation"], "offline_simulation": True},
+    }
+    missing_cost = {
+        **eligible,
+        "evaluation": {
+            **eligible["evaluation"],
+            "hardware_metrics": {"inference_wall_time_s_mean": 1.0},
+        },
+    }
+    other_parent = {
+        **eligible,
+        "decision": {**eligible["decision"], "parent_checkpoint_sha256": "parent-b"},
+    }
+
+    utility, counts = _same_parent_family_gpu_utility(
+        [eligible, invalid, quality_gate_failure, fake, missing_cost, other_parent], "parent-a", specs
+    )
+
+    assert utility == {"attention": 0.5}
+    assert counts == {"attention": 1}
+
+
+def test_search_cost_keeps_failed_attempt_time_and_marks_gpu_cost_missing():
+    summary = _algorithm_candidate_search_cost([
+        {
+            "valid": True,
+            "quality_feasible": True,
+            "evaluation_cost": {"elapsed_s": 4.0},
+            "hardware_metrics": {"gpu_runtime_cost_s": 12.0},
+        },
+        {
+            "valid": False,
+            "quality_feasible": False,
+            "evaluation_cost": {"elapsed_s": 3.0},
+            "hardware_metrics": {"available": False},
+        },
+    ])
+
+    assert summary["candidate_count"] == 2
+    assert summary["invalid_candidate_count"] == 1
+    assert summary["quality_feasible_candidate_count"] == 1
+    assert summary["candidate_evaluation_elapsed_s_observed"] == 7.0
+    assert summary["candidate_evaluation_cost_complete"] is True
+    assert summary["gpu_runtime_cost_s_observed"] == 12.0
+    assert summary["gpu_runtime_cost_observations"] == 1
+    assert summary["gpu_runtime_cost_complete"] is False

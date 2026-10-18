@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and optionally manifest a matched four-arm Wan experiment."""
+"""Validate and optionally manifest a matched Wan experiment."""
 
 from __future__ import annotations
 
@@ -13,7 +13,9 @@ from harness4h3.evolution.protocol import (
     DEFAULT_EXPECTED_CASES,
     DEFAULT_LATENCY_REPEATS,
     DEFAULT_ROUNDS,
+    PAPER_REQUIRED_ARMS,
     ProtocolValidationError,
+    REQUIRED_ARMS,
     validate_protocol,
     write_manifests,
 )
@@ -49,7 +51,8 @@ def _write_json(path: Path, value: object) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run", action="append", required=True, type=_parse_run, help="ARM=CONFIG; repeat four times")
+    parser.add_argument("--run", action="append", required=True, type=_parse_run, help="ARM=CONFIG; repeat once per arm")
+    parser.add_argument("--paper", action="store_true", help="validate the six-arm RSI paper protocol")
     parser.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
     parser.add_argument("--expected-cases", type=int, default=DEFAULT_EXPECTED_CASES)
     parser.add_argument("--latency-repeats", type=int, default=DEFAULT_LATENCY_REPEATS)
@@ -72,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
             latency_repeats=args.latency_repeats,
             source_revision=args.source_revision,
             allow_missing_assets=args.allow_missing_assets,
+            required_arms=PAPER_REQUIRED_ARMS if args.paper else REQUIRED_ARMS,
         )
         if args.write_manifests:
             write_manifests(report)

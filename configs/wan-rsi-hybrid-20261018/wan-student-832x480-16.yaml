@@ -1,0 +1,8 @@
+wan_student:
+  model_id: wan21-t2v-1.3b
+  width: 832
+  height: 480
+  num_frames: 81
+  native_fps: 16
+  num_inference_steps: 16
+  guidance_scale: 5.0

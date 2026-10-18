@@ -71,6 +71,33 @@ def test_registry_keeps_legacy_operator_names():
     )
 
 
+def test_external_runtime_operators_round_trip_and_remain_distinct(tmp_path):
+    adapter, parent = _parent(tmp_path)
+    registry = build_wan_compression_registry(include_multigranular=True)
+    assert "sparse_runtime" in registry.names()
+    assert "svoo_attention" in registry.names()
+    assert "magcache" in registry.names()
+    result = registry.execute(
+        "compose",
+        adapter,
+        parent,
+        {
+            "steps": [
+                {"operator": "svoo_attention", "args": {"method": "svoo", "model_key": "wan21-t2v-1.3b", "config": {"upstream_extra": 3}}},
+                {"operator": "magcache", "args": {"method": "magcache", "config": {"threshold": 0.12}}},
+            ]
+        },
+        tmp_path / "external-composite",
+    )
+
+    assert result.status == "success"
+    assert [item["operator"] for item in result.structural_change["steps"]] == ["svoo_attention", "magcache"]
+    assert all(item["structural_change"]["parameter_reduction_ratio"] == 0.0 for item in result.structural_change["steps"])
+    child = adapter.reload_model(result.child_checkpoint)
+    assert [item["operator"] for item in child._harness4h3_external_runtime_policies] == ["svoo_attention", "magcache"]
+    assert child._harness4h3_external_runtime_policies[0]["args"]["config"]["upstream_extra"] == 3
+
+
 def test_profile_guided_exploration_remains_block_only(tmp_path):
     adapter, parent = _parent(tmp_path)
     profile = {

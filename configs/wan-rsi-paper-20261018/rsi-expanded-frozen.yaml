@@ -1,0 +1,51 @@
+backend: diffusers
+checkpoint: ../../models/wan21-t2v-1.3b
+output_root: ../../experiments/wan-rsi-paper-20261018/rsi-expanded-frozen
+device: cuda:3
+dtype: bfloat16
+local_files_only: true
+sandbox_timeout_s: 20
+exploit_ratio: 0.7
+seed: 7
+advanced_profiling: true
+memory_enabled: true
+adapt_search_policy: true
+algorithm_improvement: true
+search_space_evolution: false
+candidate_screening: false
+algorithm_probe_samples: 3
+controller:
+  provider: vllm
+  model: qwen3.5-controller
+  model_version: Qwen3.5-35B-A3B-FP8
+  endpoint: http://127.0.0.1:8000/v1/chat/completions
+  api_key_env: ''
+  timeout_s: 180
+evaluator:
+  backend: wan_video
+  wan_config: ../../configs/wan-rsi-hybrid-20261018/wan-student-832x480-16.yaml
+  evaluation_manifest: ../../configs/wan-rsi-hybrid-20261018/evaluation-manifest.json
+  clip_model_path: ../../models/clip-vit-large-patch14-336
+  device: cuda:3
+  quality_device: cuda:3
+  dtype: bfloat16
+  local_files_only: true
+  max_cases: 3
+  seed_count: 2
+  sample_frames: 4
+  latency_warmup: 1
+  latency_repeats: 3
+  max_quality_drop: 0.05
+  evaluation_split: validation
+  source_revision: 1290ae7+source-tree-v2:ac9be420e65ec3708b555db3957674748e4d20f12a8b5714c9d15e895e9b4580
+  visual_quality_gate:
+    enabled: true
+    version: visual-structure-v1
+    min_spatial_gradient: 0.05
+    min_laplacian_std: 0.5
+    min_block_variance: 1.0
+    min_frame_difference: 0.001
+    max_low_texture_frame_ratio: 0.75
+  execution_profile: ../../experiments/wan-rsi-hybrid-20261018/profile.json
+  pipeline_device: cuda:3
+frozen_expanded_search_space: true

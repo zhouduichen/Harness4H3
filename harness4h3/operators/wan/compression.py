@@ -6,7 +6,7 @@ from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from ...adapters.wan.contracts import CheckpointArtifact, ChannelPruningConfig, CompressionResult, WanModelAdapter
 from .runtime_gating import validate_timestep_attention_plan, validate_timestep_gate_plan
-from .runtime_policy import AttentionWindowPolicy, HeadGatingPolicy, KVTokenSelectionPolicy, SamplingStepPolicy, SparseRuntimePolicy, TokenMergePolicy, TokenSparsityPolicy
+from .runtime_policy import AttentionWindowPolicy, HeadGatingPolicy, KVTokenSelectionPolicy, MagCachePolicy, SamplingStepPolicy, SparseRuntimePolicy, SVOOPolicy, TokenMergePolicy, TokenSparsityPolicy
 
 
 class CompressionOperator(Protocol):
@@ -133,6 +133,7 @@ def _execute_runtime_policy(
     parser: Callable[[Mapping[str, Any]], Any],
     adapter_method: str,
     failure_type: str,
+    external: bool = False,
 ) -> CompressionResult:
     started = time.monotonic()
     try:
@@ -141,12 +142,18 @@ def _execute_runtime_policy(
         method = getattr(adapter, adapter_method, None)
         if not callable(method):
             return _failed(parent, "unsupported_model_layout", "%s is not implemented by this Wan adapter" % adapter_method, started)
-        change = method(model, policy.to_dict())
+        change = method(model, [{"operator": policy_name, "args": policy.to_dict()}] if external else policy.to_dict())
         child = adapter.save_model(model, Path(output_dir))
         if child.sha256 == parent.sha256:
             return _failed(parent, "checkpoint_not_changed", "%s did not change runtime policy" % policy_name, started)
         reloaded = adapter.reload_model(child)
         restored = getattr(reloaded, "_harness4h3_%s_policy" % policy_name, None)
+        if external and restored is None:
+            transformer = getattr(reloaded, "transformer", reloaded)
+            for item in getattr(transformer, "_harness4h3_external_runtime_policies", []) or []:
+                if isinstance(item, Mapping) and item.get("operator") == policy_name:
+                    restored = item.get("args")
+                    break
         if restored is None:
             transformer = getattr(reloaded, "transformer", reloaded)
             restored = getattr(getattr(transformer, "config", None), "harness4h3_%s" % policy_name, None)
@@ -205,6 +212,24 @@ class SparseRuntimeOperator:
 
     def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
         return _execute_runtime_policy(adapter, parent, plan, output_dir, policy_name="sparse_runtime", parser=SparseRuntimePolicy.from_mapping, adapter_method="apply_sparse_runtime", failure_type="sparse_runtime_failed")
+
+
+class SVOOAttentionOperator:
+    """Persist policy for the upstream SparseVideo SVOO implementation."""
+
+    name = "svoo_attention"
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        return _execute_runtime_policy(adapter, parent, plan, output_dir, policy_name="svoo_attention", parser=SVOOPolicy.from_mapping, adapter_method="apply_external_runtime_policy", failure_type="svoo_attention_failed", external=True)
+
+
+class MagCacheOperator:
+    """Persist policy for Diffusers' upstream MagCache implementation."""
+
+    name = "magcache"
+
+    def execute(self, adapter: WanModelAdapter, parent: CheckpointArtifact, plan: Mapping[str, Any], output_dir: Path) -> CompressionResult:
+        return _execute_runtime_policy(adapter, parent, plan, output_dir, policy_name="magcache", parser=MagCachePolicy.from_mapping, adapter_method="apply_external_runtime_policy", failure_type="magcache_failed", external=True)
 
 
 class AttentionWindowOperator:
@@ -374,6 +399,8 @@ class CompositeCompressionOperator:
         "token_merge": TokenMergeOperator,
         "kv_token_select": KVTokenSelectionOperator,
         "sparse_runtime": SparseRuntimeOperator,
+        "svoo_attention": SVOOAttentionOperator,
+        "magcache": MagCacheOperator,
         "attention_window": AttentionWindowOperator,
         "sampling_step_skip": SamplingStepSkipOperator,
         "timestep_block_gate": TimestepBlockGatingOperator,
@@ -520,6 +547,8 @@ def build_wan_compression_registry(*, include_tica: bool = False, include_multig
                 TokenMergeOperator(),
                 KVTokenSelectionOperator(),
                 SparseRuntimeOperator(),
+                SVOOAttentionOperator(),
+                MagCacheOperator(),
                 AttentionWindowOperator(),
                 SamplingStepSkipOperator(),
                 TimestepBlockGatingOperator(),
