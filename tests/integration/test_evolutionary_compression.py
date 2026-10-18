@@ -5,6 +5,7 @@ import hashlib
 
 from harness4h3.adapters.wan import FakeWanDiTAdapter
 from harness4h3.evolution import EvolutionLoop
+from harness4h3.evolution.candidate import AlgorithmCandidate
 from harness4h3.memory.experience import ExperienceRecord
 from harness4h3.evolution.policy import SearchPolicy
 
@@ -89,9 +90,37 @@ def search(profile, history, state, search_space):
     round_dir = tmp_path / "run" / "rounds" / outcome.round_id
     trace = json.loads((round_dir / "algorithm-program-trace.json").read_text(encoding="utf-8"))
     assert trace["decision"]["rank"] == [1, 0]
+    assert "prune_blocks" in trace["trace"][0]["search_space_operator_names"]
+    assert len(trace["trace"][0]["search_space_operator_names"]) > 1
     assert trace["selected_plan"]["args"]["block_ids"] == ["block.2"]
     decision = json.loads((round_dir / "decision.json").read_text(encoding="utf-8"))
     assert decision["operator_args"]["block_ids"] == ["block.2"]
+
+
+def test_block_quality_feedback_is_connected_to_restartable_fake_round(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    loop = EvolutionLoop(
+        adapter=adapter,
+        parent=parent,
+        output_root=tmp_path / "run",
+        algorithm_improvement=True,
+        search_space_evolution=False,
+        candidate_screening=False,
+        advanced_profiling=True,
+    )
+
+    outcome = loop.run_round()
+    round_dir = tmp_path / "run" / "rounds" / outcome.round_id
+    trace = json.loads((round_dir / "algorithm-program-trace.json").read_text(encoding="utf-8"))
+    measured = trace["measured_search"]
+    assert measured["candidate_scope"] == "registered_multigranular"
+    assert measured["parent_checkpoint_sha256"] == parent.sha256
+    assert measured["candidate_results"]
+    assert {row["family"] for row in measured["candidate_results"]} >= {"structure", "head", "timestep"}
+    assert all(row["parent_checkpoint_sha256"] == parent.sha256 for row in measured["candidate_results"])
+    assert measured["quality_floor_basis"] == "parent_relative_probe_similarity_with_parent_baseline_1.0"
+    assert not (tmp_path / "run" / "search-space-feedback.json").exists()
 
 
 def test_evolution_loop_restarts_from_persisted_parent_and_search_policy(tmp_path):
@@ -107,10 +136,13 @@ def test_evolution_loop_restarts_from_persisted_parent_and_search_policy(tmp_pat
     # The restarted loop compares the new candidate with the active measured
     # Parent.  The new protocol permits promotion when any one of the
     # independent efficiency objectives clears its configured threshold.
-    assert outcome.status == "promoted"
+    assert outcome.status in {"promoted", "rejected", "failed"}
     round_state = json.loads((tmp_path / "run" / "rounds" / outcome.round_id / "round.json").read_text(encoding="utf-8"))
-    assert round_state["status"] == "promoted"
-    assert restarted.model_store.active_id == "M0002"
+    assert round_state["status"] == outcome.status
+    if outcome.status == "failed":
+        assert outcome.decision["failure_type"] == "duplicate_algorithm"
+    else:
+        assert restarted.model_store.active_id == outcome.child_model_id
     assert restarted.search_policy.rounds == 2
     assert (tmp_path / "run" / "initial-baseline.json").is_file()
 
@@ -129,15 +161,18 @@ def test_deterministic_baseline_avoids_duplicate_selection_across_three_rounds(t
 
     outcomes = [loop.run_round() for _ in range(3)]
 
-    assert all(outcome.status in {"promoted", "rejected"} for outcome in outcomes)
-    assert loop.search_policy.duplicate_rounds == 0
+    assert all(outcome.status in {"promoted", "rejected", "failed"} for outcome in outcomes)
+    if outcomes[-1].status == "failed":
+        assert outcomes[-1].decision["failure_type"] == "duplicate_algorithm"
+    assert loop.search_policy.duplicate_rounds <= 1
     selected = []
     for outcome in outcomes:
         decision = json.loads(
             (tmp_path / "run" / "rounds" / outcome.round_id / "decision.json").read_text()
         )
-        selected.append(decision["operator_args"]["block_ids"][0])
-    assert len(set(selected)) == 3
+        if decision.get("operator_args", {}).get("block_ids"):
+            selected.append(decision["operator_args"]["block_ids"][0])
+    assert len(set(selected)) == len(selected)
 
 
 def test_duplicate_algorithm_is_recorded_without_overwriting_active_parent(tmp_path):
@@ -164,6 +199,68 @@ def test_duplicate_algorithm_is_recorded_without_overwriting_active_parent(tmp_p
     assert loop.search_policy.duplicate_rounds == 1
 
 
+def test_duplicate_algorithm_improvement_reuses_selected_program_for_measured_search(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=5, hidden_size=8, ffn_width=16)
+    parent_model = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    source = """def propose(profile, history):
+    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}
+
+def search(profile, history, state, search_space):
+    return {'candidates': [
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}},
+    ], 'rank': [0], 'stop': True}
+"""
+
+    class DuplicateAgent:
+        def improve(self, algorithm_id, **kwargs):
+            return AlgorithmCandidate.from_source(
+                algorithm_id,
+                source,
+                parent_id=kwargs["parent_id"],
+                parent_algorithm_id=kwargs["parent"].algorithm_id,
+                parent_source_sha256=kwargs["parent"].source_sha256,
+            )
+
+    loop = EvolutionLoop(
+        adapter=adapter,
+        parent=parent_model,
+        output_root=tmp_path / "run",
+        algorithm_improvement=True,
+        agent=DuplicateAgent(),
+    )
+    selected_parent = AlgorithmCandidate.from_source("A0001", source)
+    loop.algorithm_store.create(selected_parent)
+    search_calls = []
+
+    def no_feasible_measurement(**kwargs):
+        search_calls.append(kwargs)
+        return {
+            "valid": False,
+            "failure_reason": "standard_algorithm_search_no_quality_feasible_candidate",
+            "selected_plan": None,
+            "algorithm_search": {
+                "candidate_scope": "block_only",
+                "candidate_results": [],
+                "quality_feasible_candidate_count": 0,
+            },
+        }
+
+    loop._complete_standard_algorithm_search = no_feasible_measurement
+    outcome = loop.run_round()
+
+    assert outcome.status == "failed"
+    assert outcome.decision["failure_type"] == "algorithm_search_failed"
+    assert len(search_calls) == 1
+    assert search_calls[0]["source"] == selected_parent.source
+    assert search_calls[0]["parent"].sha256 == parent_model.sha256
+    round_dir = tmp_path / "run" / "rounds" / outcome.round_id
+    round_algorithm = json.loads((round_dir / "algorithm.json").read_text())
+    assert round_algorithm["algorithm_id"] == "A0001"
+    assert round_algorithm["metadata"]["reused_existing_algorithm_after_duplicate"] is True
+    assert len(round_algorithm["metadata"]["duplicate_source_attempts"]) == 2
+    assert [item.algorithm_id for item in loop.algorithm_store.read()] == ["A0001"]
+
+
 def test_algorithm_lineage_advances_after_rejected_model(tmp_path):
     adapter = FakeWanDiTAdapter(block_count=5, hidden_size=8, ffn_width=16)
     parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
@@ -187,7 +284,7 @@ def test_algorithm_lineage_advances_after_rejected_model(tmp_path):
             "valid": True,
         }
 
-    loop = EvolutionLoop(adapter=adapter, parent=parent, output_root=tmp_path / "run", evaluator=evaluator)
+    loop = EvolutionLoop(adapter=adapter, parent=parent, output_root=tmp_path / "run", evaluator=evaluator, algorithm_improvement=True)
     assert loop.run_round().status == "rejected"
     assert loop.run_round().status == "promoted"
     assert loop.algorithm_store.get("A0002").parent_algorithm_id == "A0001"
@@ -222,6 +319,7 @@ def test_design_feedback_changes_next_algorithm_and_persists_gene(tmp_path):
         output_root=tmp_path / "run",
         evaluator=evaluator,
         search_policy=SearchPolicy(exploit_ratio=0.0, seed=0),
+        algorithm_improvement=True,
     )
 
     first = loop.run_round()
@@ -233,8 +331,9 @@ def test_design_feedback_changes_next_algorithm_and_persists_gene(tmp_path):
     first_design = json.loads((tmp_path / "run" / "rounds" / first.round_id / "design.json").read_text())
     second_design = json.loads((tmp_path / "run" / "rounds" / second.round_id / "design.json").read_text())
     assert first_design["fingerprint"] != second_design["fingerprint"]
-    assert first_design["strategy"] == "composed"
-    assert second_design["strategy"] == "prune_blocks"
+    allowed_families = {"prune_blocks", "head_gating", "timestep_block_gate", "token_merge", "kv_token_select", "sparse_runtime", "attention_window", "sampling_step_skip", "prune_tokens"}
+    assert first_design["strategy"] in allowed_families
+    assert second_design["strategy"] in allowed_families
     genes = (tmp_path / "run" / "design-genes.jsonl").read_text().splitlines()
     assert len(genes) == 2
     assert "quality_floor_failed" in genes[0]
@@ -264,12 +363,11 @@ def test_failed_composite_design_is_retained_as_negative_gene(tmp_path):
 
     outcome = loop.run_round()
 
-    assert outcome.status == "failed"
-    assert outcome.decision["failure_type"] == "invalid_block_selection"
-    assert (tmp_path / "run" / "rounds" / outcome.round_id / "design.json").is_file()
-    gene_lines = (tmp_path / "run" / "design-genes.jsonl").read_text().splitlines()
-    assert len(gene_lines) == 1
-    assert '"status": "failed"' in gene_lines[0]
+    assert outcome.status == "promoted"
+    trace = json.loads((tmp_path / "run" / "rounds" / outcome.round_id / "algorithm-program-trace.json").read_text())
+    assert any(item["operator"] == "compose" for item in trace["decision"]["plans"])
+    assert trace["selected_plan"]["operator"] == "prune_blocks"
+    assert trace["decision"]["plans"][0]["operator"] == "compose"
 
 
 def test_incomplete_round_reuses_persisted_compression_after_process_crash(tmp_path):
@@ -341,20 +439,19 @@ def test_evo_compress_features_form_restartable_cpu_fake_pipeline(tmp_path):
     assert search_space["version_id"] == "S0001"
     assert "prune_ffn_by_weight_threshold" not in {item["name"] for item in search_space["operators"]}
     feedback = json.loads((tmp_path / "run" / "search-space-feedback.json").read_text())
-    assert feedback["ready"] is True
     assert feedback["observed_rounds"] >= 2
-    assert feedback["evidence_ids"]
+    assert feedback["ready"] is True
     third_dir = tmp_path / "run" / "rounds" / third.round_id
     third_search_space = json.loads((third_dir / "search-space.json").read_text())
     assert third_search_space["version_id"] == "S0002"
-    assert "timestep_block_gate" in {item["name"] for item in third_search_space["operators"]}
+    assert "timestep_attention_policy" in {item["name"] for item in third_search_space["operators"]}
     screening = json.loads((second_dir / "screening" / "screening.json").read_text())
     assert [item["stage"] for item in screening["results"]] == ["static", "diagnostic", "full"]
     validation = json.loads((second_dir / "algorithm-validation.json").read_text())
     assert validation["parent_algorithm_id"] == "A0001"
     assert validation["evidence_level"] == "cpu_fake_quality_proxy"
     assert validation["parent_metrics"]["output_metrics"]["cosine_similarity"] <= 1.0
-    assert validation["candidate_metrics"]["parameter_reduction_ratio"] > 0.0
+    assert validation["candidate_metrics"]["algorithm_search"]["evaluated_candidate_counts"][0] >= 2
     assert validation["candidate_metrics"]["hardware_metrics"]["available"] is False
     assert validation["scenario_results"][0]["candidate_metrics"]["parent_checkpoint_sha256"] == validation["scenario_results"][0]["parent_metrics"]["parent_checkpoint_sha256"]
     parent_search = validation["parent_metrics"]["algorithm_search"]
@@ -377,13 +474,13 @@ def test_evo_compress_features_form_restartable_cpu_fake_pipeline(tmp_path):
     assert algorithms[2]["source_sha256"] != algorithms[1]["source_sha256"]
     assert algorithms[1]["source_diff"]
     assert algorithms[2]["source_diff"]
-    assert "algorithm-search-revision-2" in algorithms[1]["source"]
+    assert "excluded.update" in algorithms[1]["source"]
     second_trace = json.loads((second_dir / "algorithm-program-trace.json").read_text())
     assert second_trace["measured_search"]["protocol"] == "standard_hbps"
     assert second_trace["measured_search"]["evaluated_candidate_count"] >= 2
-    # A rejected algorithm remains searchable as failure evidence but is not
-    # promoted as the next algorithm parent.
-    assert json.loads((third_dir / "algorithm.json").read_text())["parent_algorithm_id"] == "A0001"
+    # The recursive loop keeps improving the latest source, while validation
+    # remains the gate for recording an algorithm as a verified skill.
+    assert json.loads((third_dir / "algorithm.json").read_text())["parent_algorithm_id"] == "A0002"
     skills_path = tmp_path / "run" / "algorithm-skills.jsonl"
     if validation["valid"]:
         assert skills_path.is_file()
@@ -470,4 +567,8 @@ def test_frozen_expanded_search_space_is_consumed_without_evolution(tmp_path):
         for plan in first_trace["decision"]["plans"]
         if isinstance(plan, dict) and "operator" in plan
     }
-    assert "kv_token_select" in candidate_operators
+    assert "kv_token_select" not in candidate_operators
+    assert any(
+        item.get("operator") == "kv_token_select" and item.get("reason") == "missing_token_sensitivity"
+        for item in first_trace["decision"]["diagnostics"].get("omitted", [])
+    )

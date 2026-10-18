@@ -114,6 +114,22 @@ def _record_runtime_operation(module: Any, operator: str, args: Mapping[str, Any
     _register_config(module, "harness4h3_runtime_operations", existing)
 
 
+def _record_runtime_delegation(module: Any, operator: str, reason: str) -> None:
+    """Count wrapper calls passed to the previously installed attention path.
+
+    The delegated path can itself be optimized, so these counts are separate
+    from actual token/head selection counters and are not labeled fallbacks.
+    """
+
+    stats = getattr(module, "_harness4h3_runtime_wrapper_delegations", None)
+    if not isinstance(stats, dict):
+        stats = {}
+        module._harness4h3_runtime_wrapper_delegations = stats
+    by_reason = stats.setdefault(str(operator), {})
+    key = str(reason)
+    by_reason[key] = int(by_reason.get(key, 0)) + 1
+
+
 def _slice_rotary(rotary: Any, indices: Any, sequence_length: int) -> Any:
     """Select matching positions from Wan's (cos, sin) rotary tuple."""
 
@@ -1137,11 +1153,19 @@ class DiffusersWanAdapter:
                     or hidden_states.shape[1] <= 1
                     or (active.get("block_ids") and _block_id not in active["block_ids"])
                 ):
+                    reason = (
+                        "cross_attention" if encoder_hidden_states is not None else
+                        "attention_mask" if attention_mask is not None else
+                        "sequence_not_compressible" if hidden_states.ndim < 3 or hidden_states.shape[1] <= 1 else
+                        "block_out_of_scope"
+                    )
+                    _record_runtime_delegation(transformer, "token_merge", reason)
                     return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
                 mode = str(active.get("mode", "adjacent"))
                 grid_shape = tuple(active.get("grid_shape", ())) if mode == "spatiotemporal" else ()
                 merged, source_groups, anchors, group_shape = _merge_token_sequence(hidden_states, float(active["keep_ratio"]), torch, grid_shape)
                 if source_groups is None:
+                    _record_runtime_delegation(transformer, "token_merge", "merge_not_applicable")
                     return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
                 runtime_window = getattr(transformer, "_harness4h3_attention_window_policy", None)
                 if runtime_window:
@@ -1265,14 +1289,23 @@ class DiffusersWanAdapter:
             def sparse_forward(attention_self: Any, hidden_states: Any, encoder_hidden_states: Any = None, attention_mask: Any = None, rotary_emb: Any = None, *args: Any, _block_id: str = block_id, _base: Any = base, **kwargs: Any) -> Any:
                 active = getattr(transformer, "_harness4h3_sparse_runtime_policy", parsed.to_dict())
                 if encoder_hidden_states is not None or hidden_states.ndim < 3 or hidden_states.shape[1] <= 1:
+                    reason = "cross_attention" if encoder_hidden_states is not None else "sequence_not_compressible"
+                    _record_runtime_delegation(transformer, "sparse_runtime", reason)
                     return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
-                if (
-                    attention_mask is not None
-                    or getattr(transformer, "_harness4h3_head_gating_policy", None)
-                    or getattr(transformer, "_harness4h3_attention_window_policy", None)
-                    or getattr(transformer, "_harness4h3_token_merge_policy", None)
-                    or getattr(transformer, "_harness4h3_timestep_attention_policy", None)
+                delegated = []
+                if attention_mask is not None:
+                    delegated.append("attention_mask")
+                for policy_name, reason in (
+                    ("_harness4h3_head_gating_policy", "head_gating"),
+                    ("_harness4h3_attention_window_policy", "attention_window"),
+                    ("_harness4h3_token_merge_policy", "token_merge"),
+                    ("_harness4h3_timestep_attention_policy", "timestep_attention"),
                 ):
+                    if getattr(transformer, policy_name, None):
+                        delegated.append(reason)
+                if delegated:
+                    for reason in delegated:
+                        _record_runtime_delegation(transformer, "sparse_runtime", "delegated_to_" + reason)
                     return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
                 positions = torch.arange(int(hidden_states.shape[1]), device=hidden_states.device)
                 # Keep full Q, reduce K/V, and slice K's original RoPE
@@ -1327,6 +1360,14 @@ class DiffusersWanAdapter:
                     or getattr(transformer, "_harness4h3_token_merge_policy", None)
                     or getattr(transformer, "_harness4h3_timestep_attention_policy", None)
                 ):
+                    reason = (
+                        "cross_attention" if encoder_hidden_states is not None else
+                        "attention_mask" if attention_mask is not None else
+                        "sequence_not_compressible" if hidden_states.ndim < 3 or hidden_states.shape[1] <= 1 else
+                        "delegated_to_token_merge" if getattr(transformer, "_harness4h3_token_merge_policy", None) else
+                        "delegated_to_timestep_attention"
+                    )
+                    _record_runtime_delegation(transformer, "attention_window", reason)
                     return _base(hidden_states, encoder_hidden_states, attention_mask, rotary_emb, *args, **kwargs)
                 output, full_count, selected_count, windows = _runtime_window_attention(
                     transformer, attention_self, hidden_states, rotary_emb, _block_id, active, torch

@@ -812,7 +812,12 @@ class FakeWanDiTAdapter:
         if window_policy:
             estimate *= min(1.0, float(window_policy.get("window_size", 64)) / 64.0)
         if head_policy:
-            estimate *= float(head_policy.get("keep_ratio", 1.0))
+            head_ratio = head_policy.get("keep_ratio")
+            if head_ratio is None:
+                selected = head_policy.get("head_indices", ())
+                total_heads = int(model.blocks[0].attn1.heads) if model.blocks else 0
+                head_ratio = len(selected) / max(total_heads, 1) if selected else 1.0
+            estimate *= float(head_ratio)
         if sampling_policy:
             estimate *= float(sampling_policy.get("target_steps", 16)) / 16.0
         return int(round(estimate))

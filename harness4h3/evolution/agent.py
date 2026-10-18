@@ -76,104 +76,173 @@ def _seed_source_base(
     retention_ratio: float = 0.25,
     channel_block_id: Optional[str] = None,
 ) -> str:
-    if search_choice == "explore" and channel_block_id is not None:
-        return (
-            "def propose(profile, history):\n"
-            "    # Explore seed %s: compose profile-guided block and FFN pruning; channel evidence target=%r.\n"
-            "    width = int(profile['model']['ffn_width'])\n"
-            "    retained_indices = list(range(max(1, int(width * %.6f))))\n"
-            "    remaining_block_ids = [item['block_id'] for item in profile.get('layers', []) if item.get('block_id') != %r]\n"
-            "    return {'operator': 'compose', 'args': {'steps': [\n"
-            "        {'operator': 'prune_blocks', 'args': {'block_ids': %r}},\n"
-            "        {'operator': 'prune_ffn_channels', 'args': {'block_ids': remaining_block_ids, 'retained_indices': retained_indices}},\n"
-            "    ]}}\n"
-        ) % (algorithm_id, channel_block_id, retention_ratio, block_id, [block_id])
-    if search_choice == "explore":
-        return (
-            "def propose(profile, history):\n"
-            "    # Explore seed %s: a paired FFN-width hypothesis across all profiled blocks.\n"
-            "    block_ids = [item['block_id'] for item in profile.get('layers', [])]\n"
-            "    width = int(profile['model']['ffn_width'])\n"
-            "    retained_indices = list(range(max(1, int(width * %.6f))))\n"
-            "    return {'operator': 'prune_ffn_channels', 'args': {'block_ids': block_ids, 'retained_indices': retained_indices}}\n"
-        ) % (algorithm_id, retention_ratio)
     return (
         "def propose(profile, history):\n"
-        "    # Seed algorithm %s selects the least output-sensitive block reported by the profiler.\n"
+        "    # Seed algorithm %s proposes a profile-ranked Block removal; search() compares bounded subsets.\n"
         "    selected = %r\n"
         "    return {'operator': 'prune_blocks', 'args': {'block_ids': [selected]}}\n" % (algorithm_id, block_id)
     )
 
 
-def _search_program_suffix(algorithm_id: str, *, exploration: bool = False) -> str:
-    """Add source-controlled candidate generation to a legacy seed source."""
+def _concise_multigranular_search_program_suffix(algorithm_id: str) -> str:
+    return '''\ndef search(profile, history, state, search_space):
+    # Evidence-ranked multi-granularity search: ALGORITHM_ID.
+    import math
+    def finite(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))
+    names = [str(x.get('name')) for x in search_space.get('operators', []) if isinstance(x, dict)]
+    plans, scores, omitted = [], [], []
+    def add(op, args, score=0.0):
+        if op not in names:
+            omitted.append({'operator': op, 'reason': 'operator_not_in_active_search_space'})
+            return
+        p = {'operator': op, 'args': args}
+        if p not in plans:
+            plans.append(p); scores.append(float(score))
+    layers = [x for x in profile.get('layers', []) if isinstance(x, dict) and x.get('block_id')]
+    ids = [str(x['block_id']) for x in layers]
+    costs = {str(x['block_id']): float(x.get('latency_ms', x.get('estimated_flops', 0.0)) or 0.0) for x in layers}
+    block_rows = profile.get('block_timestep_sensitivity') or profile.get('tica_block_sensitivity') or profile.get('block_sensitivity', [])
+    block_scores, by_time = {}, {}
+    for row in block_rows:
+        if not isinstance(row, dict) or row.get('available') is False or row.get('block_id') not in ids: continue
+        ts = row.get('per_timestep', {})
+        normalized_ts = {}
+        if isinstance(ts, dict):
+            for key, value in ts.items():
+                if not finite(value): continue
+                bucket = str(key)
+                if bucket not in ('high_noise', 'middle', 'low_noise'):
+                    try:
+                        timestep = float(key)
+                    except (TypeError, ValueError):
+                        continue
+                    bucket = 'high_noise' if timestep >= 0.8 else ('middle' if 0.4 <= timestep <= 0.6 else ('low_noise' if timestep <= 0.2 else ''))
+                if bucket: normalized_ts[bucket] = float(value)
+        ts = normalized_ts
+        score = sum(ts.values()) / len(ts) if ts else row.get('importance_score')
+        if finite(score):
+            block_scores[str(row['block_id'])] = float(score); by_time[str(row['block_id'])] = ts
+    blocks = sorted(block_scores, key=lambda b: (block_scores[b], -costs.get(b, 0.0), b))
+    for b in blocks: add('prune_blocks', {'block_ids': [b]}, costs.get(b, 0.0) / (1.0 + block_scores[b]))
+    heads = {}
+    for row in profile.get('head_sensitivity', profile.get('attention_sensitivity', [])):
+        if isinstance(row, dict) and row.get('available') is not False and row.get('attention', 'attn1') == 'attn1' and row.get('block_id') in ids and isinstance(row.get('head'), int) and not isinstance(row.get('head'), bool) and finite(row.get('importance_score')):
+            heads.setdefault(str(row['block_id']), {})[int(row['head'])] = float(row['importance_score'])
+    local = []
+    for b, scores_by_head in heads.items():
+        if len(scores_by_head) > 1:
+            for drop in sorted(scores_by_head, key=lambda h: (scores_by_head[h], h)):
+                local.append((scores_by_head[drop], b, [h for h in sorted(scores_by_head) if h != drop]))
+    for score, b, keep in sorted(local):
+        add('head_gating', {'attention': 'attn1', 'block_ids': [b], 'head_indices': keep, 'score': 'activation_l2'}, 1.0 / (1.0 + max(0.0, score)))
+    if 'head_gating' in names and not local:
+        omitted.append({'operator': 'head_gating', 'reason': 'missing_per_block_head_sensitivity'})
+    if 'prune_attention_heads' in names:
+        reason = 'wan_structural_head_pruning_not_projection_aligned' if str(profile.get('model', {}).get('architecture', '')) == 'WanDiffusersDiT' else 'structural_head_pruning_not_supported_by_profile_evidence'
+        omitted.append({'operator': 'prune_attention_heads', 'reason': reason})
+    tokens = [x for x in profile.get('token_sensitivity', []) if isinstance(x, dict) and x.get('available') is not False]
+    token = tokens[0] if tokens else {}
+    count = int(token.get('token_count', 0) or 0)
+    grid = token.get('grid_shape', profile.get('token_grid', profile.get('model', {}).get('token_grid', [])))
+    grid_ok = isinstance(grid, (list, tuple)) and len(grid) == 3 and count > 0 and all(isinstance(v, int) and v > 0 for v in grid) and grid[0] * grid[1] * grid[2] == count
+    if token.get('layout') == 'wan_latent_grid' and not grid_ok:
+        omitted.append({'operator': 'token_merge', 'reason': 'missing_spatiotemporal_token_grid'})
+    ratios = sorted(set(float(x['keep_ratio']) for x in tokens if finite(x.get('keep_ratio')) and 0.5 <= float(x['keep_ratio']) < 1.0), reverse=True)
+    geom = {'grid_shape': [int(v) for v in grid]} if grid_ok else {}
+    if tokens and ratios:
+        for ratio in ratios:
+            add('prune_tokens', dict({'keep_ratio': ratio, 'score': 'l2_norm'}, **geom), 0.2)
+            if token.get('layout') != 'wan_latent_grid' or grid_ok:
+                add('token_merge', dict({'keep_ratio': ratio, 'mode': 'spatiotemporal' if grid_ok else 'adjacent'}, **geom), 0.2)
+            add('kv_token_select', {'keep_ratio': ratio, 'block_ids': blocks[:2], 'score': 'l2_norm'}, 0.3)
+            add('sparse_runtime', {'keep_ratio': ratio, 'attention': 'attn1'}, 0.2)
+    else:
+        for op in ('prune_tokens', 'token_merge', 'kv_token_select', 'sparse_runtime'):
+            if op in names: omitted.append({'operator': op, 'reason': 'missing_token_sensitivity'})
+    if count:
+        args = {'window_size': max(1, min(32, int(math.sqrt(count)))), 'attention': 'attn1'}
+        if grid_ok:
+            args['grid_shape'] = [int(v) for v in grid]
+            args['window_radius'] = [int(grid[0] > 1), int(grid[1] // 4), int(grid[2] // 4)]
+        add('attention_window', args, 0.15)
+    sampling = profile.get('sampling_step_sensitivity', {})
+    steps = sampling.get('candidates', []) if isinstance(sampling, dict) else []
+    targets = [int(x['target_steps']) for x in steps if isinstance(x, dict) and x.get('available') is not False and x.get('target_steps') is not None]
+    for target in sorted(set(targets), reverse=True):
+        add('sampling_step_skip', {'target_steps': target}, 0.15)
+    intervals = {'high_noise': (0.85, 0.95), 'middle': (0.45, 0.55), 'low_noise': (0.05, 0.15)}
+    temporal = [(v, b, t) for b, values in by_time.items() for t, v in values.items() if t in intervals]
+    temporal.sort()
+    if temporal:
+        for delta, b, bucket in temporal[:6]:
+            low, high = intervals[bucket]
+            gate = {'rules': [{'block_id': b, 'min_timestep': low, 'max_timestep': high}], 'policy': 'skip_when_in_range'}
+            add('timestep_block_gate', gate, 1.0 / (1.0 + max(0.0, delta)))
+            if ratios and 'timestep_attention_policy' in names:
+                add('timestep_attention_policy', {'rules': [{'min_timestep': low, 'max_timestep': high, 'keep_ratio': ratios[0], 'block_ids': [b], 'score': 'l2_norm'}], 'policy': 'select_kv_tokens'}, 1.0 / (1.0 + max(0.0, delta)))
+            if ratios and 'compose' in names and 'kv_token_select' in names and 'sparse_runtime' in names:
+                add('compose', {'steps': [
+                    {'operator': 'timestep_block_gate', 'args': gate},
+                    {'operator': 'kv_token_select', 'args': {'keep_ratio': ratios[0], 'block_ids': [b], 'score': 'l2_norm'}},
+                    {'operator': 'sparse_runtime', 'args': {'keep_ratio': ratios[0], 'attention': 'attn1'}}
+                ]}, 0.18)
+    elif 'timestep_block_gate' not in names:
+        omitted.append({'operator': 'timestep_block_gate', 'reason': 'operator_not_in_active_search_space'})
+    else:
+        omitted.append({'operator': 'timestep_block_gate', 'reason': 'missing_block_by_timestep_sensitivity'})
+    if 'timestep_attention_policy' not in names:
+        omitted.append({'operator': 'timestep_attention_policy', 'reason': 'operator_not_in_active_search_space'})
+    elif not temporal or not ratios:
+        omitted.append({'operator': 'timestep_attention_policy', 'reason': 'missing_token_or_temporal_sensitivity'})
+    proposed = state.get('proposed_plan') if isinstance(state, dict) else None
+    if isinstance(proposed, dict) and not state.get('algorithm_improvement') and proposed.get('operator') in names and isinstance(proposed.get('args'), dict) and proposed not in plans:
+        plans.insert(0, proposed); scores.insert(0, 10.0)
+    prior_plans = [item.get('plan') for item in state.get('measured_candidates', []) if isinstance(item, dict) and isinstance(item.get('plan'), dict)]
+    retained = [(plan, score) for plan, score in zip(plans, scores) if plan not in prior_plans]
+    omitted.extend({'operator': plan.get('operator'), 'reason': 'previously_measured_same_parent'} for plan, _score in zip(plans, scores) if plan in prior_plans)
+    plans = [plan for plan, _score in retained]; scores = [score for _plan, score in retained]
+    if not plans and retained == [] and prior_plans:
+        omitted.append({'operator': 'search', 'reason': 'all_evidence_supported_candidates_already_measured'})
+    limit = max(1, min(64, int(state.get('budget', {}).get('max_candidates', 16) or 16)))
+    family = {'prune_blocks': 'structure', 'head_gating': 'head', 'prune_tokens': 'token', 'token_merge': 'token', 'kv_token_select': 'kv', 'sparse_runtime': 'attention', 'attention_window': 'attention', 'sampling_step_skip': 'sampling', 'timestep_block_gate': 'timestep', 'timestep_attention_policy': 'timestep', 'compose': 'hybrid'}
+    queues, family_order = {}, []
+    for i, plan in enumerate(plans):
+        key = family.get(plan['operator'], plan['operator'])
+        if key not in queues: queues[key] = []; family_order.append(key)
+        queues[key].append(i)
+    counts, offsets, chosen = {}, {}, []
+    while len(chosen) < min(limit, len(plans)):
+        available = [key for key in family_order if offsets.get(key, 0) < len(queues[key])]
+        if not available: break
+        key = min(available, key=lambda item: (counts.get(item, 0), family_order.index(item)))
+        chosen.append(queues[key][offsets.get(key, 0)])
+        offsets[key] = offsets.get(key, 0) + 1; counts[key] = counts.get(key, 0) + 1
+    plans = [plans[i] for i in chosen]
+    scores = [scores[i] for i in chosen]
+    rank_queues, ranked_families = {}, []
+    for i, plan in enumerate(plans):
+        family_name = family.get(plan['operator'], plan['operator'])
+        if family_name not in rank_queues: rank_queues[family_name] = []; ranked_families.append(family_name)
+        rank_queues[family_name].append(i)
+    for family_name in ranked_families:
+        rank_queues[family_name].sort(key=lambda i: (-scores[i], i))
+    family_counts, family_offsets, rank = {}, {}, []
+    while len(rank) < len(plans):
+        available = [name for name in ranked_families if family_offsets.get(name, 0) < len(rank_queues[name])]
+        if not available: break
+        family_name = min(available, key=lambda name: (family_counts.get(name, 0), ranked_families.index(name)))
+        rank.append(rank_queues[family_name][family_offsets.get(family_name, 0)])
+        family_offsets[family_name] = family_offsets.get(family_name, 0) + 1
+        family_counts[family_name] = family_counts.get(family_name, 0) + 1
+    return {'candidates': plans, 'rank': rank, 'stop': True, 'diagnostics': {'omitted': omitted, 'generated_operators': [x['operator'] for x in plans], 'family_ranking_order': [plans[i]['operator'] for i in rank], 'ranked_blocks': blocks}}
+'''.replace('ALGORITHM_ID', algorithm_id)
 
-    mode = "explore" if exploration else "exploit"
-    return (
-        "\n\ndef search(profile, history, state, search_space):\n"
-        "    # Algorithm %s controls scoring, candidate generation, order, and stop.\n"
-        "    # mode=%s; this code is executed once per search depth.\n"
-        "    records = []\n"
-        "    for item in profile.get('tica_block_sensitivity', profile.get('block_sensitivity', [])):\n"
-        "        if isinstance(item, dict) and item.get('block_id'):\n"
-        "            values = item.get('per_timestep', item.get('timesteps', {}))\n"
-        "            score = sum(float(value) for value in values.values()) if isinstance(values, dict) else float(item.get('importance_score', 0.0) or 0.0)\n"
-        "            records.append((score, str(item['block_id'])))\n"
-        "    if not records:\n"
-        "        records = [(0.0, str(item.get('block_id'))) for item in profile.get('layers', []) if isinstance(item, dict) and item.get('block_id')]\n"
-        "    ordered = [item[1] for item in sorted(records)]\n"
-        "    candidates = []\n"
-        "    def add(candidate):\n"
-        "        if candidate not in candidates:\n"
-        "            candidates.append(candidate)\n"
-        "    proposed = state.get('proposed_plan') if isinstance(state, dict) else None\n"
-        "    if isinstance(proposed, dict) and proposed.get('operator') and isinstance(proposed.get('args'), dict):\n"
-        "        add(proposed)\n"
-        "    if ordered:\n"
-        "        add({'operator': 'prune_blocks', 'args': {'block_ids': [ordered[0]]}})\n"
-        "    if len(ordered) > 1:\n"
-        "        add({'operator': 'prune_blocks', 'args': {'block_ids': [ordered[1]]}})\n"
-        "    names = [str(item.get('name')) for item in search_space.get('operators', []) if isinstance(item, dict)]\n"
-        "    head_rows = [item for item in profile.get('head_sensitivity', []) if isinstance(item, dict) and item.get('head') is not None]\n"
-        "    if 'prune_attention_heads' in names and head_rows:\n"
-        "        add({'operator': 'prune_attention_heads', 'args': {'head_indices': [int(sorted(head_rows, key=lambda item: float(item.get('importance_score', 0.0) or 0.0))[0]['head'])]}})\n"
-        "    provenance = profile.get('provenance', {}) if isinstance(profile.get('provenance', {}), dict) else {}\n"
-        "    offline_profile = bool(provenance.get('offline_simulation', profile.get('model', {}).get('offline_simulation', False)))\n"
-        "    if 'head_gating' in names and head_rows and not offline_profile:\n"
-        "        add({'operator': 'head_gating', 'args': {'attention': 'attn1', 'keep_ratio': 0.75, 'score': 'weight_l2'}})\n"
-        "    if 'timestep_attention_policy' in names and ordered:\n"
-        "        add({'operator': 'timestep_attention_policy', 'args': {'rules': [\n"
-        "            {'min_timestep': 0.0, 'max_timestep': 0.3, 'keep_ratio': 0.5, 'block_ids': [ordered[0]], 'score': 'l2_norm'},\n"
-        "            {'min_timestep': 0.7, 'max_timestep': 1.0, 'keep_ratio': 0.75, 'block_ids': [ordered[0]], 'score': 'l2_norm'},\n"
-        "        ], 'policy': 'select_kv_tokens'}})\n"
-        "    if 'prune_tokens' in names:\n"
-        "        add({'operator': 'prune_tokens', 'args': {'keep_ratio': 0.75}})\n"
-        "    if 'token_merge' in names:\n"
-        "        add({'operator': 'token_merge', 'args': {'keep_ratio': 0.75, 'block_ids': [], 'mode': 'adjacent'}})\n"
-        "    if 'kv_token_select' in names:\n"
-        "        add({'operator': 'kv_token_select', 'args': {'keep_ratio': 0.75, 'score': 'l2_norm'}})\n"
-        "    if 'sparse_runtime' in names:\n"
-        "        add({'operator': 'sparse_runtime', 'args': {'keep_ratio': 0.75, 'attention': 'attn1'}})\n"
-        "    if 'attention_window' in names:\n"
-        "        add({'operator': 'attention_window', 'args': {'window_size': 32, 'attention': 'attn1'}})\n"
-        "    if 'sampling_step_skip' in names:\n"
-        "        add({'operator': 'sampling_step_skip', 'args': {'target_steps': 8}})\n"
-        "    if ordered and 'prune_attention_heads' in names and 'kv_token_select' in names and 'sparse_runtime' in names:\n"
-        "        add({'operator': 'compose', 'args': {'steps': [\n"
-        "            {'operator': 'prune_blocks', 'args': {'block_ids': [ordered[0]]}},\n"
-        "            {'operator': 'prune_attention_heads', 'args': {'head_indices': [0]}},\n"
-        "            {'operator': 'kv_token_select', 'args': {'keep_ratio': 0.75, 'score': 'l2_norm'}},\n"
-        "            {'operator': 'sparse_runtime', 'args': {'keep_ratio': 0.75, 'attention': 'attn1'}},\n"
-        "        ]}})\n"
-        "    # Keep an active timestep extension inside the bounded first-pass\n"
-        "    # budget even when exploration reverses the candidate ranking.\n"
-        "    if 'timestep_block_gate' in names and ordered:\n"
-        "        add({'operator': 'timestep_block_gate', 'args': {'rules': [{'block_id': ordered[0], 'min_timestep': 0.0, 'max_timestep': 0.3}], 'policy': 'skip_when_in_range'}})\n"
-        "    if not candidates:\n"
-        "        fallback = 'block.' + str(int(state.get('depth', 0)))\n"
-        "        return {'candidates': [{'operator': 'prune_blocks', 'args': {'block_ids': [fallback]}}], 'rank': [0], 'stop': True}\n"
-        "    return {'candidates': candidates, 'rank': list(range(len(candidates))), 'stop': True}\n"
-    ) % (algorithm_id, mode)
+
+def _search_program_suffix(algorithm_id: str, *, exploration: bool = False) -> str:
+    """Build the bounded, evidence-driven multi-granularity search program."""
+
+    return _concise_multigranular_search_program_suffix(algorithm_id)
 
 
 def _seed_source(
@@ -199,30 +268,37 @@ def _ensure_search_program(source: str, algorithm_id: str, *, exploration: bool 
     return source + _search_program_suffix(algorithm_id, exploration=exploration)
 
 
-def _revise_search_program(source: str, algorithm_id: str) -> str:
-    """Make deterministic improvements change executable search behavior too."""
+def _normalize_block_proposal_source(source: str) -> str:
+    """Accept an LLM's ordered plan list as its single seed proposal.
 
-    if "def search(" not in source:
-        return source
-    try:
-        revision = int(str(algorithm_id).lstrip("A"))
-    except (TypeError, ValueError):
-        revision = 1
-    parent_name = "_search_parent_%d" % revision
-    revision_name = "_search_revision_%d" % revision
-    marker = "# algorithm-search-revision-%d" % revision
+    The standard search protocol reserves candidate lists for ``search`` but
+    providers sometimes put the same ordered plans in ``propose``. Preserve
+    that ordering by using its first valid Block plan; the trusted Sandbox
+    still validates the resulting operator and arguments.
+    """
+
+    marker = "# harness4h3_plan_proposal_normalizer"
     if marker in source:
         return source
-    return source + (
-        "\n\n%s\n"
-        "%s = search\n"
-        "%s = %d\n"
-        "def search(profile, history, state, search_space):\n"
-        "    decision = %s(profile, history, state, search_space)\n"
-        "    if %s %% 2 == 0 and isinstance(decision, dict) and isinstance(decision.get('rank'), list):\n"
-        "        decision['rank'] = decision['rank'][::-1]\n"
-        "    return decision\n"
-    ) % (marker, parent_name, revision_name, revision, parent_name, revision_name)
+    return source + "\n" + marker + "\n" + (
+        "_harness4h3_original_propose = propose\n"
+        "def propose(profile, history):\n"
+        "    result = _harness4h3_original_propose(profile, history)\n"
+        "    if isinstance(result, (list, tuple)):\n"
+        "        for candidate in result:\n"
+        "            if (isinstance(candidate, dict)\n"
+        "                    and isinstance(candidate.get('operator'), str)\n"
+        "                    and isinstance(candidate.get('args'), dict)):\n"
+        "                return candidate\n"
+        "        return None\n"
+        "    return result\n"
+    )
+
+
+def _revise_search_program(source: str, algorithm_id: str) -> str:
+    """Keep the candidate generator evidence-driven; never rotate families by ID."""
+
+    return source
 
 
 @dataclass(frozen=True)
@@ -253,41 +329,29 @@ class AlgorithmAgent:
     ) -> AlgorithmCandidate:
         if self.provider is None:
             previously_selected = self._previously_selected_blocks(history)
-            retention_ratio = self._explore_retention_ratio(history)
             quality_feedback = self._has_quality_failure(history)
-            channel_block_id = None if quality_feedback or search_choice != "explore" else self._channel_target_block(profile, excluded=previously_selected)
-            block_excluded = set(previously_selected)
-            if channel_block_id is not None:
-                block_excluded.add(channel_block_id)
-            block_id = self._least_sensitive_block(profile, excluded=block_excluded)
-            generation_choice = "exploit" if quality_feedback else search_choice
+            block_id = self._least_sensitive_block(
+                profile,
+                excluded=previously_selected,
+            )
             source = _seed_source(
                 block_id,
                 algorithm_id,
-                generation_choice,
-                retention_ratio=retention_ratio,
-                channel_block_id=channel_block_id,
+                "exploit",
             )
-            operator = "compose" if channel_block_id is not None else ("prune_ffn_channels" if generation_choice == "explore" else "prune_blocks")
             if quality_feedback:
                 hypothesis = "quality feedback requires conservative block-only pruning"
                 design_strategy = "conservative_block"
-            elif channel_block_id is not None:
-                hypothesis = "compose a high-cost low-sensitivity block removal with FFN width pruning at %.1f%% retention" % (retention_ratio * 100.0)
-                design_strategy = "profile_guided_composite"
-            elif generation_choice == "explore":
-                hypothesis = "explore paired FFN width pruning at %.1f%% retention" % (retention_ratio * 100.0)
-                design_strategy = "prune_ffn_channels"
             else:
-                hypothesis = "remove the lowest measured leave-one-block-out sensitivity block"
-                design_strategy = "prune_blocks"
+                hypothesis = "compare profile-ranked Block removal subsets under the measured quality floor"
+                design_strategy = "profile_guided_block_search"
             return AlgorithmCandidate.from_source(
                 algorithm_id,
                 source,
                 parent_id=parent_id,
                 parent_algorithm_id=parent_algorithm_id,
                 hypothesis=hypothesis,
-                metadata={"generator": "deterministic_seed", "operator": operator, "design_strategy": design_strategy, "search_choice": search_choice, "retention_ratio": retention_ratio if generation_choice == "explore" else None, "predicted_gain": {"latency": 0.05, "model_size": 0.10, "basis": "profile_sensitivity_and_operator_proxy"}},
+                metadata={"generator": "deterministic_seed", "operator": "prune_blocks", "design_strategy": design_strategy, "search_choice": search_choice, "predicted_gain": {"latency": 0.05, "model_size": 0.10, "basis": "profile_sensitivity_and_operator_proxy"}},
             )
         compact_history = _compact_context_items(history)
         history_keys = {
@@ -304,11 +368,16 @@ class AlgorithmAgent:
             ]
         )
         payload = {
-            "profile": _compact_profile(profile),
+            "profile": _compact_profile(
+                profile,
+                block_only=False,
+            ),
             "history": compact_history,
             "skills": compact_skills,
             "pareto_front": _compact_pareto_front(pareto_front),
-            "search_space": _compact_search_space(search_space or {}),
+            "search_space": _compact_search_space(
+                search_space or {}
+            ),
             "parent_id": parent_id,
             "search_policy": {"choice": search_choice},
             "protocol_mode": str(protocol_mode).strip().lower() or "standard",
@@ -325,13 +394,16 @@ class AlgorithmAgent:
         source = raw.get("source")
         if not isinstance(source, str):
             raise ValueError("algorithm_generation_invalid: source must be text")
+        if str(protocol_mode).strip().lower() != "tica":
+            source = _normalize_block_proposal_source(_ensure_search_program(source, algorithm_id))
+        controller = dict(getattr(self.provider, "last_response_metadata", {}) or {})
         return AlgorithmCandidate.from_source(
             algorithm_id,
                 source,
                 parent_id=parent_id,
                 parent_algorithm_id=parent_algorithm_id,
             hypothesis=str(raw.get("hypothesis", "")),
-            metadata={"generator": "structured_provider", "search_choice": search_choice, "predicted_gain": dict(raw.get("predicted_gain") or {})},
+            metadata={"generator": "structured_provider", "search_choice": search_choice, "predicted_gain": dict(raw.get("predicted_gain") or {}), "controller": controller},
         )
 
     def improve(
@@ -358,12 +430,22 @@ class AlgorithmAgent:
             source, summary, rationale, hypothesis = _deterministic_improvement_source(
                 algorithm_id, parent, profile, feedback
             )
-            source = _ensure_search_program(
-                source,
-                algorithm_id,
-                exploration=not any("quality" in item.lower() or "regression" in item.lower() for item in feedback),
-            )
-            source = _revise_search_program(source, algorithm_id)
+            active_names = {
+                str(item.get("name", ""))
+                for item in (search_space or {}).get("operators", ())
+                if isinstance(item, Mapping)
+            }
+            # TICA's trusted recursive beam search owns candidate generation.
+            # Keep that contract unless a validated SearchSpace extension has
+            # added a timestep-conditioned runtime policy for the standard
+            # Algorithm Program to evaluate alongside it.
+            if str(protocol_mode).strip().lower() != "tica" or "timestep_attention_policy" in active_names:
+                source = _ensure_search_program(
+                    source,
+                    algorithm_id,
+                    exploration=not any("quality" in item.lower() or "regression" in item.lower() for item in feedback),
+                )
+                source = _revise_search_program(source, algorithm_id)
             return AlgorithmCandidate.from_source(
                 algorithm_id,
                 source,
@@ -392,11 +474,18 @@ class AlgorithmAgent:
             # bounded history/profile fields are handled separately below.
             "parent_source": parent.source,
             "parent_source_line_count": len(parent.source.splitlines()),
-            "profile": _compact_profile(profile),
+            "profile": _compact_profile(
+                profile,
+                block_only=False,
+            ),
             "history": _compact_context_items(history),
-            "skills": _compact_context_items(skills),
+            # Keep retrieved sources from crowding out measured candidate
+            # evidence in a bounded controller context.
+            "skills": _compact_context_items(skills, limit=2),
             "failure_reasons": feedback[:16],
-            "search_space": dict(search_space or {}),
+            "search_space": (
+                dict(search_space or {})
+            ),
             "parent_id": parent_id,
             "task": "improve_existing_algorithm_source",
             "protocol_mode": str(protocol_mode).strip().lower() or "standard",
@@ -412,6 +501,9 @@ class AlgorithmAgent:
         source = raw.get("source")
         if not isinstance(source, str):
             raise ValueError("algorithm_improvement_invalid: source must be text")
+        if str(protocol_mode).strip().lower() != "tica":
+            source = _normalize_block_proposal_source(_ensure_search_program(source, algorithm_id))
+        controller = dict(getattr(self.provider, "last_response_metadata", {}) or {})
         return AlgorithmCandidate.from_source(
             algorithm_id,
             source,
@@ -430,6 +522,7 @@ class AlgorithmAgent:
                 "parent_source_sha256": parent.source_sha256,
                 "failure_reasons": feedback[:16],
                 "predicted_gain": dict(raw.get("predicted_gain") or {}),
+                "controller": controller,
             },
         )
 
@@ -714,81 +807,106 @@ def _deterministic_improvement_source(
             "measured TICA feedback indicates the parent weighting rule is the actionable design variable",
             "reweight denoising timesteps and keep the same trusted structural mutation for a fair algorithm comparison",
         )
-    if "quality" in failure_text or "integrity" in failure_text:
-        source = (
-            "def propose(profile, history):\n"
-            "    # Improve %s: quality feedback narrows the mutation to the least sensitive block.\n"
-            "    records = [item for item in profile.get('block_sensitivity', []) if item.get('available') and item.get('importance_score') is not None]\n"
-            "    if records:\n"
-            "        selected = min(records, key=lambda item: float(item['importance_score']))['block_id']\n"
-            "    else:\n"
-            "        selected = profile.get('layers', [{'block_id': 'block.0'}])[0]['block_id']\n"
-            "    return {'operator': 'prune_blocks', 'args': {'block_ids': [selected]}}\n"
-        ) % parent.algorithm_id
-        return (
-            source,
-            "replace broad mutation with sensitivity-ranked conservative block pruning",
-            "quality or integrity feedback shows that the parent mutation is too aggressive",
-            "conserve quality by selecting one least-sensitive block from the measured profile",
-        )
-
-    if "prune_ffn_channels" in parent.source:
-        source = (
-            "def propose(profile, history):\n"
-            "    # Improve %s: use low-noise timestep evidence and a tighter width budget after the FFN revision.\n"
-            "    width = int(profile.get('model', {}).get('ffn_width', 1))\n"
-            "    timestep = profile.get('timestep_sensitivity', {}).get('low_noise', {})\n"
-            "    timestep_weight = 1.0 + float(timestep.get('importance_score', 0.0) or 0.0)\n"
-            "    target = max(1, int(width * 0.625))\n"
-            "    records = []\n"
-            "    for item in profile.get('channel_sensitivity', []):\n"
-            "        for channel in item.get('channels', []):\n"
-            "            if channel.get('importance_score') is not None:\n"
-            "                records.append({'channel': channel['channel'], 'score': float(channel['importance_score']) * timestep_weight})\n"
-            "    ordered = sorted(records, key=lambda item: float(item['score']))\n"
-            "    retained_indices = sorted({int(item['channel']) for item in ordered[:target]})\n"
-            "    if not retained_indices:\n"
-            "        retained_indices = list(range(target))\n"
-            "    block_ids = [item['block_id'] for item in profile.get('layers', [])]\n"
-            "    return {'operator': 'prune_ffn_channels', 'args': {'block_ids': block_ids, 'retained_indices': retained_indices}}\n"
-        ) % parent.algorithm_id
-        return (
-            source,
-            "add timestep-aware channel ranking and tighten the FFN budget",
-            "the previous FFN rule reached an efficiency plateau without using timestep evidence",
-            "rank channels with low-noise sensitivity and retain a smaller aligned width",
-        )
-
+    quality_feedback = "quality" in failure_text or "integrity" in failure_text
     source = (
         "def propose(profile, history):\n"
-        "    # Improve %s: efficiency feedback changes channel ordering while keeping the trusted operator.\n"
-        "    width = int(profile.get('model', {}).get('ffn_width', 1))\n"
-        "    target = max(1, int(width * 0.75))\n"
-        "    records = []\n"
-        "    for item in profile.get('channel_sensitivity', []):\n"
-        "        for channel in item.get('channels', []):\n"
-        "            if channel.get('importance_score') is not None:\n"
-        "                records.append(channel)\n"
-        "    ordered = sorted(records, key=lambda item: float(item.get('importance_score', 0.0)))\n"
-        "    retained_indices = sorted({int(item['channel']) for item in ordered[:target]})\n"
-        "    if not retained_indices:\n"
-        "        retained_indices = list(range(target))\n"
-        "    block_ids = [item['block_id'] for item in profile.get('layers', [])]\n"
-        "    return {'operator': 'prune_ffn_channels', 'args': {'block_ids': block_ids, 'retained_indices': retained_indices}}\n"
-    ) % parent.algorithm_id
+        "    # Improve %s: revise the Block subset from current sensitivity and measured Block cost.\n"
+        "    layers = {str(item['block_id']): item for item in profile.get('layers', []) if isinstance(item, dict) and item.get('block_id')}\n"
+        "    scores = {}\n"
+        "    rows = profile.get('tica_block_sensitivity') or profile.get('block_sensitivity', [])\n"
+        "    for item in rows:\n"
+        "        if not isinstance(item, dict) or item.get('available') is False or str(item.get('block_id', '')) not in layers:\n"
+        "            continue\n"
+        "        values = item.get('per_timestep') or item.get('timesteps') or {}\n"
+        "        values = [float(value) for value in values.values() if isinstance(value, (int, float))] if isinstance(values, dict) else []\n"
+        "        score = sum(values) / len(values) if values else item.get('importance_score')\n"
+        "        if isinstance(score, (int, float)) and score >= 0:\n"
+        "            scores[str(item['block_id'])] = float(score)\n"
+        "    costs = {key: max(0.0, float(value.get('latency_ms', value.get('estimated_flops', 0.0)) or 0.0)) for key, value in layers.items()}\n"
+        "    max_cost = max(costs.values()) if costs else 0.0\n"
+        "    ranked = sorted(scores, key=lambda key: (scores[key] / max(costs.get(key, 0.0) / max(max_cost, 1.0), 1e-6), scores[key], -costs.get(key, 0.0), key))\n"
+        "    excluded = set()\n"
+        "    if %r:\n"
+        "        for record in history:\n"
+        "            decision = record.get('decision', {}) if isinstance(record, dict) else {}\n"
+        "            args = decision.get('operator_args', {}) if isinstance(decision, dict) else {}\n"
+        "            if isinstance(args, dict) and isinstance(args.get('block_ids'), list):\n"
+        "                excluded.update(str(value) for value in args['block_ids'])\n"
+        "    remaining = [key for key in ranked if key not in excluded] or ranked\n"
+        "    if not remaining:\n"
+        "        raise ValueError('block_improvement_requires_available_sensitivity')\n"
+        "    return {'operator': 'prune_blocks', 'args': {'block_ids': [remaining[0]]}}\n"
+    ) % (parent.algorithm_id, quality_feedback)
+    inherited_search_name = "_harness_parent_search_" + str(algorithm_id).lstrip("A")
+    inherited_source = parent.source.replace("def propose(", "def _parent_propose(", 1)
+    inherited_source = inherited_source.replace("def search(", "def " + inherited_search_name + "(", 1)
+    if "def " + inherited_search_name + "(" not in inherited_source:
+        inherited_source += "\n\n" + _concise_multigranular_search_program_suffix(algorithm_id).replace("def search(", "def " + inherited_search_name + "(", 1).lstrip()
+    if inherited_source:
+        source = inherited_source + "\n\n" + source + "\n\n" + '''def search(profile, history, state, search_space):
+    # Re-rank the inherited candidate generator from measured family evidence.
+    result = INHERITED_SEARCH(profile, history, state, search_space)
+    candidates = result.get('candidates', [])
+    old_rank = result.get('rank', list(range(len(candidates))))
+    rank_position = {candidate_index: position for position, candidate_index in enumerate(old_rank)}
+    family_by_operator = {
+        'prune_blocks': 'structure', 'prune_ffn_channels': 'channel', 'head_gating': 'head',
+        'prune_attention_heads': 'head', 'prune_heads': 'head', 'prune_tokens': 'token',
+        'token_merge': 'token', 'kv_token_select': 'token', 'sparse_runtime': 'attention',
+        'attention_window': 'attention', 'sampling_step_skip': 'sampling',
+        'timestep_block_gate': 'timestep', 'timestep_attention_policy': 'timestep', 'compose': 'hybrid',
+    }
+    family_metrics = {}
+    rows = state.get('measured_candidates', []) if isinstance(state, dict) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        plan = row.get('plan', {})
+        family = row.get('family') or family_by_operator.get(plan.get('operator')) if isinstance(plan, dict) else row.get('family')
+        if not family:
+            continue
+        values = family_metrics.setdefault(str(family), [0.0, 0.0, 0.0, 0])
+        quality = row.get('quality_score')
+        efficiency = row.get('efficiency_reduction_ratio')
+        risk = row.get('risk_value')
+        quality = float(quality) if isinstance(quality, (int, float)) else (0.0 if row.get('valid') is False else 1.0)
+        efficiency = float(efficiency) if isinstance(efficiency, (int, float)) else 0.0
+        risk = float(risk) if isinstance(risk, (int, float)) else max(0.0, 1.0 - quality)
+        values[0] += quality; values[1] += efficiency; values[2] += risk; values[3] += 1
+    def evidence_score(index):
+        plan = candidates[index]
+        family = family_by_operator.get(plan.get('operator'), 'other') if isinstance(plan, dict) else 'other'
+        measured = family_metrics.get(family)
+        if not measured:
+            return 0.0
+        count = max(1, measured[3])
+        quality = measured[0] / count
+        efficiency = measured[1] / count
+        risk = measured[2] / count
+        return (2.0 * quality if QUALITY_FIRST else quality) + (0.5 * efficiency if QUALITY_FIRST else 2.0 * efficiency) - (risk if QUALITY_FIRST else 0.25 * risk)
+    order = sorted(range(len(candidates)), key=lambda index: (-evidence_score(index), rank_position.get(index, len(candidates)), index))
+    return {**result, 'rank': order, 'diagnostics': {**result.get('diagnostics', {}), 'measured_family_scores': {name: [round(value / max(1, count), 6) for value, count in zip(values[:3], [values[3]] * 3)] for name, values in family_metrics.items()}, 'quality_first': QUALITY_FIRST}}
+'''.replace('QUALITY_FIRST', 'True' if quality_feedback else 'False').replace('INHERITED_SEARCH', inherited_search_name)
+    if quality_feedback:
+        return (
+            source,
+            "adjust family ranking from measured quality and risk evidence",
+            "measured quality failures elevate quality and risk above expected efficiency in candidate ranking",
+            "inherit candidate generation and score each registered compression family using its measured quality, efficiency, and risk",
+        )
     return (
         source,
-        "change block-only selection into profile-ranked FFN channel selection",
-        "efficiency or model-size feedback shows that the parent block choice cannot reach the target",
-        "reduce width using the lowest estimated channel contribution while preserving the trusted FFN operator",
+        "adjust family ranking from measured quality, efficiency, and risk evidence",
+        "the parent ranking does not account for measured family-level quality and efficiency outcomes",
+        "inherit candidate generation and adapt the ranking objective to measured family-level quality, efficiency, and risk",
     )
 
 
-def _compact_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
+def _compact_profile(profile: Mapping[str, Any], *, block_only: bool = False) -> dict[str, Any]:
     """Keep provider prompts bounded while retaining compression evidence."""
 
     compact: dict[str, Any] = {}
-    for key in ("model", "provenance", "schema_version", "timestep_sensitivity", "sampling_step_sensitivity"):
+    for key in ("model", "provenance", "schema_version", "timestep_sensitivity", "sampling_step_sensitivity", "token_grid"):
         if key in profile:
             compact[key] = profile[key]
     compact["layers"] = [
@@ -805,6 +923,17 @@ def _compact_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
         for item in profile.get("block_sensitivity", [])
         if isinstance(item, Mapping)
     ]
+    compact["block_timestep_sensitivity"] = [
+        {
+            field: item[field]
+            for field in ("block_id", "importance_score", "per_timestep", "best_bucket", "worst_bucket", "available", "method")
+            if field in item
+        }
+        for item in profile.get("block_timestep_sensitivity", [])
+        if isinstance(item, Mapping)
+    ]
+    if block_only:
+        return compact
     channel_records = []
     for item in profile.get("channel_sensitivity", []):
         if not isinstance(item, Mapping):
@@ -821,18 +950,26 @@ def _compact_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
         )[:4]
         channel_records.append(record)
     compact["channel_sensitivity"] = channel_records
-    compact["head_sensitivity"] = [
-        {field: item[field] for field in ("block_id", "attention", "head", "importance_score", "available", "method") if field in item}
-        for item in profile.get("head_sensitivity", [])
-        if isinstance(item, Mapping)
-    ][:32]
-    compact["attention_sensitivity"] = [
-        {field: item[field] for field in ("block_id", "attention", "head", "importance_score", "available", "method") if field in item}
-        for item in profile.get("attention_sensitivity", [])
-        if isinstance(item, Mapping)
-    ][:64]
+    def local_extremes(rows: Any, per_block: int) -> list[dict[str, Any]]:
+        grouped: dict[str, list[Mapping[str, Any]]] = {}
+        for item in rows if isinstance(rows, (list, tuple)) else ():
+            if isinstance(item, Mapping) and item.get("block_id") is not None:
+                grouped.setdefault(str(item["block_id"]), []).append(item)
+        output = []
+        for block_id, items in grouped.items():
+            usable = [item for item in items if isinstance(item.get("importance_score"), (int, float))]
+            usable.sort(key=lambda item: (float(item["importance_score"]), int(item.get("head", 0))))
+            chosen = usable[:per_block]
+            output.extend(
+                {field: item[field] for field in ("block_id", "attention", "head", "importance_score", "available", "method") if field in item}
+                for item in chosen
+            )
+        return output
+
+    compact["head_sensitivity"] = local_extremes(profile.get("head_sensitivity", []), 4)
+    compact["attention_sensitivity"] = local_extremes(profile.get("attention_sensitivity", []), 2)
     compact["token_sensitivity"] = [
-        {field: item[field] for field in ("keep_ratio", "token_count", "selected_count", "importance_score", "available", "method") if field in item}
+            {field: item[field] for field in ("keep_ratio", "token_count", "selected_count", "grid_shape", "layout", "importance_score", "available", "method") if field in item}
         for item in profile.get("token_sensitivity", [])
         if isinstance(item, Mapping)
     ]
@@ -867,6 +1004,18 @@ def _compact_search_space(search_space: Mapping[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _block_only_search_space(search_space: Mapping[str, Any]) -> dict[str, Any]:
+    """Present only the Block primitive to standard Agent generation."""
+
+    compact = dict(search_space)
+    compact["operators"] = [
+        dict(item)
+        for item in search_space.get("operators", ())
+        if isinstance(item, Mapping) and str(item.get("name", "")) == "prune_blocks"
+    ]
+    return compact
+
+
 def _compact_pareto_front(front: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Expose measured front evidence without allowing an unbounded prompt."""
 
@@ -893,7 +1042,7 @@ def _compact_memory_item(item: Mapping[str, Any]) -> dict[str, Any]:
     """Keep retrieved evidence small enough for a bounded controller prompt."""
 
     compact: dict[str, Any] = {}
-    for field in ("experience_id", "memory_kind", "architecture", "operator", "status", "reward", "failure_reason"):
+    for field in ("experience_id", "round_id", "memory_kind", "architecture", "operator", "status", "reward", "failure_reason"):
         if field in item:
             value = item[field]
             compact[field] = value[:240] if isinstance(value, str) else value
@@ -906,6 +1055,71 @@ def _compact_memory_item(item: Mapping[str, Any]) -> dict[str, Any]:
         # bounded copy lets a provider reuse the skill without allowing
         # unbounded historical sources to overflow its prompt.
         compact["algorithm_source"] = item["algorithm_source"][:6000]
+
+    if item.get("memory_kind") == "algorithm_search_feedback":
+        for field in (
+            "parent_checkpoint_sha256",
+            "quality_floor_ratio",
+            "quality_floor_basis",
+            "search_outcome",
+            "candidate_count",
+            "measured_candidate_summary_count",
+            "quality_feasible_candidate_count",
+            "measured_family_counts",
+            "pareto_front_plan_digests",
+            "selection_status",
+        ):
+            if field in item:
+                compact[field] = item[field]
+
+        tested_sets = item.get("tested_block_sets")
+        if isinstance(tested_sets, list):
+            compact["tested_block_sets"] = [
+                [str(block_id) for block_id in block_ids[:64]]
+                for block_ids in tested_sets[:16]
+                if isinstance(block_ids, list)
+            ]
+
+        feedback_candidates = []
+        for candidate in item.get("measured_candidates", ()):
+            if not isinstance(candidate, Mapping):
+                continue
+            plan = candidate.get("plan")
+            if not isinstance(plan, Mapping) or not isinstance(plan.get("args"), Mapping):
+                continue
+            record = {
+                "plan": dict(plan),
+                "family": candidate.get("family"),
+                "candidate_index": candidate.get("rank_index"),
+                "rank_position": candidate.get("rank_position"),
+                "evaluation_position": candidate.get("evaluation_position"),
+                "valid": candidate.get("valid"),
+                "quality_score": candidate.get("quality_score"),
+                "quality_floor_ratio": candidate.get("quality_floor_ratio", item.get("quality_floor_ratio")),
+                "quality_feasible": candidate.get("quality_feasible"),
+                "efficiency_reduction_ratio": candidate.get("efficiency_reduction_ratio"),
+                "search_score": candidate.get("search_score"),
+                "risk_value": candidate.get("risk_value"),
+                "video_quality_evaluated": candidate.get("video_quality_evaluated"),
+            }
+            for field in ("plan_digest", "failure_reason", "recovery_action", "runtime_execution"):
+                if candidate.get(field) is not None:
+                    record[field] = candidate[field]
+            feedback_candidates.append(record)
+            if len(feedback_candidates) >= 8:
+                break
+        if feedback_candidates:
+            compact["measured_candidates"] = feedback_candidates
+
+    if item.get("memory_kind") == "algorithm_duplicate_feedback" and item.get("duplicate_algorithm_id"):
+        for field in (
+            "duplicate_algorithm_id",
+            "candidate_source_sha256",
+            "duplicate_algorithm_source_sha256",
+            "duplicate_attempt",
+        ):
+            if field in item:
+                compact[field] = item[field]
 
     def compact_args(value: Any) -> dict[str, Any]:
         if not isinstance(value, Mapping):
@@ -998,6 +1212,7 @@ def build_algorithm_provider(
     api_key_env: str = "OPENAI_API_KEY",
     timeout_s: float = 180.0,
     protocol_mode: str = "standard",
+    model_version: str = "",
 ) -> Provider:
     """Build an LLM callable that returns only the bounded algorithm fields."""
 
@@ -1023,10 +1238,17 @@ def build_algorithm_provider(
             raise ValueError("unsupported_algorithm_protocol_mode: %s" % active_protocol)
         if task == "improve_existing_algorithm_source":
             instruction = (
-                "Improve the complete parent algorithm source included in this request. "
-                "Read every line of parent_source, identify a concrete failure or limitation, "
-                "and return the complete modified source, not a patch, pseudocode, or a fresh "
-                "unrelated seed. State exactly what source-level behavior changed and why. "
+                "Improve the parent algorithm using its source and the supplied failure/history. "
+                "Return a complete, concise replacement source under 7000 characters, not a patch or pseudocode; "
+                "you may replace verbose scaffolding instead of copying it. Change the actual "
+                "candidate-generation, importance-scoring, interaction, or budget-allocation logic "
+                "using observed failures. Use per-Block, per-Head, token, attention and timestep "
+                "evidence where available. Do not repeat a measured plan for the same checkpoint. "
+                "Prefer localized low-sensitivity selections and moderate complementary policies "
+                "over whole-layer removal or uniform ratios. Treat under-floor quality as a near miss. "
+                "Use runtime counters to identify execution or fallback, but do not claim GPU speedup "
+                "without independent latency evidence. Explain the source-level change and the evidence "
+                "that motivates it. A comment-only or ordering-only change is not an improvement. "
             )
             response_schema = IMPROVEMENT_RESPONSE_SCHEMA
         elif task == "propose_search_space_extension":
@@ -1045,29 +1267,28 @@ def build_algorithm_provider(
         algorithm_rules = (
             "Return JSON only with source, hypothesis, and parent_id. The source must define "
             "a complete Python function `def propose(profile, history): ...` and return only "
-            "a bounded operator/args plan; keep the source body under 500 tokens, never return "
-            "a function name or pseudocode. "
-            "Allowed plans are exactly those whose operator name appears in the supplied "
-            "`search_space['operators']`; read each operator's `argument_schema`, "
-            "`execution_domain`, constraints, and limitations before constructing args. "
-            "The active space includes structural, runtime, sampler, and composite operators, "
-            "so Head, KV-token, Sparse Runtime, Attention Window, Timestep, and Sampling "
-            "plans are legal when their specs are present; do not reduce the choice to only "
-            "Block/FFN pruning. `compose` may contain 2..6 non-nested steps from the active "
-            "space and must preserve their execution order. "
-            "The value returned by `propose` must always have exactly the top-level keys "
-            "`operator` and `args`, for example `{'operator': 'compose', 'args': "
-            "{'steps': [...]}}`. A top-level `{'steps': [...]}` object is invalid; "
-            "never return `steps` directly and never return a multi-step plan without "
-            "the `operator: 'compose'` wrapper. "
-            "For every `prune_ffn_channels` step, `retained_indices` must be one flat "
-            "list of integer channel indices shared by every block in that step. "
-            "For the reloadable Wan checkpoint, that step's `block_ids` must contain "
-            "every block from `profile['layers']` exactly once, in profile order; "
-            "never submit a partial Block subset for FFN pruning. "
-            "Never emit nested lists, a per-block mapping, or a different retained list "
-            "for each block; those plans are not executable by the Wan operator. "
+            "a bounded operator/args plan; keep the source concise, never return a function "
+            "name or pseudocode. Also define `search(profile, history, state, search_space)` "
+            "to generate and rank bounded candidates from the active operator registry; "
+            "`search_space['operators']` is the source of allowed operations. "
+            "Use per-Block/per-timestep and per-Head sensitivity, token evidence, attention "
+            "regions, measured cost, past family coverage and quality feedback. Prefer localized "
+            "Block/Head targets, profile-supported timestep gates, moderate KV selection, and "
+            "complementary Sparse Runtime combinations when their operators are registered. "
+            "Never assume a combination will win; omit unsupported or unmeasured targets with a reason. "
+            "Avoid Wan structural Head Pruning when the architecture cannot reload projection dimensions. "
+            "The value "
+            "returned by `propose` must be one dictionary, never a list, and have exactly "
+            "`operator` and `args`. Choose only IDs present in the profile and obey each "
+            "registered argument schema. Respect `state['budget']['max_candidates']`. Use "
+            "`algorithm_search_feedback.measured_family_counts` to allocate exploration across "
+            "families and avoid repeats against the same parent. Probe quality is calibration "
+            "screening; independent multi-case video validation decides model promotion. "
+            "Never mark an under-floor candidate feasible. Return exactly a mapping with candidates, rank, stop, and "
+            "optional diagnostics. Do not train or fine-tune weights. "
+            "Only import math, statistics, json, or collections; never import or use random. "
             "The returned parent_id must exactly match the supplied parent_id. "
+            "Allowed plans are exactly the registered operators and their declared argument schemas. "
             "Never output paths, devices, shell commands, imports outside the sandbox allowlist, "
             "or evaluator settings.\n\n"
         )
@@ -1128,9 +1349,8 @@ def build_algorithm_provider(
                 # OpenAI json_schema extension.  The local sandbox remains
                 # the authoritative validator for the returned source.
                 "response_format": {"type": "json_object"},
-                # Leave room for a compact executable source while keeping
-                # the request below the controller's 16k context limit.
-                "max_tokens": 1536,
+                # Source improvement returns the complete parent program.
+                "max_tokens": 3072 if task == "improve_existing_algorithm_source" else 1536,
             }
         else:
             request_payload = {
@@ -1155,6 +1375,19 @@ def build_algorithm_provider(
             raise RuntimeError("algorithm_provider_request_failed: %s" % exc) from exc
         if not isinstance(raw, Mapping):
             raise ValueError("algorithm_provider_response_invalid: response must be an object")
+        raw_choices = raw.get("choices")
+        choice_meta = raw_choices[0] if isinstance(raw_choices, list) and raw_choices and isinstance(raw_choices[0], Mapping) else {}
+        call.last_response_metadata = {
+            "provider": provider,
+            "requested_model": str(model_name),
+            "served_model": str(raw.get("model", "")) or None,
+            "configured_model_version": str(model_version) or None,
+            "api_response_id": str(raw.get("id", "")) or None,
+            "api_created": raw.get("created"),
+            "system_fingerprint": raw.get("system_fingerprint"),
+            "usage": dict(raw.get("usage", {})) if isinstance(raw.get("usage"), Mapping) else None,
+            "finish_reason": choice_meta.get("finish_reason"),
+        }
         if provider == "ollama":
             content = raw.get("message", {}).get("content") if isinstance(raw.get("message"), Mapping) else None
         elif provider in {"vllm", "openai_compatible"}:
@@ -1183,4 +1416,7 @@ def build_algorithm_provider(
             normalized["parent_id"] = payload["parent_id"]
         return normalized
 
+    call.last_response_metadata = {}
+    call.provider_name = provider
+    call.requested_model = str(model_name)
     return call

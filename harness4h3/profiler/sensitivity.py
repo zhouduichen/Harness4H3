@@ -379,6 +379,57 @@ def measure_timestep_sensitivity(
     return records
 
 
+def measure_block_timestep_sensitivity(
+    adapter: WanModelAdapter,
+    model: Any,
+    *,
+    sample: Any,
+    forward_fn: Callable[[Any, str, Any], Any],
+) -> tuple[Mapping[str, Any], ...]:
+    """Measure each Block's output effect at matched denoising timesteps."""
+
+    buckets = (("high_noise", 0.9), ("middle", 0.5), ("low_noise", 0.1))
+    rows: list[Mapping[str, Any]] = []
+    probe = getattr(adapter, "probe_block_removal", None)
+    for block in adapter.get_blocks(model):
+        scores: dict[str, Optional[float]] = {}
+        for name, _ in buckets:
+            try:
+                base = forward_fn(model, name, sample)
+                callback = lambda current_model, current_sample, bucket=name: forward_fn(current_model, bucket, current_sample)
+                if callable(probe):
+                    modified = probe(model, block.block_id, sample, callback)
+                else:
+                    candidate = copy.deepcopy(model)
+                    adapter.remove_blocks(candidate, (block.block_id,))
+                    modified = callback(candidate, sample)
+                scores[name] = _distance(base, modified)
+            except (RuntimeError, TypeError, ValueError, AttributeError):
+                scores[name] = None
+        available = [value for value in scores.values() if value is not None]
+        rows.append(
+            {
+                "block_id": str(block.block_id),
+                "per_timestep": scores,
+                "importance_score": sum(available) / len(available) if available else None,
+                "best_bucket": min(
+                    (name for name, value in scores.items() if value is not None),
+                    key=lambda name: scores[name],
+                    default=None,
+                ),
+                "worst_bucket": max(
+                    (name for name, value in scores.items() if value is not None),
+                    key=lambda name: scores[name],
+                    default=None,
+                ),
+                "available": bool(available),
+                "method": "leave_one_block_out_per_timestep",
+                "score_semantics": "mean_absolute_output_difference",
+            }
+        )
+    return tuple(rows)
+
+
 def _attention_module(block: Any, name: str) -> Any:
     value = getattr(block, str(name), None)
     if value is None:

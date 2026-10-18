@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 from dataclasses import asdict, dataclass, replace
@@ -26,11 +27,12 @@ from .evaluator import PromotionPolicy
 from .improvement import AlgorithmValidationRecord, AlgorithmValidator
 from .policy import SearchPolicy
 from .screening import CandidateScreeningPipeline, ScreeningContext
+from .search_ranking import SEARCH_RANKING_VERSION, reusable_measured_trace, budgeted_candidate_order, candidate_family, efficiency_reduction_ratio, measured_candidate_key, measured_pareto_key, measured_recovery_key, measured_search_score, pareto_front_indices
 from .skill_hub import SkillHub
 from .store import AlgorithmStore
 from .taxonomy import classify_algorithm_change, classify_search_space_proposal
 from .tica_calibration import TICACalibrationManifest, TICAEvaluationSplits
-from .tica_prune import TICARecipe, TICAPruner, _run_algorithm_search_program, build_human_tica_source, collect_tica_profile, tica_operator_spec, tica_score
+from .tica_prune import TICARecipe, TICAPruner, _operator_specs_from_search_space, _run_algorithm_search_program, build_human_tica_source, collect_tica_profile, tica_operator_spec, tica_score
 from ..operators.wan import WanCompressionRegistry, build_wan_compression_registry
 
 
@@ -78,6 +80,7 @@ class EvolutionLoop:
         search_space_evolution: bool = False,
         frozen_expanded_search_space: bool = False,
         candidate_screening: bool = False,
+        algorithm_probe_samples: int = 3,
         phase: str = "evolution",
         search_space_manager: Optional[SearchSpaceManager] = None,
         tica_prune: bool = False,
@@ -134,6 +137,7 @@ class EvolutionLoop:
         self.advanced_profiling = bool(advanced_profiling)
         self.channel_method = str(channel_method).strip() or "weight"
         self.algorithm_improvement = bool(algorithm_improvement)
+        self.algorithm_probe_samples = max(1, int(algorithm_probe_samples))
         self.search_space_evolution = bool(search_space_evolution)
         self.frozen_expanded_search_space = bool(frozen_expanded_search_space)
         self.candidate_screening = bool(candidate_screening)
@@ -266,12 +270,15 @@ class EvolutionLoop:
         skills = self.skill_hub.search(architecture=architecture, limit=8) if self.memory_enabled else []
         pareto_front = self._load_pareto_front()
         selection_history = self._selection_history()
-        # Local round history is not evaluator Memory.  It only lets a
-        # deterministic baseline avoid proposing the same selection logic
-        # after a rejected round, while Memory remains disabled for that
-        # baseline.  Retrieved skills are the separate, optional evidence
-        # channel used by memory-enabled runs.
-        agent_history = [*selection_history, *skills]
+        algorithm_feedback = self._algorithm_search_feedback_history(
+            limit=4,
+            parent_checkpoint_sha256=parent_artifact.sha256,
+        )
+        # Saved measured-search traces are authoritative cross-round evidence;
+        # they remain available even when optional SkillHub retrieval is off.
+        # Put them first so bounded Agent context cannot truncate them behind
+        # selection-only history or unrelated skills.
+        agent_history = [*algorithm_feedback, *selection_history, *skills]
         algorithm_path = round_dir / "algorithm.json"
         persisted_algorithm = self._read_json(algorithm_path) if algorithm_path.exists() else None
         algorithm_id = str(persisted_algorithm.get("algorithm_id", "")).strip() if persisted_algorithm else self.algorithm_store.next_id()
@@ -299,15 +306,24 @@ class EvolutionLoop:
         parent_selection = self._algorithm_parent_selection()
         improvement_parent = parent_selection.get("effective")
         parent_algorithm_id = improvement_parent.algorithm_id if improvement_parent is not None else None
+        algorithm_generation_search_space = (
+            self.search_space_version.to_dict()
+            if self.search_space_version is not None
+            else default_search_space().to_dict()
+        )
         improved_algorithm = False
+        algorithm_reused_after_duplicate = False
         if persisted_algorithm:
             algorithm = AlgorithmCandidate.from_dict(persisted_algorithm)
+            algorithm_reused_after_duplicate = bool(
+                algorithm.metadata.get("reused_existing_algorithm_after_duplicate")
+            )
             if self.algorithm_improvement and algorithm.parent_algorithm_id and algorithm.parent_source_sha256:
                 try:
                     improvement_parent = self.algorithm_store.get(algorithm.parent_algorithm_id)
                 except ValueError:
                     improvement_parent = None
-                improved_algorithm = improvement_parent is not None
+                improved_algorithm = improvement_parent is not None and not algorithm_reused_after_duplicate
             if not any(item.algorithm_id == algorithm.algorithm_id for item in self.algorithm_store.read()):
                 if algorithm.parent_algorithm_id and algorithm.parent_source_sha256:
                     algorithm = self.algorithm_store.create_child(algorithm, algorithm.parent_source_sha256)
@@ -317,18 +333,22 @@ class EvolutionLoop:
         else:
             try:
                 if self.algorithm_improvement and improvement_parent is not None:
-                    algorithm = self.agent.improve(
-                        algorithm_id,
+                    algorithm, improvement_parent = self._improve_unique_algorithm(
+                        algorithm_id=algorithm_id,
                         parent=improvement_parent,
                         parent_id=parent_candidate.id,
                         profile=profile_payload,
                         history=agent_history,
                         failures=_history_failure_reasons(agent_history),
                         skills=skills,
-                        search_space=self.search_space_version.to_dict() if self.search_space_version is not None else {},
+                        search_space=algorithm_generation_search_space,
                         protocol_mode="tica" if self.tica_prune else "standard",
+                        round_id=round_id,
                     )
-                    improved_algorithm = True
+                    algorithm_reused_after_duplicate = bool(
+                        algorithm.metadata.get("reused_existing_algorithm_after_duplicate")
+                    )
+                    improved_algorithm = not algorithm_reused_after_duplicate
                 elif self.tica_prune and not list(self.algorithm_store.read()):
                     algorithm = AlgorithmCandidate.from_source(
                         algorithm_id,
@@ -353,11 +373,16 @@ class EvolutionLoop:
                         history=agent_history,
                         skills=skills,
                         pareto_front=pareto_front,
-                        search_space=self.search_space_version.to_dict() if self.search_space_version is not None else default_search_space().to_dict(),
+                        search_space=algorithm_generation_search_space,
                         search_choice=search_choice,
                         protocol_mode="tica" if self.tica_prune else "standard",
                     )
             except (RuntimeError, TypeError, ValueError) as exc:
+                failure_type = (
+                    "duplicate_algorithm"
+                    if str(exc).startswith("duplicate_algorithm_source")
+                    else "algorithm_generation_failed"
+                )
                 algorithm = AlgorithmCandidate.from_source(
                     algorithm_id,
                     "# algorithm generation failed\ndef propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': []}}\n",
@@ -367,7 +392,7 @@ class EvolutionLoop:
                     metadata={"generator_failure": True},
                 )
                 _write_json(algorithm_path, algorithm.to_dict())
-                return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "generation", "algorithm_generation_failed", str(exc), {"profile": str(profile_path), "algorithm": str(algorithm_path)}, algorithm_persisted=False)
+                return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "generation", failure_type, str(exc), {"profile": str(profile_path), "algorithm": str(algorithm_path)}, algorithm_persisted=False)
             try:
                 algorithm = replace(
                     algorithm,
@@ -378,7 +403,12 @@ class EvolutionLoop:
                     },
                 )
                 _write_json(algorithm_path, algorithm.to_dict())
-                if improved_algorithm:
+                if algorithm_reused_after_duplicate:
+                    # The source already belongs to the evidence-selected
+                    # parent. Keep reuse metadata local to this round; the
+                    # immutable AlgorithmStore entry is not a new version.
+                    pass
+                elif improved_algorithm:
                     algorithm = self.algorithm_store.create_child(algorithm, improvement_parent.source_sha256)  # type: ignore[union-attr]
                 else:
                     algorithm = self.algorithm_store.create(algorithm)
@@ -421,6 +451,9 @@ class EvolutionLoop:
                     if self.search_space_version is not None
                     else default_search_space().to_dict()
                 )
+                block_search_space_payload = algorithm_generation_search_space
+                if not block_search_space_payload["operators"]:
+                    raise ValueError("standard_search_space_has_no_operators")
                 cached_trace = self._read_json(algorithm_trace_path) if algorithm_trace_path.exists() else None
                 selected_plan: Optional[SandboxCompressionPlan] = None
                 trace_payload: Mapping[str, Any] | None = None
@@ -428,6 +461,8 @@ class EvolutionLoop:
                     isinstance(cached_trace, Mapping)
                     and cached_trace.get("algorithm_source_sha256") == algorithm.source_sha256
                     and isinstance(cached_trace.get("selected_plan"), Mapping)
+                    and cached_trace.get("search_space_version") == search_space_payload.get("version_id")
+                    and (not self.algorithm_improvement or reusable_measured_trace(cached_trace))
                 ):
                     try:
                         selected_plan = SandboxCompressionPlan.from_mapping(
@@ -452,7 +487,7 @@ class EvolutionLoop:
                                 "measured_candidates": [],
                                 "frontier": [],
                             },
-                            search_space_payload,
+                            block_search_space_payload,
                         )
                         measured_search: Mapping[str, Any] | None = None
                         if self.algorithm_improvement:
@@ -470,14 +505,44 @@ class EvolutionLoop:
                                     "max_full_evals": 8,
                                     "max_interaction_evals": 0,
                                     "max_search_depth": 2,
+                                    "quality_floor_ratio": self.promotion_policy.quality_floor_ratio,
                                 },
-                                search_space_payload=search_space_payload,
+                                search_space_payload=block_search_space_payload,
                             )
                             selected_raw = measured_search.get("selected_plan")
-                            if not isinstance(selected_raw, Mapping):
-                                raise ValueError("standard_algorithm_search_selected_plan_missing")
+                            if measured_search.get("valid") is not True or not isinstance(selected_raw, Mapping):
+                                trace_payload = {
+                                    "algorithm_id": algorithm.algorithm_id,
+                                    "algorithm_source_sha256": algorithm.source_sha256,
+                                    "trace": [{
+                                        "depth": 1,
+                                        "source_sha256": decision.source_sha256,
+                                        "payload_sha256": decision.payload_sha256,
+                                        "plan_digests": [stable_digest(item) for item in decision.plans],
+                                        "rank": list(decision.rank),
+                                        "stop": decision.stop,
+                                        "search_space_version": search_space_payload.get("version_id"),
+                                        "search_space_operator_names": [str(item.get("name", "")) for item in block_search_space_payload.get("operators", ()) if isinstance(item, Mapping)],
+                                    }],
+                                    "decision": decision.to_dict(),
+                                    "selected_plan": None,
+                                    "selected_rank_index": None,
+                                    "measured_search": dict(measured_search.get("algorithm_search") or {}),
+                                    "search_space_version": search_space_payload.get("version_id"),
+                                }
+                                _write_json(algorithm_trace_path, trace_payload)
+                                raise ValueError(str(measured_search.get("failure_reason") or "standard_algorithm_search_no_valid_candidate"))
                         else:
-                            selected_raw = decision.plans[decision.rank[0]]
+                            selected_raw = next(
+                                (
+                                    decision.plans[index]
+                                    for index in decision.rank
+                                    if decision.plans[index].get("operator") == "prune_blocks"
+                                ),
+                                None,
+                            )
+                            if not isinstance(selected_raw, Mapping):
+                                raise ValueError("standard_block_search_no_candidate")
                         selected_plan = SandboxCompressionPlan.from_mapping(selected_raw, operator_specs=self.sandbox.operator_specs)
                         trace_payload = {
                             "algorithm_id": algorithm.algorithm_id,
@@ -488,13 +553,15 @@ class EvolutionLoop:
                                 "payload_sha256": decision.payload_sha256,
                                 "plan_digests": [stable_digest(item) for item in decision.plans],
                                 "rank": list(decision.rank),
+                                "evaluation_order": list((measured_search or {}).get("algorithm_search", {}).get("trace", [{}])[0].get("evaluation_order", [])),
                                 "stop": decision.stop,
                                 "search_space_version": search_space_payload.get("version_id"),
-                                "search_space_operator_names": sorted(self.sandbox.operator_specs),
+                                "search_space_operator_names": [str(item.get("name", "")) for item in block_search_space_payload.get("operators", ()) if isinstance(item, Mapping)],
                             }],
                             "decision": decision.to_dict(),
                             "selected_plan": selected_plan.to_dict(),
-                            "selected_rank_index": int(decision.rank[0]),
+                            "selected_rank_index": int((measured_search or {}).get("algorithm_search", {}).get("selected_rank_index", decision.rank[0])),
+                            "selected_rank_position": int((measured_search or {}).get("algorithm_search", {}).get("selected_rank_position", 0)),
                             "search_space_version": search_space_payload.get("version_id"),
                         }
                         if measured_search is not None:
@@ -1608,12 +1675,11 @@ class EvolutionLoop:
     ) -> Mapping[str, Any]:
         """Run a bounded, source-controlled multi-candidate standard search.
 
-        The Agent owns candidate generation and ranking.  The Harness owns
-        the equal-budget measurement, duplicate filtering, checkpoint
-        execution, and final selection by measured metrics.  A second depth
-        is available when ``search()`` returns ``stop: false``; this keeps the
-        standard path useful for recursive hybrid search without introducing a
-        second planner abstraction.
+        The Agent owns Block-subset generation and ranking. The Harness owns
+        equal-budget measurement from one immutable parent, quality-floor
+        enforcement, duplicate filtering, and final measured selection. A
+        second depth is reserved for quality-guided Block restoration or
+        replacement.
         """
 
         max_candidates = int(search_budget.get("max_candidates", 16))
@@ -1621,6 +1687,15 @@ class EvolutionLoop:
         max_depth = max(1, min(3, int(search_budget.get("max_search_depth", 2))))
         if max_candidates <= 0 or max_full_evals <= 0:
             raise ValueError("standard_algorithm_search_budget_invalid")
+        block_search_space = dict(search_space_payload)
+        block_search_space["operators"] = [
+            dict(item) for item in search_space_payload.get("operators", ()) if isinstance(item, Mapping)
+        ]
+        if not block_search_space["operators"]:
+            raise ValueError("standard_search_space_has_no_operators")
+        quality_floor_ratio = float(search_budget.get("quality_floor_ratio", self.promotion_policy.quality_floor_ratio))
+        if not math.isfinite(quality_floor_ratio) or not 0.0 <= quality_floor_ratio <= 1.0:
+            raise ValueError("standard_algorithm_search_quality_floor_invalid")
         evaluator = AlgorithmModelEvaluator(
             self.adapter,
             self.registry,
@@ -1633,27 +1708,72 @@ class EvolutionLoop:
                 "max_full_evals": max_full_evals,
                 "max_interaction_evals": int(search_budget.get("max_interaction_evals", 0)),
             },
+            probe_sample_count=int(search_budget.get("probe_sample_count", self.algorithm_probe_samples)),
         )
-        seen: set[str] = set()
+        previous_digests = self._previously_measured_plan_digests(
+            parent.sha256,
+            exclude_round_id=Path(output_root).parent.name,
+        )
+        prior_feedback = self._algorithm_search_feedback_history(
+            limit=4,
+            parent_checkpoint_sha256=parent.sha256,
+        )
+        prior_candidates: list[Mapping[str, Any]] = []
+        prior_plans: list[Mapping[str, Any]] = []
+        for feedback in prior_feedback:
+            for raw in feedback.get("measured_candidates", ()):
+                if not isinstance(raw, Mapping) or raw.get("valid") is not True:
+                    continue
+                plan = raw.get("plan")
+                if not isinstance(plan, Mapping):
+                    continue
+                recovery_record = {
+                    **dict(raw),
+                    "evaluation_position": len(prior_candidates),
+                }
+                if measured_recovery_key(recovery_record) is None:
+                    continue
+                prior_candidates.append(recovery_record)
+                prior_plans.append(dict(plan))
+
+        prior_best = max(prior_candidates, key=measured_recovery_key, default=None)
+        initial_depth = min(2, max_depth) if prior_best is not None else 1
+        seen: set[str] = set(previous_digests)
         measured: list[Mapping[str, Any]] = []
         decisions: list[Mapping[str, Any]] = []
+        skipped: list[Mapping[str, Any]] = []
         remaining = max_full_evals
         state: Mapping[str, Any] = {
-            "depth": 1,
-            "parent_state_id": "uncompressed",
-            "proposed_plan": proposed_result.plan.to_dict() if proposed_result.plan is not None else None,
-            "budget": {"max_candidates": max_candidates},
-            "measured_candidates": [],
-            "frontier": [],
+            # The Agent's depth-2 recovery policy consumes measured near misses.
+            # Seed it from recent rounds on this exact immutable parent so a
+            # new round can propose unseen restores/replacements immediately.
+            "depth": initial_depth,
+            "parent_state_id": (
+                "cross_round_feedback:%s" % str(prior_feedback[0].get("round_id", ""))
+                if prior_best is not None and prior_feedback
+                else "uncompressed"
+            ),
+            "proposed_plan": (
+                dict(prior_best["plan"])
+                if prior_best is not None
+                else proposed_result.plan.to_dict() if proposed_result.plan is not None else None
+            ),
+            "budget": {"max_candidates": max_candidates, "remaining_full_evals": max_full_evals, "max_full_evals": max_full_evals},
+            "quality_floor_ratio": quality_floor_ratio,
+            "quality_floor_basis": "parent_relative_probe_similarity_with_parent_baseline_1.0",
+            "algorithm_improvement": bool(self.algorithm_improvement),
+            "measured_candidates": prior_candidates,
+            "frontier": prior_plans,
         }
         selected_plan: Optional[SandboxCompressionPlan] = None
         selected_metrics: Optional[Mapping[str, Any]] = None
         selected_record: Optional[Mapping[str, Any]] = None
+        metrics_by_digest: dict[str, Mapping[str, Any]] = {}
 
-        for depth in range(1, max_depth + 1):
+        for depth in range(initial_depth, max_depth + 1):
             if remaining <= 0:
                 break
-            decision = _run_algorithm_search_program(source, self.sandbox, profile, history, state, search_space_payload)
+            decision = _run_algorithm_search_program(source, self.sandbox, profile, history, state, block_search_space)
             decisions.append({
                 "depth": depth,
                 "source_sha256": decision.source_sha256,
@@ -1663,7 +1783,54 @@ class EvolutionLoop:
                 "stop": decision.stop,
             })
             depth_records: list[Mapping[str, Any]] = []
-            for rank_index in decision.rank:
+            operator_specs = _operator_specs_from_search_space(block_search_space)
+            eligible = []
+            unique = set(seen)
+            for index in decision.rank:
+                digest = stable_digest(decision.plans[index])
+                if digest in unique:
+                    skipped.append({
+                        "depth": depth,
+                        "candidate_index": index,
+                        "plan": decision.plans[index],
+                        "plan_digest": digest,
+                        "reason": "previously_measured_same_parent" if digest in previous_digests else "duplicate",
+                    })
+                else:
+                    unique.add(digest)
+                    eligible.append(index)
+            family_counts: dict[str, int] = {}
+            for feedback in prior_feedback:
+                counts = feedback.get("measured_family_counts", {})
+                if isinstance(counts, Mapping):
+                    for family, count in counts.items():
+                        family_counts[str(family)] = family_counts.get(str(family), 0) + int(count)
+            for previous in measured:
+                previous_plan = previous.get("plan") if isinstance(previous, Mapping) else None
+                if isinstance(previous_plan, Mapping):
+                    family = candidate_family(previous_plan, operator_specs)
+                    family_counts[family] = family_counts.get(family, 0) + 1
+            evaluation_order = budgeted_candidate_order(
+                decision.plans, eligible, operator_specs, remaining, family_counts=family_counts,
+            )
+            skipped.extend(
+                {"depth": depth, "candidate_index": index, "plan": decision.plans[index], "plan_digest": stable_digest(decision.plans[index]), "reason": "budget"}
+                for index in eligible if index not in evaluation_order
+            )
+            decisions[-1] = {
+                **dict(decisions[-1]),
+                "diagnostics": dict(decision.diagnostics),
+                "evaluation_order": [
+                    {
+                        "rank_position": rank_position,
+                        "candidate_index": index,
+                        "family": candidate_family(decision.plans[index], operator_specs),
+                        "operator": str(decision.plans[index].get("operator", "")),
+                    }
+                    for rank_position, index in enumerate(evaluation_order)
+                ],
+            }
+            for rank_position, rank_index in enumerate(evaluation_order):
                 if remaining <= 0:
                     break
                 raw_plan = decision.plans[rank_index]
@@ -1679,15 +1846,40 @@ class EvolutionLoop:
                     metadata={"algorithm_program_search": True, "search_depth": depth, "search_rank_index": rank_index},
                 )
                 metrics = dict(evaluator.evaluate(candidate))
+                metrics_by_digest[plan_digest] = metrics
                 remaining -= 1
+                efficiency = efficiency_reduction_ratio(metrics)
+                score = measured_search_score(metrics)
                 record = {
                     "depth": depth,
                     "rank_index": int(rank_index),
+                    "rank_position": int(decision.rank.index(rank_index)),
+                    "evaluation_position": int(rank_position),
                     "plan_digest": plan_digest,
                     "plan": plan.to_dict(),
+                    "family": candidate_family(plan.to_dict(), operator_specs),
+                    "parent_checkpoint_sha256": parent.sha256,
+                    "recovery_action": (
+                        decision.diagnostics.get("candidate_actions", [])[rank_index]
+                        if isinstance(decision.diagnostics.get("candidate_actions"), list)
+                        and rank_index < len(decision.diagnostics.get("candidate_actions", []))
+                        else None
+                    ),
                     "valid": bool(metrics.get("valid") is True),
                     "quality_score": metrics.get("quality_score"),
-                    "search_score": metrics.get("search_score"),
+                    "quality_floor_ratio": quality_floor_ratio,
+                    "quality_floor_basis": "parent_relative_probe_similarity_with_parent_baseline_1.0",
+                    "quality_feasible": bool(
+                        metrics.get("valid") is True
+                        and isinstance(metrics.get("quality_score"), (int, float))
+                        and not isinstance(metrics.get("quality_score"), bool)
+                        and math.isfinite(float(metrics["quality_score"]))
+                        and float(metrics["quality_score"]) >= quality_floor_ratio
+                    ),
+                    "search_score": score,
+                    "efficiency_reduction_ratio": efficiency,
+                    "risk_value": metrics.get("risk_value", metrics.get("quality_error")),
+                    "quality_error": metrics.get("quality_error"),
                     "failure_reason": metrics.get("failure_reason"),
                 }
                 # Keep actual candidate execution evidence in the search
@@ -1702,68 +1894,96 @@ class EvolutionLoop:
                     "estimated_flops",
                     "runtime_execution",
                     "hardware_metrics",
+                    "probe_coverage",
+                    "ranking_evidence",
                 ):
                     if key in metrics:
                         record[key] = metrics[key]
                 depth_records.append(record)
                 measured.append(record)
 
-                def metric_key(item: Mapping[str, Any]) -> tuple[float, float, float, float]:
-                    valid = 1.0 if item.get("valid") is True else 0.0
-                    score = item.get("search_score")
-                    quality = item.get("quality_score")
-                    return (
-                        valid,
-                        float(score) if isinstance(score, (int, float)) and not isinstance(score, bool) else float("-inf"),
-                        float(quality) if isinstance(quality, (int, float)) and not isinstance(quality, bool) else float("-inf"),
-                        -float(item.get("rank_index", 0)),
-                    )
-
-                if selected_record is None or metric_key(record) > metric_key(selected_record):
+                record_key = measured_candidate_key(record)
+                selected_key = measured_candidate_key(selected_record) if selected_record is not None else None
+                if record_key is not None and (selected_key is None or record_key > selected_key):
                     selected_metrics = metrics
                     selected_plan = plan
                     selected_record = record
 
             if decision.stop or remaining <= 0:
                 break
-            feasible = [item for item in depth_records if item.get("valid") is True]
-            if not feasible:
+            recoverable = [item for item in depth_records if measured_recovery_key(item) is not None]
+            if not recoverable:
                 break
-            best = max(feasible, key=lambda item: (float(item.get("search_score", float("-inf"))), -int(item.get("rank_index", 0))))
+            best = max(recoverable, key=measured_recovery_key)
             state = {
                 "depth": depth + 1,
                 "parent_state_id": str(best["plan_digest"]),
                 "proposed_plan": dict(best["plan"]),
-                "budget": {"max_candidates": max_candidates},
+                "budget": {"max_candidates": min(max_candidates, remaining), "remaining_full_evals": remaining, "max_full_evals": max_full_evals},
+                "quality_floor_ratio": quality_floor_ratio,
+                "quality_floor_basis": "parent_relative_probe_similarity_with_parent_baseline_1.0",
+                "algorithm_improvement": bool(self.algorithm_improvement),
                 "measured_candidates": depth_records,
-                "frontier": [dict(item["plan"]) for item in feasible],
+                "frontier": [dict(item["plan"]) for item in recoverable],
             }
 
-        if selected_plan is None or selected_metrics is None:
-            return {
-                "valid": False,
-                "failure_reason": "standard_algorithm_search_no_candidate",
-                "algorithm_search": {
-                    "protocol": "standard_hbps",
-                    "complete": False,
-                    "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
-                    "candidate_count": 0,
-                    "evaluated_candidate_count": 0,
-                    "budget": dict(search_budget),
-                    "trace": decisions,
-                },
-            }
-        result = dict(selected_metrics)
-        result["algorithm_search"] = {
+        pareto_indices = pareto_front_indices(measured)
+        pareto_rows = [measured[index] for index in pareto_indices]
+        feasible_rows = [item for item in pareto_rows if item.get("quality_feasible") is True]
+        selection_pool = feasible_rows if feasible_rows else pareto_rows
+        selected_record = max(
+            selection_pool,
+            key=lambda item: measured_pareto_key(item) or tuple(),
+            default=None,
+        )
+        if selected_record is not None:
+            selected_plan = SandboxCompressionPlan.from_mapping(
+                selected_record["plan"], operator_specs=self.sandbox.operator_specs
+            )
+            selected_metrics = metrics_by_digest.get(str(selected_record.get("plan_digest", "")))
+        selected_status = "quality_feasible" if feasible_rows else "validation_only_near_miss"
+        algorithm_search = {
             "protocol": "standard_hbps",
+            "ranking_version": SEARCH_RANKING_VERSION,
+            "candidate_scope": "registered_multigranular",
+            "parent_checkpoint_sha256": parent.sha256,
+            "quality_floor_ratio": quality_floor_ratio,
+            "quality_floor_basis": "parent_relative_probe_similarity_with_parent_baseline_1.0",
             "complete": True,
             "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
-            "candidate_count": len(seen),
+            "candidate_count": sum(len(item.get("plan_digests", ())) for item in decisions),
             "evaluated_candidate_count": len(measured),
-            "selected_plan_digest": stable_digest(selected_plan.to_dict()),
+            "previously_measured_plan_count": len(previous_digests),
+            "prior_measurement_round_ids": [str(item.get("round_id", "")) for item in prior_feedback],
+            "prior_measurement_candidate_count": len(prior_candidates),
+            "initial_search_depth": initial_depth,
             "candidate_results": measured,
+            "valid_candidate_count": sum(row.get("valid") is True for row in measured),
+            "quality_feasible_candidate_count": sum(measured_candidate_key(row) is not None for row in measured),
+            "pareto_front_indices": list(pareto_indices),
+            "pareto_front_plan_digests": [str(measured[index].get("plan_digest", "")) for index in pareto_indices],
+            "pareto_objectives": ["quality_score:max", "efficiency_reduction_ratio:max", "risk_value:min"],
+            "selection_status": selected_status if selected_record is not None else "no_valid_measurement",
+            "not_evaluated": skipped,
+            "selection_reason": "feasibility_then_pareto_quality_efficiency_risk_then_source_rank",
             "budget": {**dict(search_budget), "full_evals_used": len(measured)},
             "trace": decisions,
+        }
+        if selected_plan is None or selected_metrics is None or selected_record is None:
+            return {
+                "valid": False,
+                "failure_reason": "standard_algorithm_search_no_valid_candidate",
+                "algorithm_search": {**algorithm_search, "complete": False},
+            }
+        result = {**dict(selected_metrics), "search_score": selected_record.get("search_score")}
+        if selected_status != "quality_feasible":
+            result["validation_only"] = True
+            result["validation_only_reason"] = "no_calibration_candidate_met_quality_floor"
+        result["algorithm_search"] = {
+            **algorithm_search,
+            "selected_plan_digest": stable_digest(selected_plan.to_dict()),
+            "selected_rank_index": int(selected_record["rank_index"]),
+            "selected_rank_position": int(selected_record["rank_position"]),
         }
         result["selected_plan"] = selected_plan.to_dict()
         return result
@@ -1986,6 +2206,254 @@ class EvolutionLoop:
             )
         return records[-16:]
 
+    def _algorithm_search_feedback_history(
+        self,
+        *,
+        limit: Optional[int] = 4,
+        parent_checkpoint_sha256: Optional[str] = None,
+    ) -> list[Mapping[str, Any]]:
+        """Read compactable, measured Block outcomes from prior round traces."""
+
+        round_dirs = sorted(
+            self.rounds_root.glob("R*"),
+            key=lambda path: int(path.name[1:]) if path.name[1:].isdigit() else -1,
+        )
+        records: list[Mapping[str, Any]] = []
+        for round_dir in round_dirs:
+            trace_path = round_dir / "algorithm-program-trace.json"
+            if not trace_path.exists():
+                continue
+            try:
+                trace = self._read_json(trace_path)
+                measured = trace.get("measured_search")
+                if not isinstance(measured, Mapping):
+                    continue
+                raw_candidates = measured.get("candidate_results")
+                if not isinstance(raw_candidates, list):
+                    continue
+                floor = measured.get("quality_floor_ratio")
+                if not isinstance(floor, (int, float)) or isinstance(floor, bool) or not math.isfinite(float(floor)):
+                    floor = None
+                candidates: list[Mapping[str, Any]] = []
+                for raw in raw_candidates:
+                    if not isinstance(raw, Mapping):
+                        continue
+                    plan = raw.get("plan")
+                    if not isinstance(plan, Mapping) or not isinstance(plan.get("args"), Mapping):
+                        continue
+
+                    def finite_metric(name: str) -> Optional[float]:
+                        value = raw.get(name)
+                        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+                            return float(value)
+                        return None
+
+                    plan_copy = {"operator": str(plan.get("operator", "")), "args": dict(plan.get("args", {}))}
+                    probe_coverage = raw.get("probe_coverage")
+                    candidates.append(
+                        {
+                            "plan": plan_copy,
+                            "plan_digest": str(raw.get("plan_digest") or stable_digest(plan_copy)),
+                            "candidate_index": raw.get("rank_index"),
+                            "rank_position": raw.get("rank_position"),
+                            "operator": plan_copy["operator"],
+                            "family": candidate_family(plan_copy, {}),
+                            "valid": raw.get("valid") is True,
+                            "quality_score": finite_metric("quality_score"),
+                            "quality_floor_ratio": finite_metric("quality_floor_ratio") if finite_metric("quality_floor_ratio") is not None else floor,
+                            "quality_feasible": raw.get("quality_feasible") is True,
+                            "search_score": finite_metric("search_score"),
+                            "efficiency_reduction_ratio": finite_metric("efficiency_reduction_ratio"),
+                            "risk_value": finite_metric("risk_value"),
+                            "quality_error": finite_metric("quality_error"),
+                            "failure_reason": str(raw.get("failure_reason")) if raw.get("failure_reason") else None,
+                            "recovery_action": str(raw.get("recovery_action")) if raw.get("recovery_action") else None,
+                            "video_quality_evaluated": bool(
+                                isinstance(probe_coverage, Mapping)
+                                and probe_coverage.get("video_quality") is True
+                            ),
+                            "depth": int(raw.get("depth", 1)) if isinstance(raw.get("depth", 1), int) else 1,
+                        }
+                    )
+                if not candidates:
+                    continue
+                decision_path = round_dir / "decision.json"
+                decision: Mapping[str, Any] = {}
+                if decision_path.exists():
+                    try:
+                        decision = self._read_json(decision_path)
+                    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                        decision = {}
+                feasible_count = sum(item.get("quality_feasible") is True for item in candidates)
+                tested_block_sets: list[list[str]] = []
+                seen_block_sets: set[tuple[str, ...]] = set()
+                for item in candidates:
+                    if item.get("operator") != "prune_blocks":
+                        continue
+                    block_ids = item["plan"]["args"]["block_ids"]
+                    block_key = tuple(block_ids)
+                    if block_key not in seen_block_sets:
+                        seen_block_sets.add(block_key)
+                        tested_block_sets.append(list(block_ids))
+                summarized_candidates = sorted(
+                    candidates,
+                    key=lambda item: (
+                        item.get("quality_feasible") is True,
+                        item.get("valid") is True,
+                        item.get("quality_score") if isinstance(item.get("quality_score"), (int, float)) else float("-inf"),
+                        item.get("search_score") if isinstance(item.get("search_score"), (int, float)) else float("-inf"),
+                        item.get("efficiency_reduction_ratio") if isinstance(item.get("efficiency_reduction_ratio"), (int, float)) else float("-inf"),
+                    ),
+                    reverse=True,
+                )
+                family_counts: dict[str, int] = {}
+                for item in candidates:
+                    family = str(item.get("family", "other"))
+                    family_counts[family] = family_counts.get(family, 0) + 1
+                round_id = round_dir.name
+                records.append(
+                    {
+                        "memory_kind": "algorithm_search_feedback",
+                        "experience_id": round_id,
+                        "round_id": round_id,
+                        "algorithm_id": str(trace.get("algorithm_id", decision.get("algorithm_id", ""))),
+                        "parent_checkpoint_sha256": str(measured.get("parent_checkpoint_sha256", "")),
+                        "quality_floor_ratio": floor,
+                        "quality_floor_basis": str(measured.get("quality_floor_basis", "")),
+                        "candidate_count": len(candidates),
+                        "measured_candidate_summary_count": len(summarized_candidates),
+                        "measured_family_counts": family_counts,
+                        "quality_feasible_candidate_count": feasible_count,
+                        "search_outcome": "quality_feasible_candidate_found" if feasible_count else "no_quality_feasible_candidate",
+                        "failure_reason": str(decision.get("failure_type", "quality_floor_not_met" if feasible_count == 0 else "")) or None,
+                        "tested_block_sets": tested_block_sets,
+                        "all_plan_digests": [str(item["plan_digest"]) for item in candidates],
+                        "measured_candidates": summarized_candidates,
+                    }
+                )
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+
+        records.reverse()
+        if parent_checkpoint_sha256 is not None:
+            records = [
+                item for item in records
+                if str(item.get("parent_checkpoint_sha256", "")) == str(parent_checkpoint_sha256)
+            ]
+        if limit is None:
+            return records
+        return records[:max(0, int(limit))]
+
+    def _previously_measured_plan_digests(
+        self,
+        parent_checkpoint_sha256: str,
+        *,
+        exclude_round_id: Optional[str] = None,
+    ) -> set[str]:
+        """Return plans from any granularity already probed on this exact parent."""
+
+        digests: set[str] = set()
+        for feedback in self._algorithm_search_feedback_history(limit=None):
+            if str(feedback.get("round_id", "")) == str(exclude_round_id or ""):
+                continue
+            if str(feedback.get("parent_checkpoint_sha256", "")) != str(parent_checkpoint_sha256):
+                continue
+            for digest in feedback.get("all_plan_digests", ()):
+                if digest:
+                    digests.add(str(digest))
+            for candidate in feedback.get("measured_candidates", ()):
+                if not isinstance(candidate, Mapping):
+                    continue
+                digest = candidate.get("plan_digest")
+                plan = candidate.get("plan")
+                if digest:
+                    digests.add(str(digest))
+                elif isinstance(plan, Mapping):
+                    digests.add(stable_digest(plan))
+        return digests
+
+    def _improve_unique_algorithm(
+        self,
+        *,
+        algorithm_id: str,
+        parent: AlgorithmCandidate,
+        parent_id: Optional[str],
+        profile: Mapping[str, Any],
+        history: list[Mapping[str, Any]],
+        failures: tuple[str, ...],
+        skills: list[Mapping[str, Any]],
+        search_space: Mapping[str, Any],
+        protocol_mode: str,
+        round_id: str,
+    ) -> tuple[AlgorithmCandidate, AlgorithmCandidate]:
+        """Retry one duplicate source from its existing lineage with explicit feedback."""
+
+        current_parent = parent
+        current_history = list(history)
+        current_failures = tuple(failures)
+        duplicate_attempts: list[dict[str, Any]] = []
+        for attempt in range(2):
+            candidate = self.agent.improve(
+                algorithm_id,
+                parent=current_parent,
+                parent_id=parent_id,
+                profile=profile,
+                history=current_history,
+                failures=current_failures,
+                skills=skills,
+                search_space=search_space,
+                protocol_mode=protocol_mode,
+            )
+            duplicate = self.algorithm_store.duplicate_of(candidate)
+            if duplicate is None:
+                if duplicate_attempts:
+                    candidate = replace(
+                        candidate,
+                        metadata={
+                            **dict(candidate.metadata),
+                            "duplicate_source_attempts": duplicate_attempts,
+                        },
+                    )
+                return candidate, current_parent
+            duplicate_attempts.append(
+                {
+                    "attempt": attempt + 1,
+                    "candidate_source_sha256": candidate.source_sha256,
+                    "duplicate_algorithm_id": duplicate.algorithm_id,
+                    "duplicate_algorithm_source_sha256": duplicate.source_sha256,
+                }
+            )
+            if attempt == 1:
+                # Reuse the evidence-selected AI-authored program with the
+                # current measured history. Candidate-level dedupe prevents
+                # repeating plans already tested on this parent checkpoint.
+                return (
+                    replace(
+                        parent,
+                        metadata={
+                            **dict(parent.metadata),
+                            "reused_existing_algorithm_after_duplicate": True,
+                            "duplicate_source_attempts": duplicate_attempts,
+                        },
+                    ),
+                    parent,
+                )
+            retry_feedback = {
+                "memory_kind": "algorithm_duplicate_feedback",
+                "experience_id": round_id,
+                "round_id": round_id,
+                "algorithm_id": duplicate.algorithm_id,
+                "duplicate_algorithm_id": duplicate.algorithm_id,
+                "candidate_source_sha256": candidate.source_sha256,
+                "duplicate_algorithm_source_sha256": duplicate.source_sha256,
+                "duplicate_attempt": attempt + 1,
+                "failure_reason": "duplicate_algorithm_source",
+            }
+            current_parent = duplicate
+            current_history = [retry_feedback, *history]
+            current_failures = tuple(dict.fromkeys([*failures, "duplicate_algorithm_source"]))
+        raise RuntimeError("algorithm_improvement_retry_exhausted")
+
     def _search_space_feedback(self) -> dict[str, Any]:
         rounds = self._feedback_history()
         evidence_ids = [str(item.get("round_id")) for item in rounds if item.get("round_id")]
@@ -2005,6 +2473,8 @@ class EvolutionLoop:
             reasons.extend(str(value) for value in promotion.get("reasons", []) if str(value).strip())
             if decision.get("failure_type"):
                 reasons.append(str(decision["failure_type"]))
+            for reason in set(reasons):
+                failure_counts[reason] = failure_counts.get(reason, 0) + 1
             if evaluation.get("failure_type"):
                 reasons.append(str(evaluation["failure_type"]))
             for reason in reasons:
@@ -2194,21 +2664,62 @@ class EvolutionLoop:
         latest = max(candidates, key=lambda item: int(item.algorithm_id[1:])) if candidates else None
         validated = [item for item in candidates if item.validation_status == "validated"]
         accepted = [item for item in candidates if item.status == "accepted"]
-        scores: dict[str, float] = {}
+
+        # A failed model-search round still has useful algorithm evidence in
+        # its candidate trace. Rank algorithm lineage separately from model
+        # promotion: feasibility leads, then quality, measured score, and
+        # efficiency. Under-floor near misses can select an algorithm parent,
+        # but never a model candidate.
+        scores: dict[str, tuple[float, float, float, float, float]] = {}
+
+        def record_score(algorithm_id: str, row: Mapping[str, Any], *, accepted_result: bool = False) -> None:
+            quality = row.get("quality_score")
+            score = row.get("search_score", quality)
+            efficiency = row.get("efficiency_reduction_ratio", row.get("parameter_reduction_ratio", 0.0))
+            values = (quality, score, efficiency)
+            if any(not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) for value in values):
+                return
+            feasible = row.get("quality_feasible") is True or row.get("feasible") is True or accepted_result
+            position = row.get("rank_position", row.get("evaluation_position", 0))
+            if not isinstance(position, (int, float)) or isinstance(position, bool) or not math.isfinite(float(position)):
+                position = 0
+            key = (
+                1.0 if feasible else 0.0,
+                float(quality),
+                float(score),
+                float(efficiency),
+                -float(position),
+            )
+            if algorithm_id and key > scores.get(algorithm_id, (-1.0, float("-inf"), float("-inf"), float("-inf"), float("-inf"))):
+                scores[algorithm_id] = key
+
+        for feedback in self._algorithm_search_feedback_history(limit=None):
+            algorithm_id = str(feedback.get("algorithm_id", ""))
+            for row in feedback.get("measured_candidates", ()):
+                if isinstance(row, Mapping) and row.get("valid") is True:
+                    record_score(algorithm_id, row)
+
         for record in self.experience_store.read():
             algorithm_id = str(record.training.get("algorithm_id", ""))
             evaluation = record.evaluation or {}
-            score = evaluation.get("search_score", evaluation.get("quality_score"))
-            if algorithm_id and isinstance(score, (int, float)) and not isinstance(score, bool):
-                scores[algorithm_id] = max(scores.get(algorithm_id, float("-inf")), float(score))
+            record_score(algorithm_id, evaluation, accepted_result=record.status == "accepted")
+
+        def algorithm_rank(item: AlgorithmCandidate) -> tuple[Any, ...]:
+            return (
+                *scores.get(item.algorithm_id, (-1.0, float("-inf"), float("-inf"), float("-inf"), float("-inf"))),
+                item.validation_status == "validated",
+                item.status == "accepted",
+                int(item.algorithm_id[1:]),
+            )
+
         historical_best = max(
             candidates,
-            key=lambda item: (scores.get(item.algorithm_id, float("-inf")), item.validation_status == "validated", item.status == "accepted"),
+            key=algorithm_rank,
             default=None,
         )
         effective = max(
             validated,
-            key=lambda item: (scores.get(item.algorithm_id, float("-inf")), item.status == "accepted", int(item.algorithm_id[1:])),
+            key=algorithm_rank,
             default=None,
         )
         if effective is None:
@@ -2221,7 +2732,7 @@ class EvolutionLoop:
             "historical_best": historical_best,
             "pending": tuple(pending),
             "rejected": tuple(rejected),
-            "selection_reason": "validated_then_measured_score_then_latest_fallback",
+            "selection_reason": "validated_then_measured_block_search_evidence_then_latest_fallback",
         }
 
     def _load_sandbox(self, path: Path) -> Optional[SandboxResult]:

@@ -13,6 +13,7 @@ from typing import Any, Mapping, Optional
 from ..adapters.wan.contracts import CheckpointArtifact, WanModelAdapter, stable_digest
 from ..operators.wan import WanCompressionRegistry
 from ..sandbox.runner import SandboxResult
+from .search_ranking import SEARCH_RANKING_VERSION, efficiency_reduction_ratio, measured_search_score
 from .tica_prune import normalized_time_weights
 
 
@@ -77,6 +78,26 @@ def _output_metrics(parent_output: Any, child_output: Any) -> Optional[dict[str,
         return None
 
 
+def _aggregate_probe_metrics(records: list[Mapping[str, Any]]) -> Optional[dict[str, Any]]:
+    """Aggregate paired probes conservatively so one lucky seed cannot pass."""
+
+    if not records or any(not isinstance(item, Mapping) for item in records):
+        return None
+    keys = ("mse", "normalized_mse", "cosine_similarity")
+    if any(any(not isinstance(item.get(key), (int, float)) or not math.isfinite(float(item[key])) for key in keys) for item in records):
+        return None
+    return {
+        "mse": sum(float(item["mse"]) for item in records) / len(records),
+        "normalized_mse": max(float(item["normalized_mse"]) for item in records),
+        "cosine_similarity": min(float(item["cosine_similarity"]) for item in records),
+        "quality_score": min(float(item["cosine_similarity"]) - float(item["normalized_mse"]) for item in records),
+        "parent_output_digests": [str(item.get("parent_output_digest", "")) for item in records],
+        "child_output_digests": [str(item.get("child_output_digest", "")) for item in records],
+        "probe_count": len(records),
+        "aggregation": "mean_mse_worst_normalized_mse_and_cosine",
+    }
+
+
 def _json_safe(value: Any) -> Any:
     """Convert runtime counters to a stable JSON-compatible snapshot."""
 
@@ -121,6 +142,7 @@ def _runtime_execution_evidence(model: Any, structure: Any = None) -> Mapping[st
         "attention_window": ("_harness4h3_attention_window_stats",),
         "head_gating": ("_harness4h3_head_gating_stats",),
         "sampling": ("_harness4h3_sampling_step_stats",),
+        "runtime_wrapper_delegations": ("_harness4h3_runtime_wrapper_delegations",),
     }
     stats: dict[str, Any] = {}
     for name, candidates in aliases.items():
@@ -284,6 +306,7 @@ class AlgorithmModelEvaluator:
     profile: Mapping[str, Any]
     output_root: Path
     seed: int = 7
+    probe_sample_count: int = 1
     calibration_manifest: Any = None
     search_budget: Mapping[str, int] = field(default_factory=lambda: {"max_fast_evals": 8, "max_full_evals": 4, "max_interaction_evals": 2})
 
@@ -291,8 +314,16 @@ class AlgorithmModelEvaluator:
         self.output_root = Path(self.output_root)
         self.output_root.mkdir(parents=True, exist_ok=True)
         self._parent_model = self.adapter.reload_model(self.parent)
-        self._sample = self.adapter.profile_sample(self._parent_model, int(self.seed))
-        self._parent_output = self.adapter.forward_profile(self._parent_model, self._sample)
+        self.probe_sample_count = max(1, int(self.probe_sample_count))
+        self._probe_samples = tuple(
+            self.adapter.profile_sample(self._parent_model, int(self.seed) + offset)
+            for offset in range(self.probe_sample_count)
+        )
+        self._sample = self._probe_samples[0]
+        self._parent_outputs = tuple(
+            self.adapter.forward_profile(self._parent_model, sample) for sample in self._probe_samples
+        )
+        self._parent_output = self._parent_outputs[0]
         self._parent_flops = self._estimate_flops(self._parent_model)
         self._parent_bytes = _checkpoint_bytes(self.parent.path)
         self._parent_transformer_bytes = _logical_bytes(Path(self.parent.path) / "transformer")
@@ -300,6 +331,7 @@ class AlgorithmModelEvaluator:
             name: _logical_bytes(Path(self.parent.path) / name)
             for name in ("text_encoder", "text_encoder_2", "tokenizer", "tokenizer_2", "vae")
         }
+        self._parent_runtime_outputs: dict[int, Any] = {}
         self._invocations = 0
         self._tica_samples: tuple[Any, ...] = ()
         self._parent_tica_outputs: dict[tuple[str, float], Any] = {}
@@ -316,7 +348,7 @@ class AlgorithmModelEvaluator:
 
     @property
     def input_digest(self) -> str:
-        return _tensor_digest(self._sample)
+        return stable_digest([_tensor_digest(item) for item in self._probe_samples])
 
     def evaluate(self, result: SandboxResult) -> Mapping[str, Any]:
         started = time.perf_counter()
@@ -339,14 +371,26 @@ class AlgorithmModelEvaluator:
             child_structure = self.adapter.inspect(child_model)
             parent_structure = self.adapter.inspect(self._parent_model)
             self._assert_finite(child_model)
-            child_output = self.adapter.forward_profile(child_model, self._sample)
+            child_outputs = tuple(self.adapter.forward_profile(child_model, sample) for sample in self._probe_samples)
             runtime_probe_error = None
+            runtime_output_metrics = None
             runtime_metadata = child_structure.metadata if isinstance(child_structure.metadata, Mapping) else {}
             has_runtime_operation = bool(runtime_metadata.get("runtime_operations"))
             runtime_probe = getattr(self.adapter, "runtime_profile", None)
             if callable(runtime_probe) and has_runtime_operation:
                 try:
-                    runtime_probe(child_model, seed=int(self.seed))
+                    runtime_rows = []
+                    for offset, _sample in enumerate(self._probe_samples):
+                        probe_seed = int(self.seed) + offset
+                        if probe_seed not in self._parent_runtime_outputs:
+                            self._parent_runtime_outputs[probe_seed] = runtime_probe(self._parent_model, seed=probe_seed)
+                        child_runtime_output = runtime_probe(child_model, seed=probe_seed)
+                        row = _output_metrics(self._parent_runtime_outputs[probe_seed], child_runtime_output)
+                        if row is None:
+                            runtime_rows = []
+                            break
+                        runtime_rows.append(row)
+                    runtime_output_metrics = _aggregate_probe_metrics(runtime_rows)
                 except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
                     runtime_probe_error = str(exc)
             sampling_steps = getattr(self.adapter, "sampling_steps", None)
@@ -362,9 +406,23 @@ class AlgorithmModelEvaluator:
             if self.calibration_manifest is not None:
                 output = self._measure_tica_outputs(child_model, result.plan)
             else:
-                output = _output_metrics(self._parent_output, child_output)
+                paired_rows = [
+                    _output_metrics(parent_output, child_output)
+                    for parent_output, child_output in zip(self._parent_outputs, child_outputs)
+                ]
+                output = _aggregate_probe_metrics([row for row in paired_rows if row is not None]) if all(row is not None for row in paired_rows) else None
             if output is None:
                 return self._invalid("probe_output_unavailable_or_shape_mismatch", started, result, compression=compression)
+            probe_coverage = {"transformer_output": True, "calibration_probe_count": len(self._probe_samples), "calibration_seeds": [int(self.seed) + offset for offset in range(len(self._probe_samples))], "paired_runtime_output": runtime_output_metrics is not None, "sampler_quality": False, "video_quality": False}
+            if has_runtime_operation and (runtime_probe_error or (callable(runtime_probe) and runtime_output_metrics is None)):
+                return {**self._invalid("runtime_probe_failed:" + str(runtime_probe_error or "paired_output_unavailable"), started, result, compression=compression), "runtime_execution": runtime_execution, "probe_coverage": probe_coverage}
+            if runtime_output_metrics is not None and self.calibration_manifest is None:
+                def probe_quality(item):
+                    return float(item["cosine_similarity"]) - float(item["normalized_mse"])
+                output = min((output, runtime_output_metrics), key=probe_quality)
+            steps = result.plan.args.get("steps", ()) if result.plan.operator == "compose" else ({"operator": result.plan.operator},)
+            if any(step.get("operator") == "sampling_step_skip" for step in steps):
+                return {**self._invalid("sampler_quality_unmeasured_by_transformer_probe", started, result, compression=compression), "runtime_execution": runtime_execution, "probe_coverage": probe_coverage}
             parent_parameters = int(parent_structure.parameter_count)
             child_parameters = int(child_structure.parameter_count)
             parameter_reduction = 1.0 - (child_parameters / max(parent_parameters, 1))
@@ -383,7 +441,19 @@ class AlgorithmModelEvaluator:
                 name: _logical_bytes(Path(compression.child_checkpoint.path) / name)
                 for name in self._parent_fixed_component_bytes
             }
-            reduction_score = max(0.0, min(1.0, float(parameter_reduction)))
+            checkpoint_size_reduction = 1.0 - checkpoint_bytes / max(self._parent_bytes, 1)
+            search_metrics = {
+                "quality_score": quality,
+                "parameter_reduction_ratio": parameter_reduction,
+                "checkpoint_size_reduction_ratio": checkpoint_size_reduction,
+                "compute_metrics": compute,
+                "runtime_execution": runtime_execution,
+            }
+            efficiency_score = efficiency_reduction_ratio(search_metrics)
+            runtime_reduction = efficiency_reduction_ratio({"runtime_execution": runtime_execution})
+            if has_runtime_operation and parameter_reduction <= 0 and runtime_reduction <= 0:
+                return {**self._invalid("runtime_policy_no_observed_reduction", started, result, compression=compression), "runtime_execution": runtime_execution, "probe_coverage": probe_coverage}
+
             return {
                 "valid": True,
                 "offline_simulation": bool(self.parent.metadata.get("offline_simulation", False)),
@@ -413,10 +483,13 @@ class AlgorithmModelEvaluator:
                 "risk_scale": output.get("risk_scale", "normalized_mse"),
                 "risk_is_approximate": output.get("risk_is_approximate") is True,
                 "quality_score": quality,
-                "search_score": quality + 0.10 * reduction_score,
+                "search_score": measured_search_score(search_metrics),
+                "search_efficiency_ratio": efficiency_score,
+                "probe_coverage": probe_coverage,
+                "ranking_evidence": {"version": SEARCH_RANKING_VERSION, "formula": "probe_quality + 0.10 * max_supported_reduction_proxy", "efficiency_weight": 0.10, "efficiency_proxy": efficiency_score, "gpu_speedup_measured": False, "paired_runtime_metrics": runtime_output_metrics},
                 "checkpoint_size_bytes": checkpoint_bytes,
                 "parent_checkpoint_size_bytes": self._parent_bytes,
-                "checkpoint_size_reduction_ratio": 1.0 - checkpoint_bytes / max(self._parent_bytes, 1),
+                "checkpoint_size_reduction_ratio": checkpoint_size_reduction,
                 "pipeline_model_size_bytes": checkpoint_bytes,
                 "transformer_model_size_bytes": transformer_bytes,
                 "parent_transformer_model_size_bytes": self._parent_transformer_bytes,
@@ -425,7 +498,7 @@ class AlgorithmModelEvaluator:
                 "model_size_scope": "pipeline_logical_unique_files",
                 "transformer_model_size_scope": "transformer_logical_unique_files",
                 "parameter_count_scope": "transformer_only",
-                "hardware_measurement_scope": "not_measured_on_cpu_fake",
+                "hardware_measurement_scope": "not_measured_by_algorithm_probe",
                 "hardware_metrics": {
                     "latency_s": None,
                     "peak_memory_gb": None,
@@ -440,7 +513,7 @@ class AlgorithmModelEvaluator:
                     "transformer_model_size_scope": "transformer_logical_unique_files",
                     "parameter_count_scope": "transformer_only",
                     "available": False,
-                    "unavailable_reason": "CPU Fake algorithm evaluator does not measure GPU hardware",
+                    "unavailable_reason": "algorithm probe does not measure GPU hardware",
                 },
                 "invocations": {"compression": 1, "forward": 2, "total": 3},
                 "evaluation_cost": {
@@ -479,7 +552,13 @@ class AlgorithmModelEvaluator:
 
     @staticmethod
     def _assert_finite(model: Any) -> None:
-        for parameter in model.parameters():
+        parameters = getattr(model, "parameters", None)
+        if not callable(parameters):
+            transformer = getattr(model, "transformer", None)
+            parameters = getattr(transformer, "parameters", None)
+        if not callable(parameters):
+            raise ValueError("model_integrity_failed: no callable parameter iterator")
+        for parameter in parameters():
             if not bool(parameter.detach().isfinite().all()):
                 raise ValueError("model_integrity_failed: non-finite parameter")
 

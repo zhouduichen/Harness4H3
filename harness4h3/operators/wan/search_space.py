@@ -312,6 +312,7 @@ def default_search_space() -> SearchSpaceVersion:
             OperatorSpec("sparse_runtime", "1", {"keep_ratio": "float", "attention": "str"}, "sparse_runtime", ("self_attention_top_k",), ("dynamic_policy",), "sparse_runtime", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.SparseRuntimeOperator"),
             OperatorSpec("attention_window", "2", {"window_size": "int", "attention": "str", "grid_shape": "list[int3]", "window_radius": "list[int3]"}, "attention", ("self_attention_local_window",), ("dynamic_policy", "requires_sequence_order", "spatiotemporal_grid_optional"), "attention_window", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.AttentionWindowOperator"),
             OperatorSpec("sampling_step_skip", "1", {"target_steps": "int"}, "sampling_step", ("preserve_endpoints",), ("dynamic_policy",), "sampling_step_skip", execution_domain="sampler", implementation_ref="harness4h3.operators.wan.compression.SamplingStepSkipOperator"),
+            OperatorSpec("timestep_block_gate", "1", {"rules": "list[object]", "policy": "str"}, "runtime_timestep", ("normalized_timestep", "known_block_ids", "no_parameter_reduction"), ("dynamic_skip", "requires_temporal_sensitivity"), "timestep_block_gate", execution_domain="runtime", implementation_ref="harness4h3.operators.wan.compression.TimestepBlockGatingOperator"),
         ),
         constraints={"wan_channel_pruning_requires_all_blocks": True},
         status="validated",

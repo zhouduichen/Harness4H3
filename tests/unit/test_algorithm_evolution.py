@@ -5,8 +5,12 @@ import json
 
 from harness4h3.evolution.agent import AlgorithmAgent
 from harness4h3.evolution.agent import build_algorithm_provider
+from harness4h3.evolution.agent import _compact_context_items
+from harness4h3.evolution.candidate import AlgorithmCandidate
+from harness4h3.evolution.loop import EvolutionLoop
 from harness4h3.evolution.policy import SearchPolicy
 from harness4h3.evolution.skill_hub import SkillHub
+from harness4h3.adapters.wan import FakeWanDiTAdapter
 from harness4h3.memory.design_gene import DesignGene
 from harness4h3.memory.experience import ExperienceRecord
 
@@ -146,7 +150,160 @@ def test_selection_history_excludes_blocks_used_inside_composite_plans():
     assert "block.2" in candidate.source
 
 
-def test_memory_feedback_tightens_ffn_exploration_after_size_miss():
+def test_measured_block_feedback_survives_compaction_and_selects_feasible_algorithm_parent(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    loop = EvolutionLoop(adapter=adapter, parent=parent, output_root=tmp_path / "run", algorithm_improvement=True)
+
+    for index, (quality, feasible) in enumerate(((0.974, False), (0.976, False), (0.981, True)), start=1):
+        source = (
+            "def propose(profile, history):\n"
+            "    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.%d']}}\n" % index
+        )
+        loop.algorithm_store.create(AlgorithmCandidate.from_source("A%04d" % index, source))
+        round_dir = loop.rounds_root / ("R%04d" % index)
+        round_dir.mkdir()
+        trace = {
+            "algorithm_id": "A%04d" % index,
+            "measured_search": {
+                "parent_checkpoint_sha256": parent.sha256,
+                "quality_floor_ratio": 0.98,
+                "candidate_results": [{
+                    "plan": {"operator": "prune_blocks", "args": {"block_ids": ["block.%d" % index]}},
+                    "valid": True,
+                    "quality_score": quality,
+                    "quality_floor_ratio": 0.98,
+                    "quality_feasible": feasible,
+                    "search_score": quality + 0.003,
+                    "efficiency_reduction_ratio": 0.03,
+                }],
+            },
+        }
+        (round_dir / "algorithm-program-trace.json").write_text(json.dumps(trace))
+
+    history = loop._algorithm_search_feedback_history(limit=2)
+    compact = _compact_context_items(history)
+    assert len(compact) == 2
+    assert compact[0]["memory_kind"] == "algorithm_search_feedback"
+    assert compact[0]["parent_checkpoint_sha256"] == parent.sha256
+    assert compact[0]["measured_candidates"][0]["plan"]["args"]["block_ids"] == ["block.3"]
+    assert compact[0]["measured_candidates"][0]["quality_score"] == 0.981
+
+    selection = loop._algorithm_parent_selection()
+    assert selection["effective"].algorithm_id == "A0003"
+    assert selection["selection_reason"] == "validated_then_measured_block_search_evidence_then_latest_fallback"
+
+
+def test_duplicate_algorithm_source_gets_one_feedback_driven_retry(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
+    parent_artifact = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    loop = EvolutionLoop(adapter=adapter, parent=parent_artifact, output_root=tmp_path / "run", algorithm_improvement=True)
+    source_a1 = "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n"
+    source_a2 = "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.1']}}\n"
+    source_a3 = "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.2']}}\n"
+    parent = AlgorithmCandidate.from_source("A0001", source_a1)
+    duplicate = AlgorithmCandidate.from_source(
+        "A0002",
+        source_a2,
+        parent_id="M0000",
+        parent_algorithm_id="A0001",
+        parent_source_sha256=parent.source_sha256,
+    )
+    loop.algorithm_store.create(parent)
+    loop.algorithm_store.create_child(duplicate, parent.source_sha256)
+
+    class RetryAgent:
+        def __init__(self):
+            self.calls = []
+
+        def improve(self, algorithm_id, **kwargs):
+            self.calls.append(kwargs)
+            source = source_a2 if len(self.calls) == 1 else source_a3
+            selected_parent = kwargs["parent"]
+            return AlgorithmCandidate.from_source(
+                algorithm_id,
+                source,
+                parent_id=kwargs["parent_id"],
+                parent_algorithm_id=selected_parent.algorithm_id,
+                parent_source_sha256=selected_parent.source_sha256,
+            )
+
+    retry_agent = RetryAgent()
+    loop.agent = retry_agent
+    candidate, selected_parent = loop._improve_unique_algorithm(
+        algorithm_id="A0003",
+        parent=parent,
+        parent_id="M0000",
+        profile={},
+        history=[{"memory_kind": "algorithm_search_feedback", "experience_id": "R0001"}],
+        failures=("algorithm_search_failed",),
+        skills=[],
+        search_space={},
+        protocol_mode="standard",
+        round_id="R0002",
+    )
+
+    assert candidate.source == source_a3
+    assert candidate.parent_algorithm_id == "A0002"
+    assert selected_parent.algorithm_id == "A0002"
+    assert retry_agent.calls[1]["failures"] == ("algorithm_search_failed", "duplicate_algorithm_source")
+    assert retry_agent.calls[1]["history"][0]["memory_kind"] == "algorithm_duplicate_feedback"
+    duplicate_attempt = candidate.metadata["duplicate_source_attempts"][0]
+    assert duplicate_attempt["candidate_source_sha256"] == AlgorithmCandidate.from_source("A0002", source_a2).source_sha256
+    compact_retry = _compact_context_items([retry_agent.calls[1]["history"][0]])[0]
+    assert compact_retry["duplicate_algorithm_id"] == "A0002"
+    assert compact_retry["duplicate_algorithm_source_sha256"] == AlgorithmCandidate.from_source("A0002", source_a2).source_sha256
+
+
+def test_duplicate_algorithm_source_reuses_selected_parent_after_retry(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
+    parent_artifact = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    loop = EvolutionLoop(adapter=adapter, parent=parent_artifact, output_root=tmp_path / "run", algorithm_improvement=True)
+    source = "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n"
+    selected_parent = AlgorithmCandidate.from_source("A0001", source)
+    loop.algorithm_store.create(selected_parent)
+
+    class DuplicateAgent:
+        def __init__(self):
+            self.calls = []
+
+        def improve(self, algorithm_id, **kwargs):
+            self.calls.append(kwargs)
+            return AlgorithmCandidate.from_source(
+                algorithm_id,
+                source,
+                parent_id=kwargs["parent_id"],
+                parent_algorithm_id=kwargs["parent"].algorithm_id,
+                parent_source_sha256=kwargs["parent"].source_sha256,
+            )
+
+    agent = DuplicateAgent()
+    loop.agent = agent
+    algorithm, algorithm_parent = loop._improve_unique_algorithm(
+        algorithm_id="A0002",
+        parent=selected_parent,
+        parent_id="M0000",
+        profile={},
+        history=[{"memory_kind": "algorithm_search_feedback", "round_id": "R0001"}],
+        failures=("algorithm_search_failed",),
+        skills=[],
+        search_space={},
+        protocol_mode="standard",
+        round_id="R0002",
+    )
+
+    assert len(agent.calls) == 2
+    assert algorithm.algorithm_id == "A0001"
+    assert algorithm_parent.algorithm_id == "A0001"
+    assert algorithm.metadata["reused_existing_algorithm_after_duplicate"] is True
+    duplicate_attempts = algorithm.metadata["duplicate_source_attempts"]
+    assert len(duplicate_attempts) == 2
+    assert all(item["duplicate_algorithm_id"] == "A0001" for item in duplicate_attempts)
+    assert all(item["candidate_source_sha256"] == selected_parent.source_sha256 for item in duplicate_attempts)
+    assert [item.algorithm_id for item in loop.algorithm_store.read()] == ["A0001"]
+
+
+def test_memory_feedback_keeps_size_miss_exploration_block_only():
     agent = AlgorithmAgent(explore_ffn_retention_ratio=0.5)
     profile = {"model": {"ffn_width": 100}, "layers": [{"block_id": "block.0"}]}
     history = [{
@@ -157,11 +314,11 @@ def test_memory_feedback_tightens_ffn_exploration_after_size_miss():
         "decision": {"status": "rejected"},
     }]
     candidate = agent.generate("A0001", parent_id="M0000", profile=profile, history=history, search_choice="explore")
-    assert candidate.metadata["retention_ratio"] == 0.375
-    assert "int(width * 0.375000)" in candidate.source
+    assert candidate.metadata["operator"] == "prune_blocks"
+    assert "prune_ffn_channels" not in candidate.source
 
 
-def test_exploration_agent_generates_profile_guided_composite_plan(tmp_path):
+def test_exploration_agent_generates_profile_guided_block_plan(tmp_path):
     profile = {
         "model": {"ffn_width": 16},
         "layers": [
@@ -196,10 +353,8 @@ def test_exploration_agent_generates_profile_guided_composite_plan(tmp_path):
 
     assert result.status == "success"
     assert result.plan is not None
-    assert result.plan.operator == "compose"
-    assert len(result.plan.args["steps"]) == 2
-    assert result.plan.args["steps"][0]["operator"] == "prune_blocks"
-    assert result.plan.args["steps"][1]["operator"] == "prune_ffn_channels"
+    assert result.plan.operator == "prune_blocks"
+    assert result.plan.args["block_ids"] == ["block.1"]
 
 
 def test_quality_failure_disables_aggressive_composition(tmp_path):
@@ -223,7 +378,7 @@ def test_quality_failure_disables_aggressive_composition(tmp_path):
     assert result.plan.operator == "prune_blocks"
 
 
-def test_provider_prompt_documents_composite_plan(monkeypatch):
+def test_provider_prompt_documents_multigranular_search(monkeypatch):
     payloads = []
 
     class Response:
@@ -248,13 +403,10 @@ def test_provider_prompt_documents_composite_plan(monkeypatch):
     provider = build_algorithm_provider("vllm", "test-model", endpoint="http://127.0.0.1:8000/v1/chat/completions")
     provider({"parent_id": "M0000", "profile": {}, "history": [], "skills": []})
 
-    assert "compose" in payloads[0]
-    assert "steps" in payloads[0]
-    assert "top-level keys" in payloads[0]
-    assert "top-level `{'steps': [...]}` object is invalid" in payloads[0]
-    assert "one flat" in payloads[0]
-    assert "every block from `profile['layers']`" in payloads[0]
-    assert "Never emit nested lists" in payloads[0]
+    assert "per-Block/per-timestep and per-Head sensitivity" in payloads[0]
+    assert "`search_space['operators']` is the source" in payloads[0]
+    assert "Avoid Wan structural Head Pruning" in payloads[0]
+    assert "search(profile, history, state, search_space)" in payloads[0]
 
 
 def test_provider_agent_receives_compact_pareto_front():
@@ -291,14 +443,14 @@ def test_provider_agent_receives_compact_pareto_front():
     ]
 
 
-def test_provider_agent_receives_active_search_space_schemas():
+def test_provider_agent_receives_all_active_search_space_schemas():
     payloads = []
 
     def provider(payload):
         payloads.append(payload)
         return {
-            "source": "def propose(profile, history):\n    return {'operator': 'kv_token_select', 'args': {'keep_ratio': 0.75, 'score': 'l2_norm'}}\n",
-            "hypothesis": "reduce K/V while preserving Q",
+            "source": "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n",
+            "hypothesis": "remove a profile-ranked Block",
             "parent_id": "M0000",
         }
 
@@ -309,11 +461,14 @@ def test_provider_agent_receives_active_search_space_schemas():
         history=[],
         search_space={
             "version_id": "S0001",
-            "operators": [{"name": "kv_token_select", "argument_schema": {"keep_ratio": "float", "score": "str"}, "execution_domain": "runtime"}],
+            "operators": [
+                {"name": "prune_blocks", "argument_schema": {"block_ids": "list[str]"}, "execution_domain": "structural"},
+                {"name": "kv_token_select", "argument_schema": {"keep_ratio": "float", "score": "str"}, "execution_domain": "runtime"},
+            ],
         },
     )
     assert payloads[0]["search_space"]["version_id"] == "S0001"
-    assert payloads[0]["search_space"]["operators"][0]["name"] == "kv_token_select"
+    assert [item["name"] for item in payloads[0]["search_space"]["operators"]] == ["prune_blocks", "kv_token_select"]
     assert "implementation_source" not in json.dumps(payloads[0]["search_space"])
 
 
@@ -329,8 +484,8 @@ def test_provider_prompt_exposes_active_multigranular_search_space(monkeypatch):
 
         def read(self):
             return json.dumps({"choices": [{"message": {"content": json.dumps({
-                "source": "def propose(profile, history):\n    return {'operator': 'kv_token_select', 'args': {'keep_ratio': 0.75, 'score': 'l2_norm'}}\n",
-                "hypothesis": "retain full queries and reduce K/V",
+                "source": "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n",
+                "hypothesis": "remove a profile-ranked Block",
                 "parent_id": "M0000",
             })}}]}).encode()
 
@@ -341,12 +496,15 @@ def test_provider_prompt_exposes_active_multigranular_search_space(monkeypatch):
         "profile": {},
         "history": [],
         "skills": [],
-        "search_space": {"operators": [{"name": "kv_token_select", "argument_schema": {"keep_ratio": "float", "score": "str"}}]},
+        "search_space": {"operators": [
+            {"name": "prune_blocks", "argument_schema": {"block_ids": "list[str]"}},
+        ]},
     })
     prompt = requests[0]["messages"][1]["content"]
     assert "search_space['operators']" in prompt
-    assert "KV-token" in prompt
-    assert "do not reduce the choice to only Block/FFN pruning" in prompt
+    assert "active operator registry" in prompt
+    assert "`search_space['operators']` is the source" in prompt
+    assert "registered argument schema" in prompt
 
 
 def test_provider_agent_compacts_full_memory_artifacts():
@@ -444,6 +602,53 @@ def test_vllm_algorithm_provider_parses_structured_json_without_network(monkeypa
     assert result["parent_id"] == "M0000"
     assert "def propose" in result["source"]
     assert requests[0]["max_tokens"] == 1536
+
+
+def test_vllm_algorithm_improvement_reserves_room_for_complete_source(monkeypatch):
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            content = {
+                "source": "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}}\n",
+                "hypothesis": "retain deterministic Block-only search",
+                "parent_id": "M0000",
+                "change_summary": "remove unsupported import",
+                "change_rationale": "use the sandbox allowlist",
+            }
+            return json.dumps({"choices": [{"message": {"content": json.dumps(content)}}]}).encode()
+
+    def fake_urlopen(request, timeout):
+        requests.append(json.loads(request.data.decode()))
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = build_algorithm_provider("vllm", "test-model", endpoint="http://127.0.0.1:8000/v1/chat/completions")
+    result = provider({
+        "task": "improve_existing_algorithm_source",
+        "protocol_mode": "standard",
+        "parent_id": "M0000",
+        "parent_source": "def propose(profile, history):\n    return {}\n",
+        "profile": {},
+        "history": [],
+        "skills": [],
+        "search_space": {"operators": [{"name": "prune_blocks"}]},
+        "failure_reasons": ["forbidden_import: random"],
+    })
+
+    assert result["parent_id"] == "M0000"
+    assert requests[0]["max_tokens"] == 3072
+    prompt = requests[0]["messages"][1]["content"]
+    assert "never import or use random" in prompt
+    assert "one dictionary, never a list" in prompt
+    assert "under 7000 characters" in prompt
+    assert "candidate-generation" in prompt
 
 
 def test_vllm_provider_binds_missing_parent_to_request_context(monkeypatch):

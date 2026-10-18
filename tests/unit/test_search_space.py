@@ -13,6 +13,7 @@ from harness4h3.operators.wan import (
     SearchSpaceManager,
     ThresholdFFNChannelOperator,
     TimestepBlockGatingOperator,
+    TimestepAttentionPolicyOperator,
     build_wan_compression_registry,
 )
 from harness4h3.operators.wan.search_space import _assert_finite
@@ -194,13 +195,13 @@ def test_versioned_implementation_ref_loads_and_validates_without_factory_key(tm
     adapter, parent = _parent(tmp_path)
     manager = SearchSpaceManager(tmp_path / "space")
     spec = OperatorSpec(
-        name="timestep_block_gate",
+        name="timestep_attention_policy",
         version="1",
         argument_schema={"rules": "list[object]", "policy": "str"},
-        granularity="runtime_timestep",
+        granularity="runtime_timestep_attention",
         constraints=("normalized_timestep",),
         limitations=("runtime_only",),
-        implementation_ref="harness4h3.operators.wan.compression.TimestepBlockGatingOperator",
+        implementation_ref="harness4h3.operators.wan.compression.TimestepAttentionPolicyOperator",
         execution_domain="runtime",
     )
     proposal = manager.propose(spec, "load the verified runtime implementation by reference", ["R0001"])
@@ -209,7 +210,7 @@ def test_versioned_implementation_ref_loads_and_validates_without_factory_key(tm
 
     version = manager.register(validated)
     registry = manager.registry_for(version, build_wan_compression_registry())
-    assert isinstance(registry.get("timestep_block_gate"), TimestepBlockGatingOperator)
+    assert isinstance(registry.get("timestep_attention_policy"), TimestepAttentionPolicyOperator)
 
 
 def test_search_space_version_round_trips_implementation_reference():
@@ -293,21 +294,11 @@ def test_generated_rule_is_classified_as_rule_evolution_until_structural_counter
     assert result["evidence_status"] == "delegates_to_existing_structural_operator"
 
 
-def test_agent_timestep_gate_extension_is_validated_and_enters_active_registry(tmp_path):
+def test_agent_uses_prevalidated_timestep_gate_from_active_search_space(tmp_path):
     adapter, parent = _parent(tmp_path)
     manager = SearchSpaceManager(tmp_path / "space")
-    suggestion = AlgorithmAgent().propose_search_space_change(
-        search_space=manager.active.to_dict(),
-        history=[],
-        failures=["timestep_latency_plateau"],
-    )
-    spec = OperatorSpec.from_dict(suggestion["spec"])
-    proposal = manager.propose(spec, suggestion["rationale"], suggestion["evidence_ids"])
-    validated = manager.validate(proposal, adapter, parent, output_dir=tmp_path / "validation")
-    assert validated.status == "validated"
-    assert validated.validation["structure_outside_active_closure"] is True
-    assert validated.validation["structural_counterexample"]["dynamic_compute"] is True
-    version = manager.register(validated)
+    version = manager.active
+    assert "timestep_block_gate" in version.operator_names()
     registry = manager.registry_for(version, build_wan_compression_registry())
     assert isinstance(registry.get("timestep_block_gate"), TimestepBlockGatingOperator)
     assert "timestep_block_gate" in registry.names()
@@ -318,6 +309,8 @@ def test_agent_timestep_gate_extension_is_validated_and_enters_active_registry(t
         "model": {"ffn_width": 16},
         "layers": [{"block_id": "block.0"}, {"block_id": "block.1"}],
         "block_sensitivity": [{"block_id": "block.0", "importance_score": 0.1}],
+        "block_timestep_sensitivity": [{"block_id": "block.0", "per_timestep": {"low_noise": 0.01}}],
+        "token_sensitivity": [{"keep_ratio": 0.875, "token_count": 8, "grid_shape": [2, 2, 2], "layout": "wan_latent_grid", "available": True}],
     }
     candidate = AlgorithmAgent().generate("A0002", parent_id=None, profile=profile, history=[])
     from harness4h3.sandbox import AlgorithmSandbox

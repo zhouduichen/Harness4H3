@@ -11,7 +11,7 @@ from harness4h3.evolution.loop import EvolutionLoop
 from harness4h3.evolution.improvement import AlgorithmValidator
 from harness4h3.evolution.store import AlgorithmStore
 from harness4h3.evolution.taxonomy import classify_algorithm_change
-from harness4h3.operators.wan import build_wan_compression_registry
+from harness4h3.operators.wan import build_wan_compression_registry, default_search_space
 from harness4h3.sandbox import AlgorithmSandbox
 from harness4h3.sandbox.runner import CompressionPlan, SandboxResult
 
@@ -68,6 +68,42 @@ def test_deterministic_improvement_changes_parent_source_and_records_reason(tmp_
     assert result.status == "success"
 
 
+def test_recursive_improvement_changes_candidate_order_from_measured_family_evidence(tmp_path):
+    profile = {
+        **fake_profile(),
+        "block_timestep_sensitivity": [
+            {"block_id": "block.0", "per_timestep": {"low_noise": 0.1}},
+            {"block_id": "block.1", "per_timestep": {"high_noise": 0.2}},
+        ],
+        "head_sensitivity": [
+            {"block_id": "block.0", "attention": "attn1", "head": index, "importance_score": 0.1 + index, "available": True}
+            for index in range(4)
+        ],
+        "token_sensitivity": [{"keep_ratio": 0.875, "token_count": 8, "grid_shape": [2, 2, 2], "layout": "wan_latent_grid", "available": True}],
+    }
+    parent = AlgorithmAgent().generate("A0001", parent_id="M0000", profile=profile, history=[])
+    child = AlgorithmAgent().improve(
+        "A0002", parent=parent, parent_id="M0000", profile=profile, history=[], failures=["quality_floor_failed"]
+    )
+    state = {
+        "budget": {"max_candidates": 16},
+        "measured_candidates": [
+            {"family": "structure", "plan": {"operator": "prune_blocks"}, "quality_score": 0.5, "efficiency_reduction_ratio": 0.05, "risk_value": 0.5, "valid": True},
+            {"family": "timestep", "plan": {"operator": "timestep_block_gate"}, "quality_score": 0.999, "efficiency_reduction_ratio": 0.2, "risk_value": 0.001, "valid": True},
+        ],
+    }
+    payload = {"profile": profile, "history": [], "state": state, "search_space": default_search_space().to_dict()}
+    sandbox = AlgorithmSandbox(tmp_path / "sandbox")
+    parent_result = sandbox.run_program(parent.source, entrypoint="search", payload=payload)
+    child_result = sandbox.run_program(child.source, entrypoint="search", payload=payload)
+    assert parent_result.status == child_result.status == "success"
+    parent_first = parent_result.value["candidates"][parent_result.value["rank"][0]]["operator"]
+    child_first = child_result.value["candidates"][child_result.value["rank"][0]]["operator"]
+    assert parent_first == "prune_blocks"
+    assert child_first == "timestep_block_gate"
+    assert child_result.value["diagnostics"]["quality_first"] is True
+
+
 def test_algorithm_store_rejects_wrong_parent_hash(tmp_path):
     store = AlgorithmStore(tmp_path)
     parent = store.create(AlgorithmCandidate.from_source("A0001", parent_source()))
@@ -108,10 +144,12 @@ def test_algorithm_validator_compares_parent_and_child_under_same_conditions(tmp
         }
 
     record = AlgorithmValidator().validate(parent, child, sandbox, fake_profile(), [], evaluate, budget={"steps": 1})
-    assert record.valid is True
+    assert record.valid is False
     assert record.evidence_level == "cpu_fake"
     assert record.parent_source_sha256 == parent.source_sha256
-    assert record.candidate_plan["operator"] == "prune_ffn_channels"
+    assert record.reasons == ("candidate_has_no_measured_improvement",)
+    assert "_harness_parent_search_0002" in child.source
+    assert "measured_family_scores" in child.source
 
 
 def test_algorithm_validator_compares_multiple_fixed_profiles(tmp_path):
@@ -141,10 +179,11 @@ def test_algorithm_validator_compares_multiple_fixed_profiles(tmp_path):
         budget={"steps": 1},
         profiles=(fake_profile(), alternate),
     )
-    assert record.valid is True
+    assert record.valid is False
     assert len(record.scenario_results) == 2
     assert record.parent_metrics["scenario_count"] == 2
-    assert record.candidate_metrics["search_score"] == 0.9
+    assert all(item["valid"] is True for item in record.scenario_results)
+    assert record.reasons == ("candidate_has_no_measured_improvement",)
 
 
 def test_provider_improvement_receives_complete_parent_source():

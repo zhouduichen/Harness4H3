@@ -32,6 +32,8 @@ class ProfileReport:
     calibration: Mapping[str, Any] = field(default_factory=dict)
     relationships: Mapping[str, Any] = field(default_factory=dict)
     evidence: Mapping[str, Any] = field(default_factory=dict)
+    block_timestep_sensitivity: tuple[Mapping[str, Any], ...] = ()
+    token_grid: tuple[int, int, int] = ()
     schema_version: int = 2
 
     def __post_init__(self) -> None:
@@ -76,6 +78,8 @@ class ProfileReport:
             calibration=dict(raw.get("calibration") or {}),
             relationships=dict(raw.get("relationships") or {}),
             evidence=dict(raw.get("evidence") or {}),
+            block_timestep_sensitivity=tuple(dict(item) for item in raw.get("block_timestep_sensitivity", [])),
+            token_grid=tuple(int(value) for value in raw.get("token_grid", ())),
             schema_version=int(raw.get("schema_version", 1)),
         )
 

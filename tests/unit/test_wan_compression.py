@@ -71,7 +71,7 @@ def test_registry_keeps_legacy_operator_names():
     )
 
 
-def test_profile_guided_composite_plan_executes_after_block_reindex(tmp_path):
+def test_profile_guided_exploration_remains_block_only(tmp_path):
     adapter, parent = _parent(tmp_path)
     profile = {
         "model": {"ffn_width": 16},
@@ -97,13 +97,13 @@ def test_profile_guided_composite_plan_executes_after_block_reindex(tmp_path):
     assert sandbox_result.status == "success"
     assert sandbox_result.plan is not None
     result = build_wan_compression_registry().execute(
-        "compose", adapter, parent, sandbox_result.plan.args, tmp_path / "generated-composite"
+        "prune_blocks", adapter, parent, sandbox_result.plan.args, tmp_path / "generated-block-only"
     )
     assert result.status == "success"
     assert result.child_checkpoint is not None
     child = adapter.reload_model(result.child_checkpoint)
     assert len(child.blocks) == 3
-    assert all(block.up_proj.out_features == 8 for block in child.blocks)
+    assert all(block.up_proj.out_features == 16 for block in child.blocks)
 
 
 def test_composite_normalizes_all_remaining_blocks_for_reindexed_adapter(tmp_path):

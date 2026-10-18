@@ -174,6 +174,7 @@ class AlgorithmSearchDecision:
     stop: bool
     source_sha256: str
     payload_sha256: str
+    diagnostics: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -182,6 +183,7 @@ class AlgorithmSearchDecision:
             "stop": bool(self.stop),
             "source_sha256": self.source_sha256,
             "payload_sha256": self.payload_sha256,
+            "diagnostics": _jsonable(self.diagnostics),
         }
 
 
@@ -856,10 +858,9 @@ def _run_algorithm_search_program(
     if not isinstance(raw_candidates, list) or not raw_candidates:
         raise ValueError("algorithm_search_output_invalid: candidates must be a non-empty list")
     raw_budget = state.get("budget") if isinstance(state, Mapping) else None
-    # Legacy TICA states carry only fast/full/interaction limits.  Keep the
-    # source-controlled candidate budget bounded while leaving room for the
-    # active multi-granular registry (which can expose more than eight valid
-    # families) before full-evaluation limits do the expensive pruning.
+    # Legacy TICA states carry only fast/full/interaction limits. Keep the
+    # source-controlled candidate budget bounded independently of the full
+    # evaluation budget.
     max_candidates = raw_budget.get("max_candidates", 16) if isinstance(raw_budget, Mapping) else 16
     if isinstance(max_candidates, bool) or not isinstance(max_candidates, int) or not 1 <= int(max_candidates) <= 64:
         raise ValueError("algorithm_search_output_invalid: max_candidates budget is invalid")
@@ -867,16 +868,13 @@ def _run_algorithm_search_program(
         raise ValueError("algorithm_search_budget_exceeded: candidates exceed max_candidates")
     operator_specs = _operator_specs_from_search_space(search_space)
     plans: list[Mapping[str, Any]] = []
-    seen: set[str] = set()
     for raw in raw_candidates:
         try:
             plan = SandboxCompressionPlan.from_mapping(raw, operator_specs=operator_specs)
         except (TypeError, ValueError) as exc:
             raise ValueError("algorithm_search_output_invalid: %s" % exc) from exc
-        digest = stable_digest(plan.to_dict())
-        if digest in seen:
-            raise ValueError("algorithm_search_output_invalid: duplicate candidate plan")
-        seen.add(digest)
+        # Preserve duplicates here so the bounded evaluator can report them
+        # as skipped without charging an evaluation slot.
         plans.append(plan.to_dict())
     raw_rank = result.value.get("rank", list(range(len(plans))))
     if not isinstance(raw_rank, list) or any(isinstance(item, bool) or not isinstance(item, int) for item in raw_rank):
@@ -890,6 +888,7 @@ def _run_algorithm_search_program(
         stop=bool(result.value.get("stop", False)),
         source_sha256=result.source_sha256,
         payload_sha256=stable_digest(payload),
+        diagnostics=dict(result.value.get("diagnostics") or {}) if isinstance(result.value.get("diagnostics", {}), Mapping) else {},
     )
 
 

@@ -173,6 +173,7 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
                 endpoint=str(controller.get("endpoint", "http://127.0.0.1:8000/v1/chat/completions")),
                 api_key_env=str(controller.get("api_key_env", "OPENAI_API_KEY")),
                 timeout_s=float(controller.get("timeout_s", 180.0)),
+                model_version=str(controller.get("model_version", "")),
             )
         )
     evaluator = None
@@ -236,6 +237,7 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         search_space_evolution=config.search_space_evolution,
         frozen_expanded_search_space=config.frozen_expanded_search_space,
         candidate_screening=config.candidate_screening,
+        algorithm_probe_samples=config.algorithm_probe_samples,
         phase=config.phase,
         tica_prune=config.tica_prune,
         tica_manifest=tica_manifest,

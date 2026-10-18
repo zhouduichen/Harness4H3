@@ -237,6 +237,8 @@ class CompressionPlan:
                 {"keep_ratio", "block_ids"},
                 {"keep_ratio", "mode"},
                 {"keep_ratio", "block_ids", "mode"},
+                {"keep_ratio", "mode", "grid_shape"},
+                {"keep_ratio", "block_ids", "mode", "grid_shape"},
             )
             if set(args) not in allowed:
                 raise ValueError("algorithm_output_invalid: token_merge has unsupported arguments")
@@ -246,6 +248,14 @@ class CompressionPlan:
                 raise ValueError("algorithm_output_invalid: block_ids must contain strings")
             if "mode" in args and not isinstance(args["mode"], str):
                 raise ValueError("algorithm_output_invalid: mode must be a string")
+            if "grid_shape" in args and (
+                not isinstance(args["grid_shape"], list)
+                or len(args["grid_shape"]) != 3
+                or not all(isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in args["grid_shape"])
+            ):
+                raise ValueError("algorithm_output_invalid: token_merge grid_shape must contain three positive integers")
+            if args.get("mode") == "spatiotemporal" and "grid_shape" not in args:
+                raise ValueError("algorithm_output_invalid: spatiotemporal token_merge requires grid_shape")
         if operator == "kv_token_select":
             allowed = (
                 {"keep_ratio"},
@@ -262,12 +272,28 @@ class CompressionPlan:
             if "score" in args and args["score"] not in {"l2_norm", "mean_abs"}:
                 raise ValueError("algorithm_output_invalid: unsupported KV token selection score")
         if operator == "attention_window":
-            if set(args) not in ({"window_size"}, {"window_size", "attention"}):
+            allowed = (
+                {"window_size"},
+                {"window_size", "attention"},
+                {"window_size", "grid_shape", "window_radius"},
+                {"window_size", "attention", "grid_shape", "window_radius"},
+            )
+            if set(args) not in allowed:
                 raise ValueError("algorithm_output_invalid: attention_window has unsupported arguments")
             if not isinstance(args["window_size"], int) or isinstance(args["window_size"], bool) or not 1 <= int(args["window_size"]) <= 4096:
                 raise ValueError("algorithm_output_invalid: window_size must be in [1, 4096]")
             if "attention" in args and not isinstance(args["attention"], str):
                 raise ValueError("algorithm_output_invalid: attention must be a string")
+            if "grid_shape" in args:
+                if (
+                    not isinstance(args["grid_shape"], list)
+                    or not isinstance(args.get("window_radius"), list)
+                    or len(args["grid_shape"]) != 3
+                    or len(args["window_radius"]) != 3
+                    or not all(isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in args["grid_shape"])
+                    or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in args["window_radius"])
+                ):
+                    raise ValueError("algorithm_output_invalid: attention_window grid and radius must contain three integers")
         if operator == "sampling_step_skip":
             if set(args) not in ({"target_steps"}, {"target_steps", "strategy"}, {"target_steps", "strategy", "min_steps"}):
                 raise ValueError("algorithm_output_invalid: sampling_step_skip has unsupported arguments")

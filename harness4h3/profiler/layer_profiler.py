@@ -8,7 +8,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from ..adapters.wan.contracts import WanModelAdapter
 from .calibration import CalibrationCorpus
 from .report import ProfileReport
-from .sensitivity import measure_attention_sensitivity, measure_block_sensitivity, measure_channel_sensitivity, measure_head_sensitivity, measure_sampling_step_sensitivity, measure_timestep_sensitivity, measure_token_sensitivity
+from .sensitivity import measure_attention_sensitivity, measure_block_sensitivity, measure_block_timestep_sensitivity, measure_channel_sensitivity, measure_head_sensitivity, measure_sampling_step_sensitivity, measure_timestep_sensitivity, measure_token_sensitivity
 
 
 ForwardFn = Callable[[Any, Any], Any]
@@ -319,6 +319,11 @@ def profile_model(
     else:
         timestep_forward = timestep_fn or _default_timestep_forward
     timestep_sensitivity = measure_timestep_sensitivity(adapter, model, sample=sample, forward_fn=timestep_forward)
+    block_timestep_sensitivity = (
+        measure_block_timestep_sensitivity(adapter, model, sample=sample, forward_fn=timestep_forward)
+        if advanced
+        else ()
+    )
     head_sensitivity = measure_head_sensitivity(
         adapter,
         model,
@@ -333,7 +338,17 @@ def profile_model(
         method=head_method,
         model_forward_fn=effective_forward,
     )
-    token_sensitivity = measure_token_sensitivity(adapter, model, sample=sample)
+    token_sensitivity = list(measure_token_sensitivity(adapter, model, sample=sample))
+    token_grid: tuple[int, int, int] = ()
+    if isinstance(sample, Mapping):
+        latent = sample.get("hidden_states")
+        shape = tuple(int(value) for value in getattr(latent, "shape", ()))
+        if len(shape) == 5:
+            token_grid = (shape[2], shape[3], shape[4])
+        elif len(shape) == 4:
+            token_grid = (1, shape[2], shape[3])
+    if token_grid:
+        token_sensitivity = [dict(row, grid_shape=list(token_grid)) for row in token_sensitivity]
     sampling_step_sensitivity = measure_sampling_step_sensitivity(adapter, model)
     offline = bool(structure.metadata.get("offline_simulation", False))
     device = _runtime_device(model, sample)
@@ -355,6 +370,7 @@ def profile_model(
         block_sensitivity=block_sensitivity,
         channel_sensitivity=channel_sensitivity,
         timestep_sensitivity=timestep_sensitivity,
+        block_timestep_sensitivity=block_timestep_sensitivity,
         provenance={
             "offline_simulation": offline,
             "seed": int(seed),
@@ -376,6 +392,7 @@ def profile_model(
         head_sensitivity=head_sensitivity,
         attention_sensitivity=attention_sensitivity,
         token_sensitivity=token_sensitivity,
+        token_grid=token_grid,
         sampling_step_sensitivity=sampling_step_sensitivity,
         hardware={
             "parameter_count": int(structure.parameter_count),

@@ -528,3 +528,38 @@ def test_diffusers_wan_attention_contract_is_structurally_executable():
     model.scheduler.set_timesteps(16, device="cpu")
     assert len(model.scheduler.timesteps) == 4
     assert model._harness4h3_sampling_step_stats["effective_steps"] == 4
+
+
+def test_diffusers_sparse_delegation_to_head_gating_is_counted_and_combined():
+    pytest.importorskip("diffusers")
+    from types import SimpleNamespace
+    from torch import nn
+    from diffusers.models.transformers.transformer_wan import WanTransformerBlock
+    from harness4h3.adapters.wan.diffusers import DiffusersWanAdapter
+    from harness4h3.evolution.algorithm_evaluation import _runtime_execution_evidence
+
+    class TinyWan(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.blocks = nn.ModuleList([WanTransformerBlock(dim=8, ffn_dim=16, num_heads=4) for _ in range(2)])
+            self.config = SimpleNamespace(hidden_size=8)
+
+        def forward(self, hidden_states, timestep, encoder_hidden_states, return_dict=True, **kwargs):
+            temb = torch.zeros(hidden_states.shape[0], 6, 8, device=hidden_states.device)
+            for block in self.blocks:
+                hidden_states = block(hidden_states, encoder_hidden_states, temb, None)
+            return hidden_states
+
+    model = TinyWan()
+    adapter = DiffusersWanAdapter()
+    adapter.apply_head_gating(model, {"attention": "attn1", "keep_ratio": 0.5})
+    adapter.apply_sparse_runtime(model, {"keep_ratio": 0.5, "attention": "attn1"})
+    with torch.no_grad():
+        output = model(torch.randn(1, 5, 8), torch.tensor([500]), torch.randn(1, 4, 8))
+
+    assert tuple(output.shape) == (1, 5, 8)
+    evidence = _runtime_execution_evidence(model)
+    delegated = evidence["stats"]["runtime_wrapper_delegations"]["sparse_runtime"]["delegated_to_head_gating"]
+    assert delegated > 0
+    assert evidence["stats"]["head_gating"]["selected_heads"] < evidence["stats"]["head_gating"]["full_heads"]
+    assert evidence["stats"]["sparse_runtime"]["selected_tokens"] < evidence["stats"]["sparse_runtime"]["full_tokens"]
