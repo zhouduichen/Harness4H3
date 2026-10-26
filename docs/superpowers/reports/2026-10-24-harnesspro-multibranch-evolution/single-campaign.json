@@ -1,0 +1,16 @@
+{
+  "baseline_quality": 0.6299365838567424,
+  "branches": {
+    "single": {
+      "head_candidate_id": "M0005",
+      "rounds": 20
+    }
+  },
+  "budget_seconds": 900.0,
+  "deployment_cost_metric": "inference_wall_time_s_mean",
+  "next_index": 0,
+  "pending_branch": null,
+  "protocol_sha256": "1d417e9af0f3189aa9b8820cebea87e715d40a0757feb36cae31ed83b543e8a6",
+  "schema_version": 1,
+  "spent_seconds": 634.1372169548995
+}

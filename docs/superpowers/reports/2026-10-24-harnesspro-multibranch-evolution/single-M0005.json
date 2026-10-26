@@ -1,0 +1,406 @@
+{
+  "checkpoint_path": "/data/models/harnesspro-multibranch-20261024/single/rounds/R0005/checkpoint",
+  "created_by_experiment_id": "A0005",
+  "generation": 2,
+  "id": "M0005",
+  "metadata": {
+    "algorithm_id": "A0005"
+  },
+  "parent_id": "M0003",
+  "state": {
+    "algorithm_state": {},
+    "architecture_name": "WanDiffusersDiT",
+    "checkpoint_path": "/data/models/harnesspro-multibranch-20261024/single/rounds/R0005/checkpoint",
+    "components": {},
+    "dtype": "float16",
+    "ffn_width": 448,
+    "hidden_size": 1536,
+    "measured_metrics": {
+      "baseline_checkpoint_sha256": "2f651fa0a306b3cac63a47fcfb150340d482668379faf114039e3aabf2c0b316",
+      "baseline_evaluation_valid": true,
+      "baseline_hardware_metrics": {
+        "case_count": 4,
+        "dtype": "bfloat16",
+        "generation_device": "cuda:0",
+        "gpu_runtime_cost_s": 31.759061556018423,
+        "inference_wall_time_s_mean": 7.939765389004606,
+        "inference_wall_time_s_median": 7.9429611780215055,
+        "inference_wall_time_s_total": 31.759061556018423,
+        "input_shape": {
+          "height": 256,
+          "num_frames": 81,
+          "width": 256
+        },
+        "latency_measurement_method": "denoising+vae_decode_with_case_cached_prompt_embeddings",
+        "model_size_gb": 13.486920823343098,
+        "model_size_scope": "pipeline_logical_unique_files",
+        "parameter_count": 1418996800,
+        "parameter_count_scope": "transformer",
+        "peak_memory_available": true,
+        "peak_memory_device": "cuda:0",
+        "peak_memory_gb_max": 19.358070850372314,
+        "pipeline_device": "cuda:0",
+        "pipeline_model_size_gb": 13.486920823343098,
+        "prompt_encoding_included": false,
+        "transformer_model_size_gb": 2.6489908350631595,
+        "transformer_parameter_count": 1418996800
+      },
+      "baseline_quality_metrics": {
+        "motion": 0.17127776642640433,
+        "score_type": "clip_temporal",
+        "semantic": 0.620214655995369,
+        "temporal": 0.9575719833374023
+      },
+      "baseline_quality_score": 0.6427924325068791,
+      "baseline_vbench_metrics": {},
+      "candidate_checkpoint_sha256": "e70d67f18fae9a577f9381c96c9e36c235ae0fd108f41aafc1f2e56a9d8b19f4",
+      "candidate_evaluation_valid": true,
+      "cases": [
+        {
+          "caption": "A red paper airplane glides slowly through a sunlit blue sky, smooth natural motion, cinematic.",
+          "case_id": "dev_0001",
+          "generation_wall_time_s": 5.142397734045517,
+          "latency_measurement_method": "denoising+vae_decode_with_case_cached_prompt_embeddings",
+          "latency_samples_s": [
+            5.142397734045517
+          ],
+          "latency_warmup": 0,
+          "peak_memory_gb": 17.933536052703857,
+          "prompt_embeddings_cached": true,
+          "quality": {
+            "aggregate": 0.649949687719345,
+            "backend": "clip_temporal",
+            "model_path": "/data/models/clip-vit-large-patch14-336",
+            "motion": 0.6754555702209473,
+            "semantic": 0.5561042428016663,
+            "semantic_mean": 0.5561042428016663,
+            "semantic_p10": 0.5519856810569763,
+            "temporal": 0.9656558036804199,
+            "visual_metrics": {
+              "block_variance_mean": 471.2251434326172,
+              "block_variance_p10": 218.47760009765625,
+              "frame_difference_mean": 0.16886389255523682,
+              "frame_difference_p10": 0.15922695398330688,
+              "laplacian_std_mean": 12.164474129676819,
+              "laplacian_std_p10": 8.538189888000488,
+              "low_texture_frame_ratio": 0.0,
+              "spatial_gradient_mean": 4.803021311759949,
+              "spatial_gradient_p10": 3.2540199756622314
+            },
+            "visual_quality_gate": {
+              "enabled": true,
+              "failures": [],
+              "low_texture_frame_ratio": 0.0,
+              "passed": true,
+              "thresholds": {
+                "max_low_texture_frame_ratio": 0.75,
+                "min_block_variance": 1.0,
+                "min_frame_difference": 0.001,
+                "min_laplacian_std": 0.5,
+                "min_spatial_gradient": 0.05
+              },
+              "version": "visual-structure-v1"
+            }
+          },
+          "seed": 20261008,
+          "validity": {
+            "finite_pixels": true,
+            "frames": 81,
+            "height": 256,
+            "valid": true,
+            "video_path": "/data/models/harnesspro-multibranch-20261024/single/real-evaluation/evaluations/e70d67f18fae9a577f9381c96c9e36c235ae0fd108f41aafc1f2e56a9d8b19f4/14d6128eae4231a61593caafe45f22f7128c73fd68b2ecde18dc77b9bca47442/videos/dev_0001/seed_20261008/wan.mp4",
+            "visual_quality_gate_passed": true,
+            "width": 256
+          },
+          "video_path": "/data/models/harnesspro-multibranch-20261024/single/real-evaluation/evaluations/e70d67f18fae9a577f9381c96c9e36c235ae0fd108f41aafc1f2e56a9d8b19f4/14d6128eae4231a61593caafe45f22f7128c73fd68b2ecde18dc77b9bca47442/videos/dev_0001/seed_20261008/wan.mp4"
+        },
+        {
+          "caption": "A small orange cat walks across a quiet garden path with leaves moving in a gentle breeze, realistic.",
+          "case_id": "dev_0002",
+          "generation_wall_time_s": 5.217108753975481,
+          "latency_measurement_method": "denoising+vae_decode_with_case_cached_prompt_embeddings",
+          "latency_samples_s": [
+            5.217108753975481
+          ],
+          "latency_warmup": 0,
+          "peak_memory_gb": 17.92721462249756,
+          "prompt_embeddings_cached": true,
+          "quality": {
+            "aggregate": 0.6773150205612182,
+            "backend": "clip_temporal",
+            "model_path": "/data/models/clip-vit-large-patch14-336",
+            "motion": 0.7047361135482788,
+            "semantic": 0.5917010307312012,
+            "semantic_mean": 0.5917010307312012,
+            "semantic_p10": 0.5853808522224426,
+            "temporal": 0.9632534384727478,
+            "visual_metrics": {
+              "block_variance_mean": 420.1795425415039,
+              "block_variance_p10": 201.7214813232422,
+              "frame_difference_mean": 0.1761840283870697,
+              "frame_difference_p10": 0.1536283940076828,
+              "laplacian_std_mean": 13.929296135902405,
+              "laplacian_std_p10": 9.587471961975098,
+              "low_texture_frame_ratio": 0.0,
+              "spatial_gradient_mean": 4.8543766140937805,
+              "spatial_gradient_p10": 3.3512840270996094
+            },
+            "visual_quality_gate": {
+              "enabled": true,
+              "failures": [],
+              "low_texture_frame_ratio": 0.0,
+              "passed": true,
+              "thresholds": {
+                "max_low_texture_frame_ratio": 0.75,
+                "min_block_variance": 1.0,
+                "min_frame_difference": 0.001,
+                "min_laplacian_std": 0.5,
+                "min_spatial_gradient": 0.05
+              },
+              "version": "visual-structure-v1"
+            }
+          },
+          "seed": 20261008,
+          "validity": {
+            "finite_pixels": true,
+            "frames": 81,
+            "height": 256,
+            "valid": true,
+            "video_path": "/data/models/harnesspro-multibranch-20261024/single/real-evaluation/evaluations/e70d67f18fae9a577f9381c96c9e36c235ae0fd108f41aafc1f2e56a9d8b19f4/14d6128eae4231a61593caafe45f22f7128c73fd68b2ecde18dc77b9bca47442/videos/dev_0002/seed_20261008/wan.mp4",
+            "visual_quality_gate_passed": true,
+            "width": 256
+          },
+          "video_path": "/data/models/harnesspro-multibranch-20261024/single/real-evaluation/evaluations/e70d67f18fae9a577f9381c96c9e36c235ae0fd108f41aafc1f2e56a9d8b19f4/14d6128eae4231a61593caafe45f22f7128c73fd68b2ecde18dc77b9bca47442/videos/dev_0002/seed_20261008/wan.mp4"
+        },
+        {
+          "caption": "A glass marble rolls across a wooden table toward a warm window, close-up cinematic camera movement.",
+          "case_id": "dev_0003",
+          "generation_wall_time_s": 5.2240803120075725,
+          "latency_measurement_method": "denoising+vae_decode_with_case_cached_prompt_embeddings",
+          "latency_samples_s": [
+            5.2240803120075725
+          ],
+          "latency_warmup": 0,
+          "peak_memory_gb": 17.93846082687378,
+          "prompt_embeddings_cached": true,
+          "quality": {
+            "aggregate": 0.6769409259160359,
+            "backend": "clip_temporal",
+            "model_path": "/data/models/clip-vit-large-patch14-336",
+            "motion": 0.7268456419308981,
+            "semantic": 0.5868263840675354,
+            "semantic_mean": 0.5868263840675354,
+            "semantic_p10": 0.5802165865898132,
+            "temporal": 0.9673894643783569,
+            "visual_metrics": {
+              "block_variance_mean": 590.967472076416,
+              "block_variance_p10": 275.4538879394531,
+              "frame_difference_mean": 0.18171141048272452,
+              "frame_difference_p10": 0.17203757166862488,
+              "laplacian_std_mean": 13.789777040481567,
+              "laplacian_std_p10": 9.82735538482666,
+              "low_texture_frame_ratio": 0.0,
+              "spatial_gradient_mean": 5.445694088935852,
+              "spatial_gradient_p10": 3.717238426208496
+            },
+            "visual_quality_gate": {
+              "enabled": true,
+              "failures": [],
+              "low_texture_frame_ratio": 0.0,
+              "passed": true,
+              "thresholds": {
+                "max_low_texture_frame_ratio": 0.75,
+                "min_block_variance": 1.0,
+                "min_frame_difference": 0.001,
+                "min_laplacian_std": 0.5,
+                "min_spatial_gradient": 0.05
+              },
+              "version": "visual-structure-v1"
+            }
+          },
+          "seed": 20261008,
+          "validity": {
+            "finite_pixels": true,
+            "frames": 81,
+            "height": 256,
+            "valid": true,
+            "video_path": "/data/models/harnesspro-multibranch-20261024/single/real-evaluation/evaluations/e70d67f18fae9a577f9381c96c9e36c235ae0fd108f41aafc1f2e56a9d8b19f4/14d6128eae4231a61593caafe45f22f7128c73fd68b2ecde18dc77b9bca47442/videos/dev_0003/seed_20261008/wan.mp4",
+            "visual_quality_gate_passed": true,
+            "width": 256
+          },
+          "video_path": "/data/models/harnesspro-multibranch-20261024/single/real-evaluation/evaluations/e70d67f18fae9a577f9381c96c9e36c235ae0fd108f41aafc1f2e56a9d8b19f4/14d6128eae4231a61593caafe45f22f7128c73fd68b2ecde18dc77b9bca47442/videos/dev_0003/seed_20261008/wan.mp4"
+        },
+        {
+          "caption": "A yellow train travels through green mountains under changing clouds, wide establishing shot, realistic.",
+          "case_id": "dev_0004",
+          "generation_wall_time_s": 5.273400884994771,
+          "latency_measurement_method": "denoising+vae_decode_with_case_cached_prompt_embeddings",
+          "latency_samples_s": [
+            5.273400884994771
+          ],
+          "latency_warmup": 0,
+          "peak_memory_gb": 17.93333625793457,
+          "prompt_embeddings_cached": true,
+          "quality": {
+            "aggregate": 0.6647079229354859,
+            "backend": "clip_temporal",
+            "model_path": "/data/models/clip-vit-large-patch14-336",
+            "motion": 0.671668291091919,
+            "semantic": 0.5800288915634155,
+            "semantic_mean": 0.5800288915634155,
+            "semantic_p10": 0.5726755857467651,
+            "temporal": 0.9576043486595154,
+            "visual_metrics": {
+              "block_variance_mean": 471.96358489990234,
+              "block_variance_p10": 216.84677124023438,
+              "frame_difference_mean": 0.16791707277297974,
+              "frame_difference_p10": 0.15662266314029694,
+              "laplacian_std_mean": 12.202731728553772,
+              "laplacian_std_p10": 8.630364418029785,
+              "low_texture_frame_ratio": 0.0,
+              "spatial_gradient_mean": 4.839106798171997,
+              "spatial_gradient_p10": 3.2953813076019287
+            },
+            "visual_quality_gate": {
+              "enabled": true,
+              "failures": [],
+              "low_texture_frame_ratio": 0.0,
+              "passed": true,
+              "thresholds": {
+                "max_low_texture_frame_ratio": 0.75,
+                "min_block_variance": 1.0,
+                "min_frame_difference": 0.001,
+                "min_laplacian_std": 0.5,
+                "min_spatial_gradient": 0.05
+              },
+              "version": "visual-structure-v1"
+            }
+          },
+          "seed": 20261008,
+          "validity": {
+            "finite_pixels": true,
+            "frames": 81,
+            "height": 256,
+            "valid": true,
+            "video_path": "/data/models/harnesspro-multibranch-20261024/single/real-evaluation/evaluations/e70d67f18fae9a577f9381c96c9e36c235ae0fd108f41aafc1f2e56a9d8b19f4/14d6128eae4231a61593caafe45f22f7128c73fd68b2ecde18dc77b9bca47442/videos/dev_0004/seed_20261008/wan.mp4",
+            "visual_quality_gate_passed": true,
+            "width": 256
+          },
+          "video_path": "/data/models/harnesspro-multibranch-20261024/single/real-evaluation/evaluations/e70d67f18fae9a577f9381c96c9e36c235ae0fd108f41aafc1f2e56a9d8b19f4/14d6128eae4231a61593caafe45f22f7128c73fd68b2ecde18dc77b9bca47442/videos/dev_0004/seed_20261008/wan.mp4"
+        }
+      ],
+      "checkpoint_sha256": "e70d67f18fae9a577f9381c96c9e36c235ae0fd108f41aafc1f2e56a9d8b19f4",
+      "critical_regression": false,
+      "dtype": "bfloat16",
+      "evaluation_manifest_sha256": "2c4fb1dbaba36a142a582265f63f29a3b33330aa14a72bf8ac6dfc590b3a41f1",
+      "evaluation_status": "measured_video",
+      "evaluator_recipe_sha256": "14d6128eae4231a61593caafe45f22f7128c73fd68b2ecde18dc77b9bca47442",
+      "evaluator_version": "wan-video-evaluator-v8",
+      "feasible": true,
+      "generation_device": "cuda:0",
+      "hardware_metrics": {
+        "case_count": 4,
+        "dtype": "bfloat16",
+        "generation_device": "cuda:0",
+        "gpu_runtime_cost_s": 20.85698768502334,
+        "inference_wall_time_s_mean": 5.214246921255835,
+        "inference_wall_time_s_median": 5.220594532991527,
+        "inference_wall_time_s_total": 20.85698768502334,
+        "input_shape": {
+          "height": 256,
+          "num_frames": 81,
+          "width": 256
+        },
+        "latency_measurement_method": "denoising+vae_decode_with_case_cached_prompt_embeddings",
+        "model_size_gb": 12.025262720882893,
+        "model_size_scope": "pipeline_logical_unique_files",
+        "parameter_count": 634275520,
+        "parameter_count_scope": "transformer",
+        "peak_memory_available": true,
+        "peak_memory_device": "cuda:0",
+        "peak_memory_gb_max": 17.93846082687378,
+        "pipeline_device": "cuda:0",
+        "pipeline_model_size_gb": 12.025262720882893,
+        "prompt_encoding_included": false,
+        "transformer_model_size_gb": 1.1873328192159534,
+        "transformer_parameter_count": 634275520
+      },
+      "latency_ratio": 0.65672556628396,
+      "offline_simulation": false,
+      "parent_checkpoint_sha256": "5504f154bd65044a7f2e98f9970aaeaafc69af4f08b9ab4d84e3bd094ea58157",
+      "parent_evaluation_valid": true,
+      "parent_hardware_metrics": {
+        "case_count": 4,
+        "dtype": "bfloat16",
+        "generation_device": "cuda:0",
+        "gpu_runtime_cost_s": 25.90746788395336,
+        "inference_wall_time_s_mean": 6.47686697098834,
+        "inference_wall_time_s_median": 6.4860529724974185,
+        "inference_wall_time_s_total": 25.90746788395336,
+        "input_shape": {
+          "height": 256,
+          "num_frames": 81,
+          "width": 256
+        },
+        "latency_measurement_method": "denoising+vae_decode_with_case_cached_prompt_embeddings",
+        "model_size_gb": 12.717627204954624,
+        "model_size_scope": "pipeline_logical_unique_files",
+        "parameter_count": 1005985600,
+        "parameter_count_scope": "transformer",
+        "peak_memory_available": true,
+        "peak_memory_device": "cuda:0",
+        "peak_memory_gb_max": 18.643314838409424,
+        "pipeline_device": "cuda:0",
+        "pipeline_model_size_gb": 12.717627204954624,
+        "prompt_encoding_included": false,
+        "transformer_model_size_gb": 1.879697303287685,
+        "transformer_parameter_count": 1005985600
+      },
+      "parent_quality_metrics": {
+        "motion": 0.42098755637804663,
+        "score_type": "clip_temporal",
+        "semantic": 0.5825807154178619,
+        "temporal": 0.9723678529262543
+      },
+      "parent_vbench_metrics": {},
+      "pipeline_device": "cuda:0",
+      "promotable": true,
+      "quality_delta": 0.024435956776142187,
+      "quality_metrics": {
+        "motion": 0.6946764041980108,
+        "score_type": "clip_temporal",
+        "semantic": 0.5786651372909546,
+        "temporal": 0.96347576379776
+      },
+      "quality_score": 0.6672283892830213,
+      "resumed_case_count": 0,
+      "search_cost_seconds": 185.59655047993874,
+      "search_score": 0.6843921109688234,
+      "source_revision": "codex-harnesspro-pareto-20261024",
+      "status": "success",
+      "valid": true,
+      "vbench_comparison": {},
+      "vbench_enabled": false,
+      "vbench_metrics": {},
+      "vbench_provenance": null
+    },
+    "model_id": "M0005",
+    "num_attention_heads": null,
+    "num_blocks": 30,
+    "parameter_count": 634275520,
+    "parent_model_id": "M0003",
+    "provenance": {
+      "algorithm_id": "A0005",
+      "algorithm_parent_id": "A0004",
+      "checkpoint_sha256": "e70d67f18fae9a577f9381c96c9e36c235ae0fd108f41aafc1f2e56a9d8b19f4",
+      "offline_simulation": false,
+      "parent_checkpoint_sha256": "5504f154bd65044a7f2e98f9970aaeaafc69af4f08b9ab4d84e3bd094ea58157"
+    },
+    "quantization": {},
+    "runtime_state": {},
+    "sampling_steps": null,
+    "trainable_parameter_count": null,
+    "warnings": []
+  },
+  "status": "evaluated"
+}

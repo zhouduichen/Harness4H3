@@ -1,0 +1,26 @@
+{
+  "baseline_quality": 0.6299365838567424,
+  "branches": {
+    "lite": {
+      "head_candidate_id": "M0003",
+      "rounds": 10,
+      "seed_candidate_id": "M0003"
+    },
+    "medium": {
+      "head_candidate_id": "M0001",
+      "rounds": 10,
+      "seed_candidate_id": "M0001"
+    }
+  },
+  "budget_seconds": 900.0,
+  "deployment_cost_metric": "inference_wall_time_s_mean",
+  "next_index": 0,
+  "pending_branch": null,
+  "protocol_sha256": "1d417e9af0f3189aa9b8820cebea87e715d40a0757feb36cae31ed83b543e8a6",
+  "schema_version": 1,
+  "selected_modes": [
+    "lite",
+    "medium"
+  ],
+  "spent_seconds": 699.4408468402689
+}
