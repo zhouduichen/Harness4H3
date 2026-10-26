@@ -59,13 +59,12 @@ def test_evolution_loop_restarts_from_persisted_parent_and_search_policy(tmp_pat
     assert outcome.round_id == "R0002"
     assert outcome.parent_model_id == "M0001"
     # The restarted loop compares the new candidate with the active measured
-    # Parent, not only with the immutable initial baseline.  The structural
-    # fake evaluator does not provide a further 10% size improvement, so the
-    # candidate is retained as evidence without replacing M0001.
-    assert outcome.status == "rejected"
+    # Parent.  The new protocol permits promotion when any one of the
+    # independent efficiency objectives clears its configured threshold.
+    assert outcome.status == "promoted"
     round_state = json.loads((tmp_path / "run" / "rounds" / outcome.round_id / "round.json").read_text(encoding="utf-8"))
-    assert round_state["status"] == "rejected"
-    assert restarted.model_store.active_id == "M0001"
+    assert round_state["status"] == "promoted"
+    assert restarted.model_store.active_id == "M0002"
     assert restarted.search_policy.rounds == 2
     assert (tmp_path / "run" / "initial-baseline.json").is_file()
 
@@ -146,6 +145,85 @@ def test_algorithm_lineage_advances_after_rejected_model(tmp_path):
     assert loop.run_round().status == "rejected"
     assert loop.run_round().status == "promoted"
     assert loop.algorithm_store.get("A0002").parent_algorithm_id == "A0001"
+
+
+def test_design_feedback_changes_next_algorithm_and_persists_gene(tmp_path):
+    adapter = FakeWanDiTAdapter(block_count=5, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    calls = {"count": 0}
+
+    def evaluator(child, profile):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {
+                "quality_score": 0.50,
+                "baseline_quality_score": 1.0,
+                "baseline_hardware_metrics": {"latency_s": 1.0, "peak_memory_gb": 1.0, "model_size_gb": 1.0},
+                "hardware_metrics": {"latency_s": 0.40, "peak_memory_gb": 0.40, "model_size_gb": 0.40},
+                "valid": True,
+            }
+        return {
+            "quality_score": 1.0,
+            "baseline_quality_score": 1.0,
+            "baseline_hardware_metrics": {"latency_s": 1.0, "peak_memory_gb": 1.0, "model_size_gb": 1.0},
+            "hardware_metrics": {"latency_s": 0.90, "peak_memory_gb": 0.90, "model_size_gb": 0.90},
+            "valid": True,
+        }
+
+    loop = EvolutionLoop(
+        adapter=adapter,
+        parent=parent,
+        output_root=tmp_path / "run",
+        evaluator=evaluator,
+        search_policy=SearchPolicy(exploit_ratio=0.0, seed=0),
+    )
+
+    first = loop.run_round()
+    second = loop.run_round()
+
+    assert first.status == "rejected"
+    assert second.status == "promoted"
+    assert loop.model_store.active_id == second.child_model_id
+    first_design = json.loads((tmp_path / "run" / "rounds" / first.round_id / "design.json").read_text())
+    second_design = json.loads((tmp_path / "run" / "rounds" / second.round_id / "design.json").read_text())
+    assert first_design["fingerprint"] != second_design["fingerprint"]
+    assert first_design["strategy"] == "composed"
+    assert second_design["strategy"] == "prune_blocks"
+    genes = (tmp_path / "run" / "design-genes.jsonl").read_text().splitlines()
+    assert len(genes) == 2
+    assert "quality_floor_failed" in genes[0]
+
+
+def test_failed_composite_design_is_retained_as_negative_gene(tmp_path):
+    from harness4h3.evolution.agent import AlgorithmAgent
+
+    adapter = FakeWanDiTAdapter(block_count=4, hidden_size=8, ffn_width=16)
+    parent = adapter.save_model(adapter.load_model("fake://baseline"), tmp_path / "parent")
+    source = """def propose(profile, history):
+    return {'operator': 'compose', 'args': {'steps': [
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}},
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.0']}},
+    ]}}
+"""
+
+    def provider(payload):
+        return {"source": source, "hypothesis": "repeat a block to test failure memory", "parent_id": payload["parent_id"]}
+
+    loop = EvolutionLoop(
+        adapter=adapter,
+        parent=parent,
+        output_root=tmp_path / "run",
+        agent=AlgorithmAgent(provider=provider),
+    )
+
+    outcome = loop.run_round()
+
+    assert outcome.status == "failed"
+    assert outcome.decision["failure_type"] == "invalid_block_selection"
+    assert (tmp_path / "run" / "rounds" / outcome.round_id / "design.json").is_file()
+    gene_lines = (tmp_path / "run" / "design-genes.jsonl").read_text().splitlines()
+    assert len(gene_lines) == 1
+    assert '"status": "failed"' in gene_lines[0]
 
 
 def test_incomplete_round_reuses_persisted_compression_after_process_crash(tmp_path):

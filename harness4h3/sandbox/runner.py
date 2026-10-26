@@ -12,13 +12,15 @@ from ..executor.local import LocalProcessExecutor
 from .policy import SourcePolicyError, validate_source
 
 
+_ALLOWED_BUILTIN_NAMES = ("abs", "all", "any", "bool", "dict", "enumerate", "filter", "float", "int", "isinstance", "len", "list", "max", "min", "next", "range", "round", "set", "sorted", "str", "sum", "tuple", "zip")
+
 ALLOWED_BUILTINS = {
     name: __builtins__[name]  # type: ignore[index]
-    for name in ("abs", "all", "any", "bool", "dict", "enumerate", "filter", "float", "int", "isinstance", "len", "list", "max", "min", "range", "round", "set", "sorted", "str", "sum", "tuple", "zip")
+    for name in _ALLOWED_BUILTIN_NAMES
     if isinstance(__builtins__, dict) and name in __builtins__
 }
 if not isinstance(__builtins__, dict):  # pragma: no cover - interpreter detail
-    ALLOWED_BUILTINS = {name: getattr(__builtins__, name) for name in ("abs", "all", "any", "bool", "dict", "enumerate", "filter", "float", "int", "isinstance", "len", "list", "max", "min", "range", "round", "set", "sorted", "str", "sum", "tuple", "zip")}
+    ALLOWED_BUILTINS = {name: getattr(__builtins__, name) for name in _ALLOWED_BUILTIN_NAMES}
 
 
 def _safe_import(name: str, globals: Optional[Mapping[str, Any]] = None, locals: Optional[Mapping[str, Any]] = None, fromlist: Sequence[str] = (), level: int = 0) -> Any:
@@ -35,7 +37,9 @@ class CompressionPlan:
     operator: str
     args: Mapping[str, Any]
 
-    ALLOWED_OPERATORS = frozenset({"prune_blocks", "prune_ffn_channels"})
+    ALLOWED_OPERATORS = frozenset({"prune_blocks", "prune_ffn_channels", "compose"})
+    BASE_OPERATORS = frozenset({"prune_blocks", "prune_ffn_channels"})
+    MAX_COMPOSITE_STEPS = 3
 
     @classmethod
     def from_mapping(cls, raw: Any) -> "CompressionPlan":
@@ -47,6 +51,14 @@ class CompressionPlan:
         # validation remains identical and no extra fields are accepted.
         if set(raw) == {"operator", "operator_args"}:
             raw = {"operator": raw["operator"], "args": raw["operator_args"]}
+        elif len(raw) == 1:
+            # Controllers occasionally return the operator as the top-level
+            # key (for example, {"prune_blocks": {"block_ids": [...]}}).
+            # Normalize that harmless schema variant here, before applying
+            # the same strict operator/argument validation below.
+            operator, args = next(iter(raw.items()))
+            if operator in cls.ALLOWED_OPERATORS:
+                raw = {"operator": operator, "args": args}
         if set(raw) != {"operator", "args"}:
             raise ValueError("algorithm_output_invalid: output keys must be operator and args")
         operator = raw["operator"]
@@ -55,6 +67,27 @@ class CompressionPlan:
             raise ValueError("algorithm_output_invalid: unsupported operator")
         if not isinstance(args, Mapping):
             raise ValueError("algorithm_output_invalid: args must be an object")
+        _reject_unsafe_keys(args)
+        if operator == "compose":
+            if set(args) != {"steps"} or not isinstance(args["steps"], list):
+                raise ValueError("algorithm_output_invalid: compose requires steps")
+            steps = args["steps"]
+            if not 2 <= len(steps) <= cls.MAX_COMPOSITE_STEPS:
+                raise ValueError("algorithm_output_invalid: compose requires 2 to %d steps" % cls.MAX_COMPOSITE_STEPS)
+            normalized_steps = []
+            for step in steps:
+                if not isinstance(step, Mapping) or step.get("operator") == "compose":
+                    raise ValueError("algorithm_output_invalid: nested compose is not allowed")
+                normalized_steps.append(cls._from_base_mapping(step).to_dict())
+            return cls("compose", {"steps": normalized_steps})
+        return cls._from_base_mapping({"operator": operator, "args": args})
+
+    @classmethod
+    def _from_base_mapping(cls, raw: Mapping[str, Any]) -> "CompressionPlan":
+        operator = raw.get("operator")
+        args = raw.get("args")
+        if operator not in cls.BASE_OPERATORS or not isinstance(args, Mapping):
+            raise ValueError("algorithm_output_invalid: composite steps must use base operators")
         _reject_unsafe_keys(args)
         if operator == "prune_blocks":
             if set(args) != {"block_ids"} or not isinstance(args["block_ids"], list) or not all(isinstance(item, str) for item in args["block_ids"]):
@@ -67,7 +100,7 @@ class CompressionPlan:
                 raise ValueError("algorithm_output_invalid: block_ids must contain strings")
             if not all(isinstance(item, int) and not isinstance(item, bool) for item in args["retained_indices"]):
                 raise ValueError("algorithm_output_invalid: retained_indices must contain integers")
-        return cls(operator, {str(key): value for key, value in args.items()})
+        return cls(str(operator), {str(key): value for key, value in args.items()})
 
     def to_dict(self) -> dict[str, Any]:
         return {"operator": self.operator, "args": dict(self.args)}
@@ -333,7 +366,7 @@ ALLOWED = {
     "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict,
     "enumerate": enumerate, "filter": filter, "float": float, "int": int,
     "isinstance": isinstance, "len": len, "list": list, "max": max,
-    "min": min, "range": range, "round": round, "set": set, "sorted": sorted,
+    "min": min, "next": next, "range": range, "round": round, "set": set, "sorted": sorted,
     "str": str, "sum": sum, "tuple": tuple, "zip": zip,
 }
 

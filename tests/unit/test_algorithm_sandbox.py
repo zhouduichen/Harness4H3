@@ -16,12 +16,100 @@ def test_sandbox_accepts_bounded_plan(tmp_path):
     assert result.metadata["runtime_audit"] == "deny-file-network-process-dynamic-code"
 
 
+def test_sandbox_allows_safe_iteration_helpers(tmp_path):
+    source = """def propose(profile, history):
+    selected = next(item for item in profile['items'] if item['enabled'])
+    return {'operator': 'prune_blocks', 'args': {'block_ids': [selected['block_id']]}}
+"""
+    result = AlgorithmSandbox(tmp_path).run(source, {"items": [{"block_id": "block.1", "enabled": True}]}, [])
+    assert result.status == "success"
+    assert result.plan is not None
+    assert result.plan.args["block_ids"] == ["block.1"]
+
+
 def test_sandbox_normalizes_persisted_operator_args_alias(tmp_path):
     source = "def propose(profile, history):\n    return {'operator': 'prune_blocks', 'operator_args': {'block_ids': ['block.1']}}\n"
     result = AlgorithmSandbox(tmp_path).run(source, {"layers": []}, [])
     assert result.status == "success"
     assert result.plan is not None
     assert result.plan.to_dict() == {"operator": "prune_blocks", "args": {"block_ids": ["block.1"]}}
+
+
+def test_sandbox_normalizes_top_level_operator_alias(tmp_path):
+    source = "def propose(profile, history):\n    return {'prune_blocks': {'block_ids': ['block.1']}}\n"
+    result = AlgorithmSandbox(tmp_path).run(source, {}, [])
+    assert result.status == "success"
+    assert result.plan is not None
+    assert result.plan.to_dict() == {"operator": "prune_blocks", "args": {"block_ids": ["block.1"]}}
+
+
+def test_sandbox_accepts_bounded_composite_plan(tmp_path):
+    source = """def propose(profile, history):
+    return {
+        'operator': 'compose',
+        'args': {'steps': [
+            {'operator': 'prune_blocks', 'args': {'block_ids': ['block.1']}},
+            {'operator': 'prune_ffn_channels', 'args': {'block_ids': ['block.2'], 'retained_indices': [0, 1]}},
+        ]},
+    }
+"""
+
+    result = sandbox_runner.AlgorithmSandbox(tmp_path).run(source, {}, [])
+
+    assert result.status == "success"
+    assert result.plan is not None
+    assert result.plan.operator == "compose"
+    assert result.plan.to_dict()["args"]["steps"][1]["operator"] == "prune_ffn_channels"
+
+
+def test_sandbox_rejects_nested_composite_plan(tmp_path):
+    source = """def propose(profile, history):
+    return {'operator': 'compose', 'args': {'steps': [
+        {'operator': 'compose', 'args': {'steps': [
+            {'operator': 'prune_blocks', 'args': {'block_ids': ['block.1']}},
+            {'operator': 'prune_blocks', 'args': {'block_ids': ['block.2']}},
+        ]}},
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.3']}},
+    ]}}
+"""
+
+    result = sandbox_runner.AlgorithmSandbox(tmp_path).run(source, {}, [])
+
+    assert result.status == "failed"
+    assert result.failure_type == "algorithm_output_invalid"
+    assert "compose" in result.message
+
+
+def test_sandbox_rejects_composite_plan_longer_than_three_steps(tmp_path):
+    source = """def propose(profile, history):
+    return {'operator': 'compose', 'args': {'steps': [
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.1']}},
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.2']}},
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.3']}},
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.4']}},
+    ]}}
+"""
+
+    result = sandbox_runner.AlgorithmSandbox(tmp_path).run(source, {}, [])
+
+    assert result.status == "failed"
+    assert result.failure_type == "algorithm_output_invalid"
+    assert "3" in result.message
+
+
+def test_sandbox_rejects_unsafe_composite_step_keys(tmp_path):
+    source = """def propose(profile, history):
+    return {'operator': 'compose', 'args': {'steps': [
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.1'], 'device': 'cuda:0'}},
+        {'operator': 'prune_blocks', 'args': {'block_ids': ['block.2']}},
+    ]}}
+"""
+
+    result = sandbox_runner.AlgorithmSandbox(tmp_path).run(source, {}, [])
+
+    assert result.status == "failed"
+    assert result.failure_type == "algorithm_output_invalid"
+    assert "device" in result.message
 
 
 def test_sandbox_rejects_filesystem_import(tmp_path):

@@ -156,9 +156,108 @@ def cmd_evolve_compression(args: argparse.Namespace) -> int:
         memory_enabled=config.memory_enabled,
         adapt_search_policy=config.adapt_search_policy,
     )
-    outcomes = [loop.run_round().to_dict() for _ in range(int(args.rounds))]
+    outcomes = []
+    campaign = None
+    if args.strategy == "pareto" or args.budget_seconds is not None:
+        from .evolution.campaign import BranchCampaign
+
+        if args.budget_seconds is None or args.baseline_quality is None:
+            raise ValueError("pareto strategy requires --budget-seconds and --baseline-quality")
+        campaign = BranchCampaign(
+            config.output_root,
+            baseline_quality=args.baseline_quality,
+            budget_seconds=args.budget_seconds,
+            protocol={
+                "backend": config.backend,
+                "checkpoint": str(Path(config.checkpoint).expanduser().resolve()) if not config.checkpoint.startswith("fake://") else config.checkpoint,
+                "controller": dict(config.controller),
+                "evaluator": dict(config.evaluator),
+                "evaluator_recipe_sha256": getattr(evaluator, "recipe_digest", None),
+                "quality_policy": {
+                    "quality_floor_ratio": PromotionPolicy.from_mapping(config.evaluator).quality_floor_ratio,
+                    "min_latency_improvement": PromotionPolicy.from_mapping(config.evaluator).min_latency_improvement,
+                    "min_memory_improvement": PromotionPolicy.from_mapping(config.evaluator).min_memory_improvement,
+                    "min_model_size_improvement": PromotionPolicy.from_mapping(config.evaluator).min_model_size_improvement,
+                },
+                "operator_names": list(loop.registry.names()),
+                "device": config.device,
+                "dtype": config.dtype,
+                "memory_enabled": config.memory_enabled,
+            },
+        )
+        # Recover the narrow crash window after a round decision was persisted
+        # but before its campaign cost event was appended.
+        for round_dir in sorted((config.output_root / "rounds").glob("R*")):
+            round_file, decision_file = round_dir / "round.json", round_dir / "decision.json"
+            if not round_file.is_file() or not decision_file.is_file():
+                continue
+            round_state, decision = loop._read_json(round_file), loop._read_json(decision_file)
+            branch_name = round_state.get("branch_id")
+            if not branch_name:
+                continue
+            stage = dict(round_state.get("stage_costs") or {})
+            campaign.record_round(
+                round_id=str(round_state.get("round_id", round_dir.name)),
+                branch_id=str(branch_name),
+                parent_model_id=str(round_state.get("parent_model_id", decision.get("parent_model_id", ""))),
+                child_model_id=str(round_state["child_model_id"]) if round_state.get("child_model_id") else None,
+                status=str(round_state.get("status", decision.get("status", "failed"))),
+                costs={
+                    "parent_load_seconds": stage.get("parent_load_seconds", 0.0),
+                    "profile_seconds": stage.get("profile_seconds", 0.0),
+                    "generation_seconds": stage.get("generation_seconds", 0.0),
+                    "sandbox_seconds": stage.get("sandbox_seconds", 0.0),
+                    "training_seconds": stage.get("training_seconds", 0.0),
+                    "verification_seconds": stage.get("verification_seconds", 0.0),
+                    "evaluation_seconds": stage.get("evaluation_seconds", 0.0),
+                    "retry_seconds": stage.get("retry_seconds", 0.0),
+                    "unattributed_seconds": stage.get("unattributed_seconds", 0.0),
+                },
+                failure_type=decision.get("failure_type"),
+            )
+    for _ in range(int(args.rounds)):
+        if campaign is not None and campaign.remaining_seconds <= 0:
+            break
+        branch = None
+        if campaign is not None:
+            branch = (
+                campaign.next_branch(loop._load_pareto_front())
+                if args.strategy == "pareto"
+                else {"mode": "single", "head_candidate_id": loop.model_store.active_id}
+            )
+            if branch is None:
+                if not loop._load_pareto_front() and campaign.remaining_seconds > 0:
+                    branch = {"mode": "seed", "head_candidate_id": loop.model_store.active_id}
+                else:
+                    break
+        outcome = loop.run_round(
+            parent_model_id=(branch["head_candidate_id"] if branch and args.strategy == "pareto" and branch["mode"] != "seed" else None),
+            branch_id=branch["mode"] if branch else None,
+        )
+        record = outcome.to_dict()
+        outcomes.append(record)
+        if campaign is not None:
+            round_state = loop._read_json(config.output_root / "rounds" / outcome.round_id / "round.json")
+            measured = dict(round_state.get("stage_costs") or {})
+            costs = {
+                "parent_load_seconds": measured.get("parent_load_seconds", 0.0),
+                "profile_seconds": measured.get("profile_seconds", 0.0),
+                "generation_seconds": measured.get("generation_seconds", 0.0),
+                "sandbox_seconds": measured.get("sandbox_seconds", 0.0),
+                "training_seconds": measured.get("training_seconds", 0.0),
+                "verification_seconds": measured.get("verification_seconds", 0.0),
+                "evaluation_seconds": measured.get("evaluation_seconds", 0.0),
+                "retry_seconds": measured.get("retry_seconds", 0.0),
+                "unattributed_seconds": measured.get("unattributed_seconds", 0.0),
+            }
+            campaign.record_round(
+                round_id=outcome.round_id,
+                branch_id=branch["mode"], parent_model_id=outcome.parent_model_id,
+                child_model_id=outcome.child_model_id, status=outcome.status,
+                costs=costs, failure_type=record["decision"].get("failure_type"),
+            )
     failed = sum(1 for item in outcomes if item["status"] == "failed")
-    _emit({"status": "success" if failed == 0 else "failed", "rounds": outcomes, "failed_rounds": failed}, args.json)
+    _emit({"status": "success" if failed == 0 else "failed", "rounds": outcomes, "failed_rounds": failed, "campaign": campaign.state if campaign else None}, args.json)
     return 0 if failed == 0 else 1
 
 

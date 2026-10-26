@@ -75,16 +75,85 @@ def test_efficiency_gain_without_required_model_size_gain_does_not_promote():
         evaluation=_evidence(latency=90.0, memory=7.0, size=9.5),
         child_integrity=True,
     )
-    assert decision["accepted"] is False
-    assert "model_size_improvement_below_threshold" in decision["reasons"]
+    assert decision["accepted"] is True
+    assert decision["objective_passes"]["latency_s"] is True
+    assert decision["objective_passes"]["model_size_gb"] is False
 
 
 def test_partial_hardware_evidence_does_not_promote():
     evidence = _evidence()
     del evidence["hardware_metrics"]["peak_memory_gb"]
     decision = PromotionPolicy().decide(parent={}, evaluation=evidence, child_integrity=True)
+    assert decision["accepted"] is True
+    assert "peak_memory_gb" in decision["missing_metrics"]
+
+
+def test_latency_only_gain_can_promote():
+    decision = PromotionPolicy().decide(
+        parent={},
+        evaluation=_evidence(latency=94.0, memory=10.0, size=9.5),
+        child_integrity=True,
+    )
+    assert decision["accepted"] is True
+    assert decision["objective_passes"]["latency_s"] is True
+
+
+def test_memory_only_gain_can_promote():
+    decision = PromotionPolicy().decide(
+        parent={},
+        evaluation=_evidence(latency=100.0, memory=9.0, size=9.5),
+        child_integrity=True,
+    )
+    assert decision["accepted"] is True
+    assert decision["objective_passes"]["peak_memory_gb"] is True
+
+
+def test_model_size_only_gain_can_promote():
+    decision = PromotionPolicy().decide(
+        parent={},
+        evaluation=_evidence(latency=100.0, memory=10.0, size=8.9),
+        child_integrity=True,
+    )
+    assert decision["accepted"] is True
+    assert decision["objective_passes"]["model_size_gb"] is True
+
+
+def test_zero_peak_memory_is_missing_not_zero_usage():
+    decision = PromotionPolicy().decide(
+        parent={},
+        evaluation=_evidence(latency=100.0, memory=0.0, size=9.5),
+        child_integrity=True,
+    )
     assert decision["accepted"] is False
-    assert "hardware_data_missing:peak_memory_gb" in decision["reasons"]
+    assert "peak_memory_gb" in decision["missing_metrics"]
+
+
+def test_quality_submetric_floor_is_checked_when_parent_data_exists():
+    evidence = _evidence()
+    evidence["quality_metrics"] = {"semantic": 0.90, "temporal": 0.99, "motion": 0.99}
+    evidence["baseline_quality_metrics"] = {"semantic": 1.0, "temporal": 1.0, "motion": 1.0}
+    decision = PromotionPolicy().decide(parent={}, evaluation=evidence, child_integrity=True)
+    assert decision["accepted"] is False
+    assert "quality_metric_floor_failed:semantic" in decision["reasons"]
+
+
+def test_non_target_hardware_regression_is_a_hard_failure():
+    evidence = _evidence()
+    evidence["hardware_metrics"]["energy_j"] = 11.0
+    evidence["baseline_hardware_metrics"]["energy_j"] = 10.0
+    decision = PromotionPolicy().decide(parent={}, evaluation=evidence, child_integrity=True)
+    assert decision["accepted"] is False
+    assert "hardware_regression:energy_j" in decision["reasons"]
+
+
+def test_separate_latency_and_memory_thresholds_are_configurable():
+    policy = PromotionPolicy.from_mapping(
+        {"min_latency_improvement": 0.20, "min_memory_improvement": 0.05, "min_model_size_improvement": 0.10}
+    )
+    decision = policy.decide(parent={}, evaluation=_evidence(latency=80.0, memory=9.0, size=9.5), child_integrity=True)
+    assert decision["accepted"] is True
+    assert decision["min_latency_improvement"] == 0.20
+    assert decision["min_memory_improvement"] == 0.05
 
 
 def test_promotion_uses_active_parent_before_initial_baseline():
@@ -104,6 +173,20 @@ def test_promotion_uses_active_parent_before_initial_baseline():
         },
         child_integrity=True,
     )
+    assert decision["accepted"] is False
+    assert "quality_floor_failed" in decision["reasons"]
+
+
+def test_novel_composite_design_does_not_bypass_quality_gate():
+    evidence = _evidence(quality=0.97)
+    evidence["design_fingerprint"] = "new-composite-design"
+    evidence["algorithm_plan"] = {
+        "operator": "compose",
+        "args": {"steps": [{"operator": "prune_blocks", "args": {"block_ids": ["block.0"]}}]},
+    }
+
+    decision = PromotionPolicy().decide(parent={}, evaluation=evidence, child_integrity=True)
+
     assert decision["accepted"] is False
     assert "quality_floor_failed" in decision["reasons"]
 

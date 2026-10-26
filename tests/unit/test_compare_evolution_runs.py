@@ -2,11 +2,36 @@ from __future__ import annotations
 
 import json
 
-from tools.compare_evolution_runs import compare_runs
+from tools.compare_evolution_runs import compare_runs, summarize_run
 
 
-def _write_run(root, *, status="rejected", recipe="recipe-a", quality=0.9, case_count=2, source_revision="revision-a"):
+def _write_active(root, *, active_id="M0000", metrics=None):
+    candidates = root / "models" / "candidates"
+    candidates.mkdir(parents=True)
+    (root / "models" / "active.json").write_text(json.dumps({"id": active_id}), encoding="utf-8")
+    (candidates / (active_id + ".json")).write_text(
+        json.dumps({"id": active_id, "state": {"measured_metrics": metrics or {}}}),
+        encoding="utf-8",
+    )
+
+
+def _write_run(
+    root,
+    *,
+    status="rejected",
+    recipe="recipe-a",
+    quality=0.9,
+    case_count=2,
+    source_revision="revision-a",
+    round_id="R0001",
+    parent_model_id="M0000",
+    child_model_id="M0001",
+    baseline_quality=None,
+    baseline_hardware=None,
+    search_score=None,
+):
     round_dir = root / "rounds" / "R0001"
+    round_dir = root / "rounds" / round_id
     round_dir.mkdir(parents=True)
     evaluation = {
         "status": "success",
@@ -23,8 +48,44 @@ def _write_run(root, *, status="rejected", recipe="recipe-a", quality=0.9, case_
             "gpu_runtime_cost_s": 36.0,
         },
     }
+    if baseline_quality is not None:
+        evaluation["baseline_quality_score"] = baseline_quality
+    if baseline_hardware is not None:
+        evaluation["baseline_hardware_metrics"] = baseline_hardware
+    if search_score is not None:
+        evaluation["search_score"] = search_score
     (round_dir / "evaluation.json").write_text(json.dumps(evaluation), encoding="utf-8")
-    (round_dir / "decision.json").write_text(json.dumps({"status": status, "evaluation": evaluation}), encoding="utf-8")
+    (round_dir / "decision.json").write_text(
+        json.dumps(
+            {
+                "status": status,
+                "parent_model_id": parent_model_id,
+                "child_model_id": child_model_id,
+                "evaluation": evaluation,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_manifest(root, arm, *, fingerprint="protocol-a"):
+    (root / "run-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "protocol_fingerprint": fingerprint,
+                "arm_name": arm,
+                "budget": {"rounds": 3, "expected_cases": 16, "latency_repeats": 3},
+                "assets": {
+                    "checkpoint": {"exists": True, "kind": "directory"},
+                    "wan_config": {"exists": True, "kind": "file"},
+                    "evaluation_manifest": {"exists": True, "kind": "file"},
+                    "clip_model_path": {"exists": True, "kind": "directory"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_compare_preserves_missing_active_metrics_and_sums_cost(tmp_path):
@@ -33,8 +94,60 @@ def test_compare_preserves_missing_active_metrics_and_sums_cost(tmp_path):
     item = result["runs"][0]
     assert item["active_model_metrics_available"] is False
     assert item["gpu_runtime_cost_s"] == 36.0
-    assert item["final"]["quality_score"] == 0.9
-    assert result["protocol_comparable"] is True
+    assert item["final_source"] == "missing"
+    assert item["final"]["quality_score"] is None
+    assert result["protocol_comparable"] is False
+
+
+def test_compare_reads_active_id_and_does_not_replace_it_with_rejected_child(tmp_path):
+    root = tmp_path / "run"
+    _write_active(root, active_id="M0001", metrics={"quality_score": 0.98, "hardware_metrics": {"model_size_gb": 8.0}})
+    _write_run(root, parent_model_id="M0001", child_model_id="M0002", quality=0.70)
+    result = summarize_run("run", root)
+    assert result["active_model_id"] == "M0001"
+    assert result["final_source"] == "active_model"
+    assert result["final"]["quality_score"] == 0.98
+    assert result["last_candidate_model_id"] == "M0002"
+    assert result["last_candidate_status"] == "rejected"
+    assert result["rejected_model_ids"] == ["M0002"]
+
+
+def test_compare_keeps_last_and_historical_best_candidates_separate(tmp_path):
+    root = tmp_path / "run"
+    _write_active(root, active_id="M0000", metrics={"quality_score": 1.0})
+    _write_run(root, round_id="R0001", child_model_id="M0001", quality=0.91, search_score=0.91)
+    _write_run(root, round_id="R0002", child_model_id="M0002", quality=0.94, search_score=0.94)
+    result = summarize_run("run", root)
+    assert result["last_candidate_model_id"] == "M0002"
+    assert result["historical_best_candidate_model_id"] == "M0002"
+    assert result["rejected_model_ids"] == ["M0001", "M0002"]
+    assert result["final"]["quality_score"] == 1.0
+
+
+def test_compare_recovers_only_an_associated_parent_baseline(tmp_path):
+    root = tmp_path / "run"
+    _write_active(root, active_id="M0000", metrics={})
+    _write_run(
+        root,
+        parent_model_id="M0000",
+        child_model_id="M0001",
+        baseline_quality=1.0,
+        baseline_hardware={"inference_wall_time_s_mean": 10.0, "model_size_gb": 8.0},
+    )
+    result = summarize_run("run", root)
+    assert result["final_source"] == "associated_parent_baseline"
+    assert result["final_source_round_id"] == "R0001"
+    assert result["final"]["quality_score"] == 1.0
+    assert result["final"]["latency_s"] == 10.0
+
+
+def test_compare_marks_missing_baseline_metrics_instead_of_using_unrelated_candidate(tmp_path):
+    root = tmp_path / "run"
+    _write_active(root, active_id="M0000", metrics={})
+    _write_run(root, parent_model_id="M9999", child_model_id="M0001", quality=0.91)
+    result = summarize_run("run", root)
+    assert result["final_source"] == "missing"
+    assert result["final"]["quality_score"] is None
 
 
 def test_compare_warns_when_recipes_differ(tmp_path):
@@ -63,3 +176,55 @@ def test_compare_rejects_missing_or_mismatched_source_revision(tmp_path):
     result = compare_runs(["a=%s" % (tmp_path / "a"), "b=%s" % (tmp_path / "b")])
     assert result["protocol_comparable"] is False
     assert "source_revision differs across runs" in result["warnings"]
+
+
+def test_compare_accepts_only_a_complete_consistent_four_arm_protocol(tmp_path):
+    arms = ("fixed", "coding-agent", "agent-memory", "rsi")
+    specs = []
+    for arm in arms:
+        root = tmp_path / arm
+        _write_active(root, metrics={"quality_score": 1.0, "hardware_metrics": {"model_size_gb": 8.0, "case_count": 16}})
+        _write_run(root, status="promoted", case_count=16)
+        _write_manifest(root, arm)
+        specs.append("%s=%s" % (arm, root))
+    result = compare_runs(specs, expected_cases=16)
+    assert result["protocol_comparable"] is True
+    assert not result["warnings"]
+
+
+def test_compare_rejects_protocol_fingerprint_drift_even_with_metrics(tmp_path):
+    arms = ("fixed", "coding-agent", "agent-memory", "rsi")
+    specs = []
+    for index, arm in enumerate(arms):
+        root = tmp_path / arm
+        _write_active(root, metrics={"quality_score": 1.0, "hardware_metrics": {"model_size_gb": 8.0, "case_count": 16}})
+        _write_run(root, status="promoted", case_count=16)
+        _write_manifest(root, arm, fingerprint="protocol-a" if index < 3 else "protocol-b")
+        specs.append("%s=%s" % (arm, root))
+    result = compare_runs(specs, expected_cases=16)
+    assert result["protocol_comparable"] is False
+    assert "protocol_fingerprint differs across runs" in result["warnings"]
+
+
+def test_compare_rejects_incomplete_protocol_manifest(tmp_path):
+    root = tmp_path / "run"
+    _write_active(root, metrics={"quality_score": 1.0, "hardware_metrics": {"model_size_gb": 8.0, "case_count": 16}})
+    _write_run(root, status="promoted", case_count=16)
+    (root / "run-manifest.json").write_text(json.dumps({"protocol_fingerprint": "protocol-a"}), encoding="utf-8")
+    result = compare_runs(["run=%s" % root], expected_cases=16)
+    assert result["protocol_comparable"] is False
+    assert "run-manifest.json missing arm_name" in result["warnings"]
+    assert "run-manifest.json missing budget" in result["warnings"]
+
+
+def test_compare_rejects_unresolved_protocol_assets(tmp_path):
+    root = tmp_path / "run"
+    _write_active(root, metrics={"quality_score": 1.0, "hardware_metrics": {"model_size_gb": 8.0, "case_count": 16}})
+    _write_run(root, status="promoted", case_count=16)
+    _write_manifest(root, "fixed")
+    manifest = json.loads((root / "run-manifest.json").read_text(encoding="utf-8"))
+    manifest["assets"]["checkpoint"]["exists"] = False
+    (root / "run-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    result = compare_runs(["run=%s" % root], expected_cases=16)
+    assert result["protocol_comparable"] is False
+    assert "run protocol assets unresolved: checkpoint" in result["warnings"]

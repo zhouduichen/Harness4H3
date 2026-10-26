@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
@@ -12,11 +13,13 @@ from ..adapters.wan.contracts import CheckpointArtifact, CompressionResult, Mode
 from ..archive.model_candidate import ModelCandidate
 from ..archive.model_store import ModelStore
 from ..h3.state import ModelState
+from ..memory.design_gene import DesignGene
 from ..memory.experience import ExperienceRecord, ExperienceStore
 from ..profiler import ProfileReport, profile_model
 from ..sandbox.runner import AlgorithmSandbox, CompressionPlan as SandboxCompressionPlan, SandboxResult
 from .agent import AlgorithmAgent
 from .candidate import AlgorithmCandidate
+from .design import build_design_record
 from .evaluator import PromotionPolicy
 from .policy import SearchPolicy
 from .skill_hub import SkillHub
@@ -105,16 +108,36 @@ class EvolutionLoop:
         self.model_store.initialize(ModelCandidate("M0000", None, 0, self.parent.path, state, None, "active", {"adapter": "wan"}))
         _write_json(self.output_root / "initial-baseline.json", self.parent.to_dict())
 
-    def run_round(self) -> EvolutionRound:
+    def run_round(self, *, parent_model_id: Optional[str] = None, branch_id: Optional[str] = None) -> EvolutionRound:
         round_id, round_dir, resuming = self._acquire_round()
         round_state = self._read_json(round_dir / "round.json") if resuming else {}
-        parent_model_id = str(round_state.get("parent_model_id", "")).strip()
-        parent_candidate = self.model_store.get(parent_model_id) if parent_model_id else self.model_store.active()
+        persisted_parent_id = str(round_state.get("parent_model_id", "")).strip()
+        requested_parent_id = str(parent_model_id or "").strip()
+        if resuming and requested_parent_id and persisted_parent_id != requested_parent_id:
+            raise ValueError("cannot resume round with a different parent candidate")
+        selected_parent_id = persisted_parent_id or requested_parent_id
+        parent_candidate = self.model_store.get(selected_parent_id) if selected_parent_id else self.model_store.active()
+        stage_costs = dict(round_state.get("stage_costs") or {})
+        parent_load_started = time.perf_counter()
         parent_artifact = self._artifact_for_candidate(parent_candidate)
+        stage_costs["parent_load_seconds"] = float(stage_costs.get("parent_load_seconds", 0.0)) + (time.perf_counter() - parent_load_started)
         if not resuming:
-            self._write_round_state(round_dir, {"round_id": round_id, "parent_model_id": parent_candidate.id, "status": "in_progress"})
+            self._write_round_state(round_dir, {"round_id": round_id, "parent_model_id": parent_candidate.id, "branch_id": branch_id, "stage_costs": stage_costs, "status": "in_progress"})
         profile_path = round_dir / "profile.json"
+        profile_started = time.perf_counter()
         profile = self._load_or_profile(profile_path, parent_artifact)
+        stage_costs["profile_seconds"] = float(stage_costs.get("profile_seconds", 0.0)) + (time.perf_counter() - profile_started)
+        self._write_round_state(
+            round_dir,
+            {
+                **round_state,
+                "round_id": round_id,
+                "parent_model_id": parent_candidate.id,
+                "branch_id": branch_id or round_state.get("branch_id"),
+                "stage_costs": stage_costs,
+                "status": "in_progress",
+            },
+        )
         architecture = str(profile.model["architecture"])
         skills = self.skill_hub.search(architecture=architecture, limit=8) if self.memory_enabled else []
         pareto_front = self._load_pareto_front()
@@ -141,6 +164,7 @@ class EvolutionLoop:
             if not any(item.algorithm_id == algorithm.algorithm_id for item in self.algorithm_store.read()):
                 self.algorithm_store.create(algorithm)
         else:
+            generation_started = time.perf_counter()
             try:
                 algorithm = self.agent.generate(
                     algorithm_id,
@@ -153,6 +177,8 @@ class EvolutionLoop:
                     search_choice=search_choice,
                 )
             except (RuntimeError, TypeError, ValueError) as exc:
+                stage_costs["generation_seconds"] = time.perf_counter() - generation_started
+                self._write_round_state(round_dir, {**round_state, "stage_costs": stage_costs})
                 algorithm = AlgorithmCandidate.from_source(
                     algorithm_id,
                     "# algorithm generation failed\ndef propose(profile, history):\n    return {'operator': 'prune_blocks', 'args': {'block_ids': []}}\n",
@@ -163,30 +189,64 @@ class EvolutionLoop:
                 )
                 _write_json(algorithm_path, algorithm.to_dict())
                 return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "generation", "algorithm_generation_failed", str(exc), {"profile": str(profile_path), "algorithm": str(algorithm_path)}, algorithm_persisted=False)
+            stage_costs["generation_seconds"] = time.perf_counter() - generation_started
             _write_json(algorithm_path, algorithm.to_dict())
+            self._write_round_state(
+                round_dir,
+                {
+                    **round_state,
+                    "round_id": round_id,
+                    "parent_model_id": parent_candidate.id,
+                    "branch_id": branch_id or round_state.get("branch_id"),
+                    "search_choice": search_choice,
+                    "algorithm_id": algorithm.algorithm_id,
+                    "stage_costs": stage_costs,
+                    "status": "in_progress",
+                },
+            )
             try:
                 self.algorithm_store.create(algorithm)
             except ValueError as exc:
                 return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "generation", "duplicate_algorithm", str(exc), {"profile": str(profile_path), "algorithm": str(algorithm_path)}, algorithm_persisted=False)
-        self._write_round_state(round_dir, {**round_state, "round_id": round_id, "parent_model_id": parent_candidate.id, "search_choice": search_choice, "algorithm_id": algorithm.algorithm_id, "status": "in_progress"})
+        self._write_round_state(round_dir, {**round_state, "round_id": round_id, "parent_model_id": parent_candidate.id, "branch_id": branch_id or round_state.get("branch_id"), "search_choice": search_choice, "algorithm_id": algorithm.algorithm_id, "stage_costs": stage_costs, "status": "in_progress"})
 
         sandbox_path = round_dir / "sandbox.json"
         sandbox_result = self._load_sandbox(sandbox_path)
         if sandbox_result is None:
+            sandbox_started = time.perf_counter()
             sandbox_result = self.sandbox.run(algorithm.source, profile.to_dict(), skills)
+            stage_costs["sandbox_seconds"] = time.perf_counter() - sandbox_started
             _write_json(sandbox_path, _sandbox_dict(sandbox_result))
+        self._write_round_state(round_dir, {**round_state, "round_id": round_id, "parent_model_id": parent_candidate.id, "branch_id": branch_id or round_state.get("branch_id"), "stage_costs": stage_costs, "status": "in_progress"})
         if sandbox_result.status != "success" or sandbox_result.plan is None:
             return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "sandbox", sandbox_result.failure_type or "sandbox_failed", sandbox_result.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path)})
+
+        design_path = round_dir / "design.json"
+        design = self._read_json(design_path) if design_path.exists() else {}
+        if not design:
+            design = build_design_record(
+                algorithm_id=algorithm.algorithm_id,
+                parent_algorithm_id=algorithm.parent_algorithm_id,
+                search_choice=search_choice,
+                profile=profile.to_dict(),
+                history=agent_history,
+                plan=sandbox_result.plan.to_dict(),
+                hypothesis=algorithm.hypothesis,
+            )
+            _write_json(design_path, design)
 
         compression_dir = round_dir / "checkpoint"
         compression_path = round_dir / "compression.json"
         compression = self._load_compression(compression_path)
         if compression is None:
             compression = self.registry.execute(algorithm_plan_operator(sandbox_result), self.adapter, parent_artifact, sandbox_result.plan.args, compression_dir)
+            stage_costs["training_seconds"] = float(compression.wall_time_s)
             _write_json(compression_path, compression.to_dict())
+        self._write_round_state(round_dir, {**round_state, "round_id": round_id, "parent_model_id": parent_candidate.id, "branch_id": branch_id or round_state.get("branch_id"), "stage_costs": stage_costs, "status": "in_progress"})
         if compression.status != "success" or compression.child_checkpoint is None:
-            return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "compression", compression.failure_type or "compression_failed", compression.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "compression": str(compression_path)})
+            return self._finish_failure(round_id, round_dir, parent_candidate, algorithm, search_choice, "compression", compression.failure_type or "compression_failed", compression.message, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "design": str(design_path), "compression": str(compression_path)}, design=design)
 
+        verification_started = time.perf_counter()
         try:
             child_integrity = self._verify_checkpoint(compression.child_checkpoint, expected_sha256=compression.child_checkpoint.sha256, parent_sha256=parent_artifact.sha256)
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -194,13 +254,23 @@ class EvolutionLoop:
             integrity_error = str(exc)
         else:
             integrity_error = None
+        stage_costs["verification_seconds"] = float(stage_costs.get("verification_seconds", 0.0)) + (time.perf_counter() - verification_started)
         evaluation_path = round_dir / "evaluation.json"
         evaluation = self._read_json(evaluation_path) if evaluation_path.exists() else None
+        evaluator_recipe = getattr(self.evaluator, "recipe_digest", None)
+        if evaluation is not None and evaluator_recipe and evaluation.get("evaluator_recipe_sha256") != evaluator_recipe:
+            evaluation = None
         if evaluation is None:
+            evaluation_started = time.perf_counter()
             try:
-                evaluation = dict(self.evaluator(compression.child_checkpoint, profile.to_dict()))
+                evaluate_candidate = getattr(self.evaluator, "evaluate_candidate", None)
+                if callable(evaluate_candidate):
+                    evaluation = dict(evaluate_candidate(compression.child_checkpoint, parent_artifact, profile.to_dict()))
+                else:
+                    evaluation = dict(self.evaluator(compression.child_checkpoint, profile.to_dict()))
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 evaluation = {"valid": False, "evaluation_status": "failed", "failure_type": "evaluator_failed", "failure_message": str(exc), "offline_simulation": False}
+            stage_costs["evaluation_seconds"] = time.perf_counter() - evaluation_started
         if not child_integrity:
             evaluation = {
                 **evaluation,
@@ -211,6 +281,18 @@ class EvolutionLoop:
             }
         if not evaluation_path.exists() or not child_integrity:
             _write_json(evaluation_path, evaluation)
+        stage_costs.setdefault("evaluation_seconds", 0.0)
+        stage_costs["total_search_seconds"] = sum(
+            float(stage_costs.get(key, 0.0))
+            for key in (
+                "parent_load_seconds", "profile_seconds", "generation_seconds", "sandbox_seconds",
+                "training_seconds", "verification_seconds", "evaluation_seconds", "retry_seconds",
+                "unattributed_seconds",
+            )
+        )
+        evaluation["search_cost_seconds"] = stage_costs["total_search_seconds"]
+        _write_json(evaluation_path, evaluation)
+        self._write_round_state(round_dir, {**round_state, "round_id": round_id, "parent_model_id": parent_candidate.id, "branch_id": branch_id or round_state.get("branch_id"), "stage_costs": stage_costs, "status": "in_progress"})
         child_candidate = self._existing_or_create_child(parent_candidate, compression.child_checkpoint, algorithm, evaluation)
         evaluation_offline = bool(evaluation.get("offline_simulation", False))
         parent_offline = bool(parent_candidate.state.provenance.get("offline_simulation", False))
@@ -239,10 +321,14 @@ class EvolutionLoop:
             "algorithm_id": algorithm.algorithm_id,
             "operator": sandbox_result.plan.operator,
             "operator_args": dict(sandbox_result.plan.args),
+            "algorithm_plan": sandbox_result.plan.to_dict(),
+            "design": design,
+            "design_fingerprint": design.get("fingerprint"),
             "feasible": feasible,
             "evaluation_offline": evaluation_offline,
             "offline_mismatch": offline_mismatch,
             "evaluation": evaluation,
+            "stage_costs": stage_costs,
             "promotion": dict(promotion),
             "pareto_front_before": self._load_pareto_front(),
             "search_policy": {"choice": search_choice, **self.search_policy.to_dict()},
@@ -259,14 +345,15 @@ class EvolutionLoop:
             decision_path=decision_path,
         )
         status = "accepted" if feasible else "rejected"
-        self._record_experience(round_id, parent_candidate, child_candidate, algorithm, evaluation, decision, status, decision_path)
+        self._record_experience(round_id, parent_candidate, child_candidate, algorithm, evaluation, decision, status, decision_path, design=design)
         self.algorithm_store.update(replace(algorithm, status=status, experiment_ids=(round_id,)))
         if feasible:
             self._update_pareto_front(child_candidate.id, evaluation)
-            self.model_store.set_active(child_candidate.id)
-        return EvolutionRound(round_id, parent_candidate.id, algorithm.algorithm_id, decision_status, child_candidate.id, decision, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "compression": str(compression_path), "evaluation": str(evaluation_path), "decision": str(decision_path)})
+            if parent_model_id is None:
+                self.model_store.set_active(child_candidate.id)
+        return EvolutionRound(round_id, parent_candidate.id, algorithm.algorithm_id, decision_status, child_candidate.id, decision, {"profile": str(profile_path), "algorithm": str(algorithm_path), "sandbox": str(sandbox_path), "design": str(design_path), "compression": str(compression_path), "evaluation": str(evaluation_path), "decision": str(decision_path)})
 
-    def _finish_failure(self, round_id: str, round_dir: Path, parent: ModelCandidate, algorithm: AlgorithmCandidate, search_choice: str, stage: str, failure_type: str, message: str, paths: Mapping[str, str], *, algorithm_persisted: bool = True) -> EvolutionRound:
+    def _finish_failure(self, round_id: str, round_dir: Path, parent: ModelCandidate, algorithm: AlgorithmCandidate, search_choice: str, stage: str, failure_type: str, message: str, paths: Mapping[str, str], *, algorithm_persisted: bool = True, design: Optional[Mapping[str, Any]] = None) -> EvolutionRound:
         self._update_search_policy(feasible=False, improved=False, failure_type=failure_type)
         decision = {
             "status": "failed",
@@ -277,6 +364,9 @@ class EvolutionLoop:
             "algorithm_id": algorithm.algorithm_id,
             "search_policy": {"choice": search_choice, **self.search_policy.to_dict()},
         }
+        if design:
+            decision["design"] = dict(design)
+            decision["design_fingerprint"] = design.get("fingerprint")
         decision_path = round_dir / "decision.json"
         _write_json(decision_path, decision)
         self._finalize_round_state(
@@ -288,7 +378,7 @@ class EvolutionLoop:
             failure_type=failure_type,
             decision_path=decision_path,
         )
-        self._record_experience(round_id, parent, None, algorithm, None, decision, "failed", decision_path)
+        self._record_experience(round_id, parent, None, algorithm, None, decision, "failed", decision_path, design=design)
         if algorithm_persisted:
             self.algorithm_store.update(replace(algorithm, status="failed", experiment_ids=(round_id,), failure_reasons=(failure_type,)))
         all_paths = dict(paths)
@@ -314,8 +404,36 @@ class EvolutionLoop:
         self.model_store.create(child)
         return child
 
-    def _record_experience(self, round_id: str, parent: ModelCandidate, child: Optional[ModelCandidate], algorithm: AlgorithmCandidate, evaluation: Optional[Mapping[str, Any]], decision: Mapping[str, Any], status: str, decision_path: Path) -> None:
+    def _record_experience(
+        self,
+        round_id: str,
+        parent: ModelCandidate,
+        child: Optional[ModelCandidate],
+        algorithm: AlgorithmCandidate,
+        evaluation: Optional[Mapping[str, Any]],
+        decision: Mapping[str, Any],
+        status: str,
+        decision_path: Path,
+        *,
+        design: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         source = decision_path.read_bytes()
+        training = {
+            "architecture": parent.state.architecture_name,
+            "algorithm_id": algorithm.algorithm_id,
+            "algorithm_parent_id": algorithm.parent_algorithm_id,
+            "hypothesis": algorithm.hypothesis,
+            "predicted_gain": dict(algorithm.metadata.get("predicted_gain") or {}),
+        }
+        if design:
+            training.update(
+                {
+                    "design_fingerprint": design.get("fingerprint"),
+                    "design_strategy": design.get("strategy"),
+                    "design_feedback": list(design.get("feedback") or []),
+                    "design": dict(design),
+                }
+            )
         record = ExperienceRecord(
             experience_id=round_id,
             source_uri=str(decision_path.resolve()),
@@ -326,7 +444,7 @@ class EvolutionLoop:
             child_model_id=child.id if child else None,
             operator=str(decision.get("operator")) if decision.get("operator") else None,
             operator_args=dict(decision.get("operator_args") or {}),
-            training={"architecture": parent.state.architecture_name, "algorithm_id": algorithm.algorithm_id, "algorithm_parent_id": algorithm.parent_algorithm_id, "hypothesis": algorithm.hypothesis, "predicted_gain": dict(algorithm.metadata.get("predicted_gain") or {})},
+            training=training,
             evaluation=dict(evaluation) if evaluation is not None else None,
             decision=dict(decision),
             reward=float(evaluation.get("search_score", evaluation.get("quality_score", 0.0))) if evaluation else None,
@@ -335,6 +453,75 @@ class EvolutionLoop:
             created_at="",
         )
         self.experience_store.append(record)
+        if design:
+            self._record_design_gene(round_id, parent, child, evaluation, decision, status, decision_path, design)
+
+    def _record_design_gene(
+        self,
+        round_id: str,
+        parent: ModelCandidate,
+        child: Optional[ModelCandidate],
+        evaluation: Optional[Mapping[str, Any]],
+        decision: Mapping[str, Any],
+        status: str,
+        decision_path: Path,
+        design: Mapping[str, Any],
+    ) -> None:
+        genes = self.skill_hub.genes
+        if genes is None:
+            return
+        gene_id = "G-" + str(round_id)
+        if any(item.gene_id == gene_id for item in genes.read()):
+            return
+        measured = dict(evaluation or {})
+        benefit = {
+            key: measured[key]
+            for key in ("quality_score", "search_score", "hardware_metrics", "quality_metrics")
+            if key in measured
+        }
+        promotion = decision.get("promotion")
+        reasons = list(promotion.get("reasons") or []) if isinstance(promotion, Mapping) else []
+        if not reasons and decision.get("failure_type"):
+            reasons.append(str(decision["failure_type"]))
+        first_reason = str(reasons[0]) if reasons else None
+        plan = dict(design.get("plan") or {})
+        gene = DesignGene(
+            gene_id=gene_id,
+            status=status,
+            state={
+                "architecture": parent.state.architecture_name,
+                "parent_model_id": parent.id,
+                "offline_simulation": bool(parent.state.provenance.get("offline_simulation", False)),
+            },
+            bottleneck={
+                "kind": design.get("bottleneck", "unknown"),
+                "evidence_refs": list(design.get("evidence_refs") or []),
+            },
+            intervention={
+                "operator": plan.get("operator"),
+                "steps": list((plan.get("args") or {}).get("steps") or []),
+                "strategy": design.get("strategy"),
+            },
+            controlled_conditions={
+                "search_choice": design.get("search_choice"),
+                "evaluation_status": measured.get("evaluation_status"),
+                "source_revision": measured.get("source_revision"),
+            },
+            benefit=benefit,
+            remaining_limitation={"reason": first_reason, "reasons": reasons},
+            risks_lessons=[str(item) for item in list(design.get("feedback") or []) + reasons],
+            evidence={
+                "architecture": parent.state.architecture_name,
+                "round_id": round_id,
+                "decision_path": str(decision_path),
+                "design_fingerprint": design.get("fingerprint"),
+                "parent_model_id": parent.id,
+                "child_model_id": child.id if child else None,
+            },
+            confidence="measured" if measured.get("valid") is True else "partial",
+            created_at="",
+        )
+        genes.append(gene)
 
     def _artifact_for_candidate(self, candidate: ModelCandidate) -> CheckpointArtifact:
         model = self.adapter.load_model(candidate.checkpoint_path)

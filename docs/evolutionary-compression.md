@@ -85,9 +85,36 @@ embedding 只编码一次，warmup 和 3 次 repeat 测量扩散 Transformer 与
 可以避免把未优化组件的 CPU 时间误归因给候选 Transformer；recipe digest 会随测量
 方法变化，旧缓存不会被错误复用。
 
-Peak memory 会针对 evaluator 配置的 CUDA device 重置并读取；不能用默认 CUDA
-device 的统计值代表实际执行卡。如果运行环境无法提供 CUDA memory telemetry，结果
-必须显式保留为 unavailable/0 并在报告中标注，不能解释成低显存占用。
+Peak memory 会针对 evaluator 配置的 `generation_device` 重置并读取；不能用默认
+CUDA device 的统计值代表实际执行卡。如果运行环境无法提供 CUDA memory telemetry，
+`peak_memory_gb_max` 和 `peak_memory_available` 必须分别写成 `null` 和 `false`，
+不能写零，更不能解释成低显存占用。每个 case 也保留实际 device 和可用性。
+
+### Evaluation Recipe：Wan 指标口径
+
+同一份 Recipe 必须固定 checkpoint revision、Wan generation config、evaluation
+manifest、prompt/seed、warmup、latency repeat、dtype、generation device、pipeline
+device 和 quality backend。当前 latency 是
+`denoising+vae_decode_with_case_cached_prompt_embeddings`，不包含固定文本编码器的
+重复编码；Recipe 会记录 `prompt_encoding_included=false` 和 `latency_samples_s`。
+
+指标含义固定如下：
+
+- `transformer_parameter_count` 和兼容字段 `parameter_count` 只数压缩目标
+  Transformer，`parameter_count_scope=transformer`；不能把 T5/VAE 参数混进压缩收益。
+- `transformer_model_size_gb` 只数 Transformer 目录；`pipeline_model_size_gb` 和兼容
+  字段 `model_size_gb` 数完整 Pipeline 的逻辑文件体积。
+- 体积按 `(device, inode)` 去重，因此 hardlink 和指向同一文件的 symlink 不会被重复
+  计数。Child 只改 Transformer 时，固定 T5/VAE 的共享体积不会被误报成压缩收益。
+- 峰值显存必须来自真实 `generation_device`，任何缺失、异常或不可用 telemetry 都是
+  `null`/unavailable。零不是有效的显存测量。
+
+后续晋升协议先检查 Child 完整性、独立真实评测、aggregate quality 至少为当前
+Parent 的 98%、已有可靠 semantic/temporal/motion 子指标不发生不可接受退化，以及
+可用硬件指标没有超过退化容忍度。通过这些硬约束后，latency 改善 5%、peak memory
+改善 5%、完整 Pipeline 体积改善 10% 三者任一达标即可进入 Pareto 非支配判断；门槛
+可在 evaluator 配置中分别调整。缺失指标只记为 unavailable，不贡献改善；若所有
+目标指标都缺失或都未达标，候选拒绝。这个协议只适用于新实验，不会重写历史决策。
 
 EvolutionLoop 也会复用没有 `decision.json` 的最早未完成 round；已写入的
 `profile.json`、`algorithm.json`、`sandbox.json` 和 `compression.json` 会先校验并
@@ -120,23 +147,89 @@ HARNESS4H3_SOURCE_REVISION=$(git rev-parse HEAD) \\
 改善低于 10%，下一轮探索会自动收紧该比例，形成可审计的算法设计反馈，而不是
 只重新选择一个 Block。
 
+## RSI 算法设计记录
+
+当前探索 Agent 不只返回一个固定操作。若 profile 同时提供层级敏感度和计算开销，
+它可以生成最多 3 步的受限 `compose` 计划，例如先移除低敏感度的高开销 Block，再
+对另一个瓶颈 Block 做 FFN 通道裁剪。计划中的每一步仍只能调用注册的
+`prune_blocks` 或 `prune_ffn_channels`，不能嵌套 `compose`，也不能指定路径、设备、
+命令或 evaluator。
+
+通过 Sandbox 的计划会在 `rounds/Rxxxx/design.json` 写入稳定的算法 fingerprint、
+诊断出的瓶颈、使用的 profile 字段、历史经验 ID、失败反馈、算法假设和最终计划。
+组合计划的每一步分别写入 `checkpoint/step-00/`、`step-01/` 等目录；只有最后一步
+通过完整性和独立评测，整个 Child 才能进入晋升判断。
+
+真实 Diffusers Wan 的可重载 checkpoint 要求剩余 Transformer Block 的 FFN 宽度保持
+对齐。组合算法先删除 Block 后，Wan operator 会依据当前 checkpoint 的 Block 数量把
+FFN 步骤规范化到所有剩余 Block；该规范化后的参数会写入结构化压缩结果，Fake adapter
+则保留其可局部裁剪的测试语义。
+
+完成评测后，系统将实际质量/硬件收益和拒绝原因写入 `DesignGeneStore`。预测收益只
+保留在算法候选 metadata 中，不能写入 DesignGene 的实测 benefit。质量失败会让后续
+确定性 Agent 退回保守单 Block 计划；效率或体积不足则允许继续探索组合策略。因而
+CPU fake 测试可以验证“反馈改变算法结构”和 artifact 可重放，但不能证明 Wan2.1
+真实视频质量或硬件收益。
+
+## 四组协议预检
+
+如果四组 YAML 尚未建立，可以从一份已固定代码版本的基线配置生成它们。生成器只改
+控制变量和独立输出目录，并把相对模型/评价路径固定为绝对路径：
+
+```bash
+.venv/bin/python tools/build_evolution_protocol_configs.py \
+  --base-config configs/evolutionary-compression.wan-coding-formal-v13.yaml \
+  --output-dir configs/generated-rsi \
+  --run-root /data/models/harness4h3-evolutionary-compression-20261014 \
+  --source-revision a9c1ebd
+```
+
+生成器要求基线使用真实 Wan evaluator 和非 deterministic 的 Coding Agent provider；
+如果模型资产只在远程主机上，须在远程主机执行，或显式使用
+`--allow-missing-assets` 只生成待补齐的配置，不能把它当作实验结果。
+
+正式启动前，先用协议预检工具把四份配置锁成同一组可比条件。工具不会加载 Wan
+模型或执行 GPU 推理；它会检查 checkpoint、Wan 配置、评价 manifest、dtype、设备、
+seed、`8 × 2 = 16` 个评价单元、三次延迟测量和三轮预算，并要求四个控制臂分别命名为
+`fixed`、`coding-agent`、`agent-memory`、`rsi`：
+
+```bash
+.venv/bin/python tools/validate_evolution_protocol.py \
+  --run fixed=configs/rsi-fixed.yaml \
+  --run coding-agent=configs/rsi-coding.yaml \
+  --run agent-memory=configs/rsi-memory.yaml \
+  --run rsi=configs/rsi-full.yaml \
+  --rounds 3 --expected-cases 16 --latency-repeats 3 \
+  --source-revision "$(git rev-parse HEAD)" \
+  --write-manifests --output var/rsi/protocol.json --json
+```
+
+成功后每个 `output_root/run-manifest.json` 都会保存协议指纹、臂名称、代码 revision、
+评价资产摘要、预算和控制变量。远程资产在本机不可见时，预检必须在实际运行主机上执行；
+`--allow-missing-assets` 只适合生成待补齐的远程预检记录，不能把缺失资产当成已经完成的
+实验。四组清单缺失、指纹不一致或臂名称不完整时，汇总器会将结果标为不可直接比较。
+
 ## 对比实验协议
 
 要验证“算法演化”本身的收益，使用同一 checkpoint、manifest、seed、预算
 和输出指标，分别建立四个独立 `output_root`：
 
-1. `fixed-algorithm`：deterministic agent，`exploit_ratio: 1.0`，关闭策略更新；
+1. `fixed`：deterministic agent，`exploit_ratio: 1.0`，关闭策略更新；
 2. `coding-agent`：只接入结构化 provider，不传入历史经验；
 3. `agent-memory`：接入 SkillHub/ExperienceStore，但固定搜索策略；
-4. `algorithm-evolution`：当前默认路径，算法 provider、经验检索和
+4. `rsi`：当前默认路径，算法 provider、经验检索和
    exploit/explore 策略都启用。
 
 对应配置开关是 `memory_enabled` 和 `adapt_search_policy`；前三个 baseline
 只需在各自 YAML 中关闭相应能力，且必须使用独立的 `output_root`。
 
-每个 run 至少记录：最终 `quality_score`、`quality_delta`、压缩后参数/模型
+每个 run 至少记录：当前 Active 的 `quality_score`、`quality_delta`、压缩后参数/模型
 大小、平均生成耗时、有效实验数、失败实验数、总 GPU wall time，以及在新
-prompt/新 seed manifest 上的迁移结果。`rounds/*/decision.json`、
+prompt/新 seed manifest 上的迁移结果。汇总器还会分别记录
+`active_model_id`、`last_candidate_model_id`、`historical_best_candidate_model_id`、
+`rejected_model_ids` 和 `final_source`。`final` 只能来自 Active 的真实测量，或来自
+明确以 Active 为 parent 的 baseline 测量；没有这些证据时字段保持 `null`，不能用
+最后一个候选补齐。`rounds/*/decision.json`、
 `experiences.jsonl` 和 `search-policy.json` 是对比实验的机器可读输入；不要
 把不同 manifest 或不同质量阈值的结果直接横向比较。
 
@@ -150,14 +243,17 @@ prompt/新 seed manifest 上的迁移结果。`rounds/*/decision.json`、
 ```bash
 .venv/bin/python tools/compare_evolution_runs.py --json \
   --expected-cases 16 \
-  --run fixed-algorithm=var/rsi/fixed-algorithm \
+  --run fixed=var/rsi/fixed \
   --run coding-agent=var/rsi/coding-agent \
   --run agent-memory=var/rsi/agent-memory \
-  --run algorithm-evolution=var/rsi/algorithm-evolution
+  --run rsi=var/rsi/rsi
 ```
 
-汇总器不会把缺失指标填成零，也不会把被拒绝候选当作 active model；不同
-`evaluator_recipe_sha256` 或 case 数量不一致时，结果会标记为不可直接比较。
+汇总器不会把缺失指标填成零，也不会把被拒绝候选当作 active model；历史最佳候选
+和最后候选只用于候选实验记录。Active 指针读取 `models/active.json` 的 `id` 字段；
+不同 `evaluator_recipe_sha256`、代码 revision 或 case 数量不一致时，结果会标记为
+不可直接比较。它还会检查四组 `run-manifest.json` 的协议指纹、唯一臂名称和预算；
+当前 Active 没有可靠指标时，汇总器会明确报告数据缺失。
 
 当前仓库先完成 Wan2.1-1.3B 的真实闭环；H3 迁移只依赖同一组
 `WanModelAdapter`/`CompressionOperator`/`EvaluationFn` 边界，待 Wan 的
