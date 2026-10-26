@@ -96,7 +96,11 @@ class AlgorithmAgent:
             if channel_block_id is not None:
                 block_excluded.add(channel_block_id)
             block_id = self._least_sensitive_block(profile, excluded=block_excluded)
-            generation_choice = "exploit" if quality_feedback else search_choice
+            # Once every block-level choice has been tried, move to a distinct
+            # FFN-width family instead of falling back to an already-used block.
+            generation_choice = "exploit" if quality_feedback and block_id is not None else ("explore" if block_id is None else search_choice)
+            if block_id is None and generation_choice == "explore":
+                retention_ratio = self._next_untried_retention_ratio(history, retention_ratio)
             source = _seed_source(
                 block_id,
                 algorithm_id,
@@ -169,7 +173,7 @@ class AlgorithmAgent:
         )
 
     @staticmethod
-    def _least_sensitive_block(profile: Mapping[str, Any], excluded: Optional[set[str]] = None) -> str:
+    def _least_sensitive_block(profile: Mapping[str, Any], excluded: Optional[set[str]] = None) -> Optional[str]:
         records = profile.get("block_sensitivity", [])
         excluded = excluded or set()
         layers = {
@@ -193,10 +197,18 @@ class AlgorithmAgent:
         for item in layers:
             if isinstance(item, Mapping) and isinstance(item.get("block_id"), str) and item.get("block_id") not in excluded:
                 return str(item["block_id"])
-        for item in records:
-            if isinstance(item, Mapping) and isinstance(item.get("block_id"), str):
-                return str(item["block_id"])
-        return "block.0"
+        return None
+
+    def _next_untried_retention_ratio(self, history: Sequence[Mapping[str, Any]], initial: float) -> float:
+        tried = 0
+        for item in history:
+            decision = item.get("decision") if isinstance(item, Mapping) else None
+            if isinstance(decision, Mapping) and decision.get("operator") == "prune_ffn_channels":
+                tried += 1
+        ratio = float(initial)
+        for _ in range(tried + 1):
+            ratio = max(0.10, ratio * 0.75)
+        return ratio
 
     @staticmethod
     def _channel_target_block(profile: Mapping[str, Any], excluded: set[str]) -> Optional[str]:
