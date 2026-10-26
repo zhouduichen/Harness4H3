@@ -1,0 +1,19 @@
+schema_version: 1
+editable_components:
+  context: configs/rsi-harness/seed/context.py
+  retrieval: configs/rsi-harness/seed/retrieval.py
+  strategy: configs/rsi-harness/seed/strategy.py
+component_entrypoints:
+  context: build_context
+  retrieval: retrieve
+  strategy: choose_experiment
+limits:
+  component_timeout_seconds: 5
+  component_output_bytes: 65536
+  research_jobs: 2
+forbidden_candidate_changes:
+  - evaluator
+  - budget
+  - dataset_split
+  - task_service
+  - acceptance_policy
