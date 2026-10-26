@@ -97,6 +97,151 @@ class SandboxResult:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ProgramResult:
+    """Raw JSON result from one isolated Algorithm Program invocation."""
+
+    status: str
+    source_sha256: str
+    value: Optional[Any] = None
+    failure_type: Optional[str] = None
+    message: str = ""
+    stdout_path: Optional[str] = None
+    stderr_path: Optional[str] = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+
+PROGRAM_RUNNER_SOURCE = r'''
+import json
+import math
+import sys
+import traceback
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows has no resource module
+    resource = None
+
+
+_ALGORITHM_PHASE = False
+_ALLOWED_AUDIT_IMPORTS = {"math", "statistics", "json", "collections"}
+_BLOCKED_AUDIT_PREFIXES = (
+    "os.",
+    "pty.",
+    "socket.",
+    "subprocess.",
+    "ctypes.",
+    "shutil.",
+)
+
+
+def _algorithm_audit(event, args):
+    """Fail closed for operations that the source policy cannot express.
+
+    The source runs with a reduced builtins table, but Python object graphs can
+    otherwise recover the interpreter's real builtins.  Audit hooks provide a
+    second, runtime boundary for file, network, process, and dynamic-code
+    operations.  Trusted runner I/O is performed outside ``_ALGORITHM_PHASE``.
+    """
+
+    if not _ALGORITHM_PHASE:
+        return
+    if event == "import":
+        name = str(args[0]) if args else ""
+        if name.split(".", 1)[0] not in _ALLOWED_AUDIT_IMPORTS:
+            raise PermissionError("sandbox import denied: " + name)
+        return
+    if event in {"open", "exec", "compile", "sys.setprofile", "sys.settrace", "sys.addaudithook"}:
+        raise PermissionError("sandbox audit denied: " + event)
+    if event.startswith(_BLOCKED_AUDIT_PREFIXES) or event in {
+        "os.system",
+        "os.exec",
+        "os.fork",
+        "os.posix_spawn",
+        "os.spawn",
+        "os.remove",
+        "os.rename",
+        "os.unlink",
+        "os.mkdir",
+        "os.rmdir",
+        "os.chdir",
+        "os.chmod",
+        "os.chown",
+        "os.link",
+        "os.symlink",
+    }:
+        raise PermissionError("sandbox audit denied: " + event)
+
+try:
+    if resource is None:
+        raise OSError("resource limits unavailable")
+    _cpu_seconds = max(1, int(math.ceil(float(sys.argv[4]))))
+    resource.setrlimit(resource.RLIMIT_CPU, (_cpu_seconds, _cpu_seconds + 1))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))
+    resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
+    if hasattr(resource, "RLIMIT_CORE"):
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+except (AttributeError, OSError, ValueError) as exc:
+    # A process without enforced bounds is not a safe execution environment.
+    # Fail before loading untrusted algorithm code instead of silently
+    # degrading to AST-only validation.
+    raise RuntimeError("sandbox resource limits unavailable") from exc
+
+# Some POSIX platforms expose RLIMIT_AS but reject lowering it from an
+# unlimited process address space.  CPU, file-size, descriptor, core-dump,
+# timeout, and audit boundaries remain mandatory; address-space enforcement is
+# an optional stronger bound when the host kernel supports it.
+if hasattr(resource, "RLIMIT_AS"):
+    try:
+        # The algorithm receives summaries only; it has no reason to allocate
+        # hundreds of megabytes while choosing a plan.
+        resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+    except (AttributeError, OSError, ValueError):
+        pass
+
+ALLOWED = {
+    "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict,
+    "enumerate": enumerate, "filter": filter, "float": float, "int": int,
+    "isinstance": isinstance, "len": len, "list": list, "max": max,
+    "min": min, "next": next, "range": range, "round": round, "set": set, "sorted": sorted,
+    "str": str, "sum": sum, "tuple": tuple, "zip": zip,
+}
+
+def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if level or name.split('.', 1)[0] not in {"math", "statistics", "json", "collections"}:
+        raise ImportError("sandbox import denied: " + name)
+    return __import__(name, globals, locals, fromlist, level)
+
+ALLOWED["__import__"] = safe_import
+
+source_path, payload_path, output_path, _timeout_s, entrypoint = sys.argv[1:6]
+source = open(source_path, "r", encoding="utf-8").read()
+payload = json.loads(open(payload_path, "r", encoding="utf-8").read())
+namespace = {"__name__": "__algorithm__", "__builtins__": ALLOWED}
+sys.addaudithook(_algorithm_audit)
+# Importable modules must be present in sys.modules before algorithm code runs:
+# the runtime audit correctly denies file access, but Python otherwise needs to
+# open stdlib source files for lazy imports (for example, `statistics`).
+import statistics
+import collections
+try:
+    _ALGORITHM_PHASE = False
+    compiled = compile(source, source_path, "exec")
+    exec(compiled, namespace, namespace)
+    if entrypoint not in namespace or not callable(namespace[entrypoint]):
+        raise ValueError("missing_entrypoint: " + entrypoint)
+    _ALGORITHM_PHASE = True
+    result = namespace[entrypoint](**payload)
+    _ALGORITHM_PHASE = False
+    json.dump(result, open(output_path, "w", encoding="utf-8"), sort_keys=True)
+except Exception as exc:
+    _ALGORITHM_PHASE = False
+    json.dump({"error": type(exc).__name__ + ": " + str(exc)}, open(output_path, "w", encoding="utf-8"), sort_keys=True)
+    traceback.print_exc()
+    raise
+'''
+
+
 RUNNER_SOURCE = r'''
 import json
 import math
@@ -230,6 +375,89 @@ class AlgorithmSandbox:
         self.timeout_s = float(timeout_s)
         self.max_output_bytes = int(max_output_bytes)
         self.executor = LocalProcessExecutor(timeout_s=self.timeout_s)
+
+    def run_program(
+        self,
+        source: str,
+        *,
+        entrypoint: str,
+        payload: Mapping[str, Any],
+    ) -> ProgramResult:
+        try:
+            validated = validate_source(source, required_entrypoint=entrypoint)
+        except SourcePolicyError as exc:
+            return ProgramResult("failed", "", failure_type="sandbox_policy", message=str(exc), metadata={"entrypoint": str(entrypoint)})
+        run_root = Path(tempfile.mkdtemp(prefix="algorithm-", dir=str(self.root)))
+        source_path = run_root / "algorithm.py"
+        payload_path = run_root / "payload.json"
+        output_path = run_root / "output.json"
+        source_path.write_text(validated.source, encoding="utf-8")
+        try:
+            payload_path.write_text(json.dumps(dict(payload), sort_keys=True), encoding="utf-8")
+        except (TypeError, ValueError) as exc:
+            return ProgramResult("failed", validated.sha256, failure_type="algorithm_payload_invalid", message=str(exc), metadata={"entrypoint": str(entrypoint)})
+        runner_path = run_root / "runner.py"
+        runner_path.write_text(PROGRAM_RUNNER_SOURCE, encoding="utf-8")
+        result = self.executor.execute(
+            (
+                sys.executable,
+                "-I",
+                str(runner_path),
+                str(source_path),
+                str(payload_path),
+                str(output_path),
+                str(self.timeout_s),
+                str(entrypoint),
+            ),
+            run_root,
+        )
+        if result.status != "success":
+            return ProgramResult(
+                "failed",
+                validated.sha256,
+                failure_type=result.failure_type or "sandbox_process",
+                message=result.message,
+                stdout_path=result.stdout_path,
+                stderr_path=result.stderr_path,
+                metadata={"entrypoint": str(entrypoint), "process_isolation": "python-isolated-process"},
+            )
+        if not output_path.exists() or output_path.stat().st_size > self.max_output_bytes:
+            return ProgramResult(
+                "failed",
+                validated.sha256,
+                failure_type="algorithm_output_invalid",
+                message="output is missing or exceeds size limit",
+                stdout_path=result.stdout_path,
+                stderr_path=result.stderr_path,
+                metadata={"entrypoint": str(entrypoint)},
+            )
+        try:
+            raw = json.loads(output_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            return ProgramResult(
+                "failed",
+                validated.sha256,
+                failure_type="algorithm_output_invalid",
+                message=str(exc),
+                stdout_path=result.stdout_path,
+                stderr_path=result.stderr_path,
+                metadata={"entrypoint": str(entrypoint)},
+            )
+        return ProgramResult(
+            "success",
+            validated.sha256,
+            value=raw,
+            stdout_path=result.stdout_path,
+            stderr_path=result.stderr_path,
+            metadata={
+                "entrypoint": str(entrypoint),
+                "offline_simulation": True,
+                "process_isolation": "python-isolated-process",
+                "runtime_audit": "deny-file-network-process-dynamic-code",
+                "resource_limits": {"timeout_s": self.timeout_s, "cpu_s": max(1, int(self.timeout_s)), "address_space_bytes": 512 * 1024 * 1024, "file_size_bytes": 1024 * 1024, "open_files": 32},
+                "network_policy": "runtime-audit-deny; host network namespace not assumed",
+            },
+        )
 
     def run(self, source: str, profile: Mapping[str, Any], history: Sequence[Mapping[str, Any]]) -> SandboxResult:
         try:
